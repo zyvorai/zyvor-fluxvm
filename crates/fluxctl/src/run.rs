@@ -534,10 +534,32 @@ fn progress_note(what: &str, elapsed: Duration, last: &mut u64, every: u64) -> O
 /// is stuck (nearly always cloud-init's apt reaching a mirror: no internet, or a very slow link) looks exactly like this.
 pub(crate) fn no_address_help(vm: &str) -> String {
     format!(
-        "the VM did not report an address within 180s. Its first boot may be stuck, usually on cloud-init installing packages \
+        "the VM did not report an address within {}s. Its first boot may be stuck, usually on cloud-init installing packages \
          with no internet or a slow link; `fluxctl serial {vm}` shows the guest's console (Ctrl-] detaches). \
-         Check that this Mac is online, then run the command again: it picks the VM up where it was."
+         Check that this machine is online, then run the command again: it picks the VM up where it was \
+         (or set FLUXVM_WAIT_SECS to wait longer).",
+        wait_budget().as_secs()
     )
+}
+
+/// How long to wait for a new guest's address and then its ssh. A Mac guest is up in about a minute. A Linux (QEMU) guest
+/// only starts answering ssh once cloud-init has installed its packages, which takes minutes and far longer on a busy host,
+/// so it gets 30 minutes. `FLUXVM_WAIT_SECS` overrides both.
+pub(crate) fn wait_budget() -> Duration {
+    wait_budget_for(
+        std::env::var("FLUXVM_WAIT_SECS").ok().as_deref(),
+        crate::vm_net::Backend::host(),
+    )
+}
+
+fn wait_budget_for(env: Option<&str>, backend: crate::vm_net::Backend) -> Duration {
+    if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()).filter(|s| *s > 0) {
+        return Duration::from_secs(secs);
+    }
+    match backend {
+        crate::vm_net::Backend::Vz => Duration::from_secs(180),
+        crate::vm_net::Backend::Qemu => Duration::from_secs(1800),
+    }
 }
 
 /// What cloud-init says on a guest that does answer ssh: its status and the end of its output log, or `None` when it
@@ -585,7 +607,7 @@ pub(crate) async fn wait_ssh<A: VmApi>(
     identity: &Option<PathBuf>,
 ) -> Result<String> {
     let started = Instant::now();
-    let deadline = started + Duration::from_secs(180);
+    let deadline = started + wait_budget();
     let mut last = 0;
     let ip = loop {
         if let Some(ip) = api.guest_ip(id).await? {
@@ -617,7 +639,11 @@ pub(crate) async fn wait_ssh<A: VmApi>(
             return Ok(ip);
         }
         if Instant::now() > deadline {
-            bail!("ssh did not come up within 180s");
+            bail!(
+                "ssh did not come up within {}s: the guest may still be installing packages (`fluxctl serial` shows its console); \
+                 run the command again to keep waiting, or set FLUXVM_WAIT_SECS",
+                wait_budget().as_secs()
+            );
         }
         if let Some(n) = progress_note("waiting for ssh", started.elapsed(), &mut last, 15) {
             eprintln!("{n}");
@@ -792,6 +818,18 @@ pub async fn run<A: VmApi>(api: &A, o: RunOptions) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_wait_budget_follows_the_backend_and_the_override() {
+        use crate::vm_net::Backend;
+        assert_eq!(wait_budget_for(None, Backend::Vz), Duration::from_secs(180));
+        assert_eq!(wait_budget_for(None, Backend::Qemu), Duration::from_secs(1800));
+        assert_eq!(wait_budget_for(Some("90"), Backend::Qemu), Duration::from_secs(90));
+        assert_eq!(wait_budget_for(Some(" 600 "), Backend::Vz), Duration::from_secs(600));
+        // Nonsense or zero falls back to the backend default.
+        assert_eq!(wait_budget_for(Some("soon"), Backend::Qemu), Duration::from_secs(1800));
+        assert_eq!(wait_budget_for(Some("0"), Backend::Vz), Duration::from_secs(180));
+    }
+
     use super::*;
 
     #[test]
