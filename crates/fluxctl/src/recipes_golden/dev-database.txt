@@ -1,0 +1,16 @@
+Dev database
+
+Steps
+  1. start postgres in the local cluster
+       fluxctl kube add postgres
+
+Open it      postgresql://postgres:dev@127.0.0.1:5432/postgres
+Credentials
+  url: postgresql://postgres:dev@127.0.0.1:5432/postgres
+  psql: psql postgresql://postgres:dev@127.0.0.1:5432/postgres
+Backup       daily at 03:00
+             fluxctl kube db-backup postgres "$HOME/db-backups/postgres-$(date +%F).sql"
+Uninstall
+  fluxctl kube remove postgres --delete-data
+Note         The password is the development default shown in the connection string; the port is open on 127.0.0.1 only.
+Note         Needs the local cluster: `fluxctl kube up` once.

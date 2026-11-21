@@ -35,6 +35,11 @@ pub enum ClusterCommand {
     /// How the cluster is doing, in plain English: a green, yellow or red light for each machine and for the whole
     /// cluster, how much room is left, the last backup, and the next best thing to do. Read-only; works with the daemon down.
     Status(crate::cluster_cmd::StatusArgs),
+    /// Add machines with a short code instead of a URL and a token, and see the cluster in one document:
+    /// `cluster pair` (on the new machine), `cluster pending` / `approve` / `deny` (on the server), `cluster report`.
+    /// See docs/cluster-pairing.md and docs/cluster-passport.md.
+    #[command(flatten)]
+    Pairing(crate::cluster_pair::ClusterCommand),
     /// Make this machine the cluster server: run the fleet central as a service, make a short-lived join token and print
     /// the one command that adds a machine. Installs the prerequisites (qemu, cloud-image-utils, kvm group) first, after
     /// printing the list. Linux (systemd or OpenRC) and macOS.
@@ -818,6 +823,7 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
     match cmd {
         // Handled in main, which has the loaded config `cluster status` reads.
         ClusterCommand::Status(_) => unreachable!("cluster status is dispatched before cluster::run"),
+        ClusterCommand::Pairing(c) => crate::cluster_pair::run(c).await,
         ClusterCommand::Init(a) => {
             #[cfg(target_os = "linux")]
             {

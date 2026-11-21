@@ -23,6 +23,8 @@ mod ha_rt;
 mod metrics;
 #[path = "central_notify.rs"]
 mod notify;
+#[path = "central_pair.rs"]
+mod pair;
 #[path = "central_placement.rs"]
 mod placement;
 #[path = "central_warmpool.rs"]
@@ -43,6 +45,7 @@ mod tunnel;
 mod vols;
 
 pub use enroll::{NodeAuth, set_node_auth};
+pub use pair::set_pairing;
 pub use ha_rt::HaHandle;
 pub use metrics::{
     DEFAULT_INTERVAL as DEFAULT_METRICS_INTERVAL, MetricsSettings, configure as configure_metrics,
@@ -419,6 +422,10 @@ async fn auth_middleware(State(fleet): State<Fleet>, mut req: Request, next: Nex
     // A screen ticket (minted by an authenticated request, single use, 30 s) stands in for the bearer token on a WebSocket.
     if signup::PUBLIC_PATHS.contains(&path)
         || path == "/fleet/enroll"
+        // Pairing: a machine that is not enrolled yet asks to join and collects what a person approved; the second is
+        // signed by the machine's own key. Both 404 unless central runs with --pairing.
+        || (*req.method() == axum::http::Method::POST
+            && matches!(path, "/fleet/pair/request" | "/fleet/pair/claim"))
         || (path.starts_with("/fleet/ws/") && *req.method() == axum::http::Method::GET)
     {
         return next.run(req).await;
@@ -940,6 +947,16 @@ pub fn router_with_flush(
             "/fleet/enroll",
             post(enroll::enroll).layer(axum::extract::DefaultBodyLimit::max(4096)),
         )
+        .route(
+            "/fleet/pair/request",
+            post(pair::request).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/fleet/pair/claim",
+            post(pair::claim).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route("/fleet/pair/pending", get(pair::pending))
+        .route("/fleet/pair/{key}/{action}", post(pair::decide))
         .route("/fleet/enroll/renew", post(enroll::renew))
         .route(
             "/fleet/enroll/tokens",

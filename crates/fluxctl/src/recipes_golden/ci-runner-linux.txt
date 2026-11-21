@@ -1,0 +1,17 @@
+CI runner (GitHub Actions)
+
+Steps
+  1. write the runner's settings (0600)
+       write /home/demo/.config/fluxvm/recipes/ci-runner/runner.env (mode 0600)
+  2. start the runner container
+       docker run -d --name fluxvm-ci-runner --restart unless-stopped --env-file /home/demo/.config/fluxvm/recipes/ci-runner/runner.env myoung34/github-runner:latest
+
+Open it      https://github.com/acme/app/settings/actions/runners
+Credentials
+  none
+Backup       nothing to back up: runners are disposable
+             none
+Uninstall
+  docker rm -f fluxvm-ci-runner
+Note         Workflow: `runs-on: [self-hosted, linux, fluxvm]`. The image is the community `myoung34/github-runner`; review it before trusting it with a private repository.
+Note         Save a GitHub token that may create runners in /home/demo/.config/fluxvm/recipes/ci-runner/github.token (mode 0600). `recipe run` stops if it is missing or readable by others; it is never passed on a command line.

@@ -17,7 +17,7 @@ export const navFor = (role: Role): NavGroup[] => [
       { to: '/tunnels', label: 'Tunnels', desc: 'Reach a VM port through central' },
     ],
   },
-  ...(role === 'operator' ? [{ label: 'Operate', items: [{ to: '/images', label: 'Images', desc: 'The catalog tenants launch from' }, { to: '/enrollment', label: 'Enrollment', desc: 'Join tokens and enrolled hosts' }, { to: '/operations', label: 'Operations', desc: 'Leader, reconcile, rebalance, policy' }] }] : []),
+  ...(role === 'operator' ? [{ label: 'Operate', items: [{ to: '/images', label: 'Images', desc: 'The catalog tenants launch from' }, { to: '/pairing', label: 'Machines asking to join', desc: 'Approve a machine by its code' }, { to: '/enrollment', label: 'Enrollment', desc: 'Join tokens and enrolled hosts' }, { to: '/recipes', label: 'Recipes', desc: 'Dev database, website, CI runner, registry' }, { to: '/operations', label: 'Operations', desc: 'Leader, reconcile, rebalance, policy' }] }] : []),
   {
     label: 'Account',
     items: [

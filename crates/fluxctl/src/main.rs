@@ -119,7 +119,10 @@ mod mac_trust;
 mod mcp;
 mod mcp_install;
 mod netobs;
+mod cluster_pair;
+mod cluster_report;
 mod node_agent;
+mod recipes;
 mod output;
 mod remote;
 mod run;
@@ -1020,6 +1023,12 @@ enum Command {
     NodeAgent {
         #[command(subcommand)]
         command: node_agent::NodeAgentCommand,
+    },
+    /// Ready-made things to run: a dev database, a website, a CI runner, a private registry, monitoring. Each prints
+    /// where to open it, where its credentials are, a backup schedule and how to uninstall. See docs/recipes.md.
+    Recipe {
+        #[command(subcommand)]
+        command: recipes::RecipeCommand,
     },
     /// Several Macs as one fleet over SSH: `up user@host...` installs FluxVM (pinned, checksum-verified), starts the daemon,
     /// enrolls the node and optionally prepares k3s; plus `status`, `exec`, `upgrade`, `remove`, `doctor`, and `apply` for an
@@ -6218,6 +6227,12 @@ async fn main() -> Result<()> {
         };
         return cluster::run(command).await;
     }
+    if let Command::Recipe { .. } = &cli.command {
+        let Command::Recipe { command } = cli.command else {
+            unreachable!()
+        };
+        return tokio::task::block_in_place(|| recipes::run(command));
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -6571,6 +6586,7 @@ async fn main() -> Result<()> {
         | Command::ImportCompose { .. }
         | Command::Service { .. }
         | Command::NodeAgent { .. }
+        | Command::Recipe { .. }
         | Command::MacFleet { .. }
         | Command::Cluster { .. }
         | Command::Dashboard { .. }

@@ -19,6 +19,8 @@ pub mod login_session;
 pub mod mdev;
 pub mod metrics;
 pub mod model;
+pub mod mdns;
+pub mod pairing;
 pub mod peer_alias;
 pub mod policy;
 pub mod pressure_admission;

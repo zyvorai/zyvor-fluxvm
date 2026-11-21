@@ -21,6 +21,8 @@ import { VolumesPage } from './pages/Volumes';
 import { TunnelsPage } from './pages/Tunnels';
 import { PoolsPage } from './pages/Pools';
 import { EnrollmentPage } from './pages/Enrollment';
+import { PairingPage } from './pages/Pairing';
+import { RecipesPage } from './pages/Recipes';
 import { OperationsPage } from './pages/Operations';
 import { ImagesPage } from './pages/Images';
 import { MembersPage } from './pages/Members';
@@ -31,7 +33,7 @@ export interface Ctx { role: Role; notify: Notify }
 // Central refuses changes made with a cookie session unless this header is present.
 setDefaultHeaders({ 'X-FluxVM-Console': '1' });
 
-const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/hosts': <Cpu size={16} />, '/vms': <Server size={16} />, '/networks': <Network size={16} />, '/volumes': <HardDrive size={16} />, '/pools': <Flame size={16} />, '/tunnels': <Cable size={16} />, '/images': <Layers size={16} />, '/members': <UserRound size={16} />, '/enrollment': <ShieldCheck size={16} />, '/operations': <SlidersHorizontal size={16} />, '/tenants': <Users size={16} />, '/keys': <KeyRound size={16} />, '/billing': <CreditCard size={16} />, '/activity': <Activity size={16} /> };
+const icons: Record<string, ReactNode> = { '/': <LayoutDashboard size={16} />, '/hosts': <Cpu size={16} />, '/vms': <Server size={16} />, '/networks': <Network size={16} />, '/volumes': <HardDrive size={16} />, '/pools': <Flame size={16} />, '/tunnels': <Cable size={16} />, '/images': <Layers size={16} />, '/members': <UserRound size={16} />, '/enrollment': <ShieldCheck size={16} />, '/pairing': <ShieldCheck size={16} />, '/recipes': <Layers size={16} />, '/operations': <SlidersHorizontal size={16} />, '/tenants': <Users size={16} />, '/keys': <KeyRound size={16} />, '/billing': <CreditCard size={16} />, '/activity': <Activity size={16} /> };
 
 /** `/fleet/tenants/me` answers 200 for a tenant and 400 ("not a tenant") for the operator. */
 async function detectRole(): Promise<Role> {
@@ -111,6 +113,8 @@ export function App() {
     route.path === '/tunnels' ? <TunnelsPage {...ctx} /> :
     route.path === '/images' && role === 'operator' ? <ImagesPage {...ctx} /> :
     route.path === '/enrollment' && role === 'operator' ? <EnrollmentPage {...ctx} /> :
+    route.path === '/pairing' && role === 'operator' ? <PairingPage {...ctx} /> :
+    route.path === '/recipes' && role === 'operator' ? <RecipesPage {...ctx} /> :
     route.path === '/operations' && role === 'operator' ? <OperationsPage {...ctx} /> :
     route.path === '/tenants' && role === 'operator' ? <TenantsPage {...ctx} /> :
     route.path === '/members' && role === 'tenant' ? <MembersPage {...ctx} /> :
