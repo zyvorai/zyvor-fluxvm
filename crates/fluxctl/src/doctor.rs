@@ -151,6 +151,34 @@ pub fn check_daemon(
 }
 
 /// `present` pairs a binary name with whether it was found.
+/// The fix for missing required programs: the packages for the VM tools, otherwise the FluxVM package itself.
+pub fn binaries_fix(missing: &[&str]) -> String {
+    let vm_tools = ["qemu-system-x86_64", "qemu-system-aarch64", "qemu-img", "cloud-localds", "ip"];
+    if missing.iter().any(|m| vm_tools.contains(m)) {
+        let mut apt: Vec<&str> = vec![];
+        let mut dnf: Vec<&str> = vec![];
+        for m in missing {
+            let (a, d) = match *m {
+                "qemu-system-x86_64" => ("qemu-system-x86", "qemu-kvm"),
+                "qemu-system-aarch64" => ("qemu-system-arm qemu-efi-aarch64", "qemu-kvm"),
+                "qemu-img" => ("qemu-utils", "qemu-img"),
+                "cloud-localds" => ("cloud-image-utils", "cloud-utils"),
+                "ip" => ("iproute2", "iproute"),
+                _ => continue,
+            };
+            apt.push(a);
+            dnf.push(d);
+        }
+        dnf.dedup();
+        return format!(
+            "install them: sudo apt-get install {} (Fedora/RHEL: sudo dnf install {}), or let the installer do it, additive only: curl -sfL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --server --yes",
+            apt.join(" "),
+            dnf.join(" ")
+        );
+    }
+    "install the package (brew install zyvorai/tap/fluxvm, or the install.sh one-liner) and open a new shell".into()
+}
+
 pub fn check_binaries(
     required: &[(&'static str, bool)],
     optional: &[(&'static str, bool)],
@@ -164,7 +192,7 @@ pub fn check_binaries(
         return Check::fail(
             "binaries",
             format!("not on PATH: {}", missing.join(", ")),
-            "install the package (brew install zyvorai/tap/fluxvm, or the install.sh one-liner) and open a new shell",
+            binaries_fix(&missing),
         );
     }
     let opt: Vec<&str> = optional
@@ -656,9 +684,15 @@ pub async fn gather(listen: &str, state_dir: &Path, host_only: bool) -> Vec<Chec
     );
     #[cfg(not(target_os = "macos"))]
     let (required, optional): (&[&'static str], &[&'static str]) = (
-        &["fluxctl", "qemu-system-x86_64", "qemu-img", "ip"],
         &[
+            "fluxctl",
+            if cfg!(target_arch = "aarch64") { "qemu-system-aarch64" } else { "qemu-system-x86_64" },
+            "qemu-img",
+            "ip",
+            // creating a VM seeds cloud-init with it: required, not optional
             "cloud-localds",
+        ],
+        &[
             "dnsmasq",
             "cloud-hypervisor",
             "firecracker",
@@ -761,6 +795,16 @@ mod tests {
         let c = check_binaries(&[("fluxctl", true)], &[("dnsmasq", false)]);
         assert_eq!(level(&c), Level::Ok);
         assert!(c.detail.contains("dnsmasq"));
+    }
+
+    #[test]
+    fn missing_vm_tools_get_the_package_names_as_the_fix() {
+        let c = check_binaries(&[("qemu-img", false), ("cloud-localds", false)], &[]);
+        assert_eq!(level(&c), Level::Fail);
+        let fix = binaries_fix(&["qemu-img", "cloud-localds"]);
+        assert!(fix.contains("apt-get install qemu-utils cloud-image-utils"), "{fix}");
+        assert!(fix.contains("dnf install qemu-img cloud-utils") && fix.contains("--server --yes"));
+        assert!(binaries_fix(&["fluxctl"]).contains("brew install"));
     }
 
     #[test]

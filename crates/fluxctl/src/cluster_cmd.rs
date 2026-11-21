@@ -22,13 +22,6 @@ use serde_json::{Value, json};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-#[derive(clap::Subcommand)]
-pub enum ClusterCommand {
-    /// How the cluster is doing, in plain English: a green, yellow or red light for each machine and for the whole
-    /// cluster, how much room is left, the last backup, and the next best thing to do. Read-only.
-    Status(StatusArgs),
-}
-
 #[derive(clap::Args, Clone)]
 pub struct StatusArgs {
     /// Also check the Macs of this fleet inventory (YAML or JSON) over ssh, read-only.

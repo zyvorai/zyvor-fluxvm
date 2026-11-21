@@ -30,6 +30,8 @@ mod agent_session;
 mod backup_verify_cmd;
 mod cloud;
 mod cluster_cmd;
+mod cluster;
+mod cluster_remote;
 mod compose;
 mod config_check;
 mod contexts;
@@ -1026,6 +1028,13 @@ enum Command {
         #[command(subcommand)]
         command: mac_fleet::MacFleetCommand,
     },
+    /// A cluster of FluxVM machines, the k3s way: `cluster init` on the server (prints one join command), `cluster join URL`
+    /// on every other machine, `cluster add user@host` to bring Linux hosts in over SSH, `cluster nodes | token | remove`, and
+    /// optional add-ons (`cluster addon k3s`). Built on the fleet central, not on Kubernetes. See docs/cluster-quickstart.md.
+    Cluster {
+        #[command(subcommand)]
+        command: cluster::ClusterCommand,
+    },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
     Status {
@@ -1861,12 +1870,6 @@ enum Command {
     /// Explain an API error code (`NOT_FOUND`, `429`, `required`): what it means, what usually causes it and what to do.
     /// Offline; `--list` shows them all.
     Explain(explain::ExplainArgs),
-    /// The cluster in plain English (`cluster status`): a green/yellow/red light per machine, room left, backups, the
-    /// next best action.
-    Cluster {
-        #[command(subcommand)]
-        command: cluster_cmd::ClusterCommand,
-    },
     /// Repair what is safe to repair by itself (start a stopped service, create a missing folder, pull a missing
     /// image) and print the exact commands for the rest. Never runs sudo without `--sudo`, never changes a security
     /// setting, and records what it changed.
@@ -6209,6 +6212,12 @@ async fn main() -> Result<()> {
         };
         return tokio::task::block_in_place(|| mac_fleet::run(command));
     }
+    if matches!(&cli.command, Command::Cluster { command } if !matches!(command, cluster::ClusterCommand::Status(_))) {
+        let Command::Cluster { command } = cli.command else {
+            unreachable!()
+        };
+        return cluster::run(command).await;
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -6449,7 +6458,7 @@ async fn main() -> Result<()> {
         };
         let code = match &cli.command {
             Command::Cluster {
-                command: cluster_cmd::ClusterCommand::Status(a),
+                command: cluster::ClusterCommand::Status(a),
             } => cluster_cmd::run_status(a, &env).await?,
             Command::Fix(a) => cluster_cmd::run_fix(a, &env, &cfg.state_dir).await?,
             _ => unreachable!(),
@@ -6556,7 +6565,6 @@ async fn main() -> Result<()> {
         | Command::Config { .. }
         | Command::ExecPolicy { .. }
         | Command::Explain(_)
-        | Command::Cluster { .. }
         | Command::Fix(_)
         | Command::VmSpec { .. }
         | Command::VsockProxy { .. }
@@ -6564,6 +6572,7 @@ async fn main() -> Result<()> {
         | Command::Service { .. }
         | Command::NodeAgent { .. }
         | Command::MacFleet { .. }
+        | Command::Cluster { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }

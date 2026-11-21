@@ -175,7 +175,7 @@ fn paths(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
 }
 
 /// `fluxvm-agent` next to this `fluxctl` (the package puts them side by side), by the version-free Homebrew path.
-fn agent_binary() -> Result<PathBuf> {
+pub(crate) fn agent_binary() -> Result<PathBuf> {
     let exe = crate::stable_exe::stable_exe().context("finding fluxctl's own path")?;
     let agent = exe.with_file_name("fluxvm-agent");
     if !agent.is_file() {

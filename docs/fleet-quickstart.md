@@ -9,6 +9,9 @@ and scrub, metering, private networks across Macs, the fleet console, the GitHub
 pick up a job, of course), and the rest of what a tenant does with a VM: power, screen and typed input, console logs,
 snapshots and clones, persistent volumes, warm pools, tunnels (every port echoes), usage graphs, API keys and webhooks.
 
+> Want a real cluster rather than a simulation? Three commands from bare machines: [Cluster quickstart](cluster-quickstart.md)
+> (`install.sh --server`, then `install.sh --join URL` on each node).
+
 ## One command
 
 ```bash

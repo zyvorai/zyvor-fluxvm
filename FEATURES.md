@@ -182,6 +182,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `fix`: only start a stopped LaunchAgent, create a missing directory, pull a missing image; `--sudo` adds `systemctl start`, `modprobe`, `sysctl -w`; security settings never; every change logged. `--dry-run` changes nothing.
 - Studio opens on **Home** (`GET /v1/cluster/health`), with a Copy as fluxctl button per fix; every warning and failure has a `fluxctl explain` code ([docs/cluster-home.md](docs/cluster-home.md)).
 
+### Cluster front door (`install.sh --server|--join`, `fluxctl cluster`)
+- k3s-style provisioning for FluxVM's own fleet, no Kubernetes: `install.sh --server` (central as a service, prerequisites installed additively after printing the list, per-user config, verified Debian 13 base image, boot-a-VM self-test, one join command and the Studio URL), `install.sh --join URL` (token from file, env or stdin, never argv; enrolls, starts the node agent, waits for Ready; idempotent; `--uninstall`; Linux systemd/OpenRC and macOS)
+- `fluxctl cluster init|join|nodes|token|remove|add|addon k3s|selftest` on the existing enrollment API; `cluster add user@host` over SSH (pinned host keys, golden remote scripts, fake transport); k3s only as an optional add-on ([docs/cluster-quickstart.md](docs/cluster-quickstart.md)); unit- and shell-tested with fakes, not run on real machines
+
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
 - `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere

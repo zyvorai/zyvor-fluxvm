@@ -6,6 +6,9 @@ a k3s guest on each. Nothing is pulled by a script you cannot read, nothing blin
 > **Status.** Unit-tested with a fake SSH transport and golden-tested remote commands. It has **not been run against a real Mac**
 > yet: expect to meet a rough edge, and use `--dry-run` first. See [What is not verified](#what-is-not-verified).
 
+> Linux hosts too, or a Mac as a node of a cluster you started with `install.sh --server`? See the
+> [Cluster quickstart](cluster-quickstart.md): `fluxctl cluster add user@host` is the Linux counterpart of `mac-fleet up`.
+
 ## Three commands
 
 ```bash

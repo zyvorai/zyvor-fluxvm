@@ -1,0 +1,33 @@
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+# The fleet registry (`fluxvm-agent central`): the "server" of a FluxVM cluster. Installed by
+# `scripts/install.sh --server` (or `fluxctl cluster init`). It takes no token on its command line: with no --token
+# central makes an operator token on first start and keeps it in the state directory (mode 0600). Settings that are not
+# secret (LISTEN, FLUXVM_NODE_AUTH, FLUXVM_AGENT_HA_REDIS, ...) go in /etc/fluxvm/central.env.
+
+[Unit]
+Description=Zyvor FluxVM fleet central (cluster server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/fluxvm/central.env
+Environment=FLUXVM_AGENT_STATE_DIR=/var/lib/fluxvm-central
+ExecStart=/usr/local/bin/fluxvm-agent central
+Restart=always
+RestartSec=3
+StateDirectory=fluxvm-central
+StateDirectoryMode=0700
+DynamicUser=no
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
