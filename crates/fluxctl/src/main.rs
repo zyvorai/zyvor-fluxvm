@@ -76,6 +76,10 @@ mod launch_agent;
 mod mac_build;
 mod mac_build_exec;
 mod mac_cmd;
+mod mac_fleet;
+mod mac_fleet_inv;
+mod mac_fleet_remote;
+mod mac_fleet_ssh;
 mod mac_store;
 mod mcp;
 mod mcp_install;
@@ -972,6 +976,13 @@ enum Command {
     NodeAgent {
         #[command(subcommand)]
         command: node_agent::NodeAgentCommand,
+    },
+    /// Several Macs as one fleet over SSH: `up user@host...` installs FluxVM (pinned, checksum-verified), starts the daemon,
+    /// enrolls the node and optionally prepares k3s; plus `status`, `exec`, `upgrade`, `remove`, `doctor`, and `apply` for an
+    /// inventory file. `--dry-run` shows the ssh commands. See docs/mac-fleet-quickstart.md.
+    MacFleet {
+        #[command(subcommand)]
+        command: mac_fleet::MacFleetCommand,
     },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
@@ -6140,6 +6151,12 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
+    if let Command::MacFleet { .. } = &cli.command {
+        let Command::MacFleet { command } = cli.command else {
+            unreachable!()
+        };
+        return tokio::task::block_in_place(|| mac_fleet::run(command));
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -6458,6 +6475,7 @@ async fn main() -> Result<()> {
         | Command::ImportCompose { .. }
         | Command::Service { .. }
         | Command::NodeAgent { .. }
+        | Command::MacFleet { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }

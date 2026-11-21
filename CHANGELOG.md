@@ -12,6 +12,16 @@ Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per 
   `backup`/`restore` save the SQLite or embedded-etcd datastore as a private, checksummed archive and verify it before stopping anything. `persist mark|verify|cycle` proves data survives a stop/start.
   `snapshot save|ls|delete|prune|pull|restore` wrap `k3s etcd-snapshot` for `--embedded-etcd` clusters (names validated, pulled files private and checksummed). Agents join with a separate agent token sent on stdin (`--agent-token-file`), so no token is in cloud-init or on a command line.
   `recover` repairs the journal from VM ownership labels (adopts, relabels, reports orphans, never touches another owner's VMs). `status` exits non-zero when unhealthy and flags version skew.
+Several Macs as one fleet from one command line. Unit-tested with a fake ssh transport only; **not run against a real Mac**.
+
+- New `fluxctl mac-fleet up|add user@host...`, `apply inventory`, `status`, `exec`, `upgrade`, `remove`, `doctor`. Over the system `ssh`
+  (`BatchMode=yes`, host keys pinned with `StrictHostKeyChecking=yes` unless you pass `--accept-new-hostkey`) it checks each Mac (Apple
+  silicon, macOS 14+, disk, console session, FileVault and auto-login caveats), installs a pinned, SHA-256-verified release package (`--sha256`
+  to pin the hash too, `--release-base` for a mirror, `--via brew`), starts the daemon LaunchAgent, enrolls the node with a join token, and with
+  `--k3s` installs the `kube agent` LaunchAgent that creates and keeps a k3s guest. The token goes over ssh stdin to a 0600 file on the Mac, is
+  deleted there once the node has enrolled, and is never an argument, never in a script and scrubbed from output. Macs run in parallel
+  (`--jobs`), each with its own result; one failure does not stop the rest, and re-running converges. `--dry-run` prints every ssh command.
+  Remote commands are pure functions with golden tests in `crates/fluxctl/src/mac_fleet_golden/`. See [docs/mac-fleet-quickstart.md](docs/mac-fleet-quickstart.md).
 
 macOS image store, the first part of a Docker-style workflow for macOS guests. Unit-tested only; not run against a real registry or VM.
 
