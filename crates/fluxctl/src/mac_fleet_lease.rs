@@ -47,8 +47,8 @@ struct Shared {
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
 
-/// In unit tests sharing is switched on per thread, so the tests of the placer that run beside the tests of this module
-/// never see a file they did not ask for.
+// In unit tests sharing is switched on per thread, so the tests of the placer that run beside the tests of this module
+// never see a file they did not ask for.
 #[cfg(test)]
 thread_local! {
     static ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
