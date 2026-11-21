@@ -408,7 +408,7 @@ pub fn check_stale_paths(refs: &[PathRef]) -> Check {
     Check::warn(
         "client entries",
         format!("point at a binary that no longer exists: {list}"),
-        "`fluxctl doctor --fix` repoints MCP entries (keeping their settings); or re-run `fluxctl mcp install <client>`; for the LaunchAgent, `fluxctl service install`",
+        "`fluxctl doctor --fix` repoints MCP entries (keeping their settings); or re-run `fluxctl mcp install <client>`; for a LaunchAgent, `fluxctl service install` (or `kube agent install` / `docker agent install`)",
     )
 }
 
@@ -551,6 +551,55 @@ fn plist_program(text: &str) -> Option<String> {
     Some(after[start..end].to_owned())
 }
 
+/// Every `dev.zyvor.fluxvm*.plist` in `~/Library/LaunchAgents`: the daemon, the kube and docker agents, the helpers.
+fn fluxvm_plists(home: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(dir) = std::fs::read_dir(home.join("Library/LaunchAgents")) else {
+        return Vec::new();
+    };
+    let mut v: Vec<(String, PathBuf)> = dir
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let label = name.strip_suffix(".plist")?;
+            label
+                .starts_with("dev.zyvor.fluxvm")
+                .then(|| (label.to_owned(), e.path()))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// One installed LaunchAgent and whether launchd has it loaded.
+pub struct AgentState {
+    pub label: String,
+    pub loaded: bool,
+}
+
+/// An installed agent that is not loaded never starts: say which, and how to load it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn check_agents_loaded(agents: &[AgentState]) -> Check {
+    if agents.is_empty() {
+        return Check::skip("launch agents", "no FluxVM LaunchAgent is installed");
+    }
+    let idle: Vec<&str> = agents
+        .iter()
+        .filter(|a| !a.loaded)
+        .map(|a| a.label.as_str())
+        .collect();
+    if idle.is_empty() {
+        return Check::ok(
+            "launch agents",
+            format!("{} installed and loaded", agents.len()),
+        );
+    }
+    Check::warn(
+        "launch agents",
+        format!("installed but not loaded: {}", idle.join(", ")),
+        "run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`, or re-run the agent's `install` (fluxctl service|kube agent|docker agent)",
+    )
+}
+
 fn client_refs() -> Vec<PathRef> {
     let mut refs = Vec::new();
     if let Ok(Value::Array(rows)) = crate::mcp_install::status(false, "fluxvm") {
@@ -570,14 +619,15 @@ fn client_refs() -> Vec<PathRef> {
         }
     }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let plist = crate::launch_agent::plist_path(&home);
-        if let Ok(text) = std::fs::read_to_string(&plist) {
-            if let Some(bin) = plist_program(&text) {
-                refs.push(PathRef {
-                    what: "LaunchAgent".into(),
-                    path: PathBuf::from(&bin),
-                    exists: Path::new(&bin).exists(),
-                });
+        for (label, plist) in fluxvm_plists(&home) {
+            if let Ok(text) = std::fs::read_to_string(&plist) {
+                if let Some(bin) = plist_program(&text) {
+                    refs.push(PathRef {
+                        what: format!("LaunchAgent {label}"),
+                        path: PathBuf::from(&bin),
+                        exists: Path::new(&bin).exists(),
+                    });
+                }
             }
         }
     }
@@ -626,6 +676,20 @@ pub async fn gather(listen: &str, state_dir: &Path, host_only: bool) -> Vec<Chec
         out.push(check_runner_entitlement(runner.as_deref(), entitled));
         out.push(check_memory(total_memory_mib()));
         out.push(check_session(Session::current()));
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let agents: Vec<AgentState> = fluxvm_plists(&home)
+                .into_iter()
+                .map(|(label, plist)| {
+                    let log = home.join("Library/Logs/fluxvm.log");
+                    let loaded = crate::launch_agent::status_of(&label, &plist, &log)
+                        .ok()
+                        .and_then(|v| v["loaded"].as_bool())
+                        .unwrap_or(false);
+                    AgentState { label, loaded }
+                })
+                .collect();
+            out.push(check_agents_loaded(&agents));
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -759,6 +823,41 @@ mod tests {
         );
         assert_eq!(level(&check_runner_entitlement(Some(p), None)), Level::Skip);
         assert_eq!(level(&check_runner_entitlement(None, None)), Level::Fail);
+    }
+
+    #[test]
+    fn an_installed_but_unloaded_agent_is_named() {
+        let a = |l: &str, loaded| AgentState {
+            label: l.into(),
+            loaded,
+        };
+        assert_eq!(level(&check_agents_loaded(&[])), Level::Skip);
+        assert_eq!(
+            level(&check_agents_loaded(&[a("dev.zyvor.fluxvm", true)])),
+            Level::Ok
+        );
+        let c = check_agents_loaded(&[
+            a("dev.zyvor.fluxvm", true),
+            a("dev.zyvor.fluxvm.kube", false),
+        ]);
+        assert_eq!(level(&c), Level::Warn);
+        assert!(c.detail.contains("dev.zyvor.fluxvm.kube") && !c.detail.contains("fluxvm,"));
+    }
+
+    #[test]
+    fn every_fluxvm_plist_is_found() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("Library/LaunchAgents");
+        std::fs::create_dir_all(&d).unwrap();
+        for n in [
+            "dev.zyvor.fluxvm.plist",
+            "dev.zyvor.fluxvm.kube.plist",
+            "com.other.plist",
+        ] {
+            std::fs::write(d.join(n), "").unwrap();
+        }
+        let labels: Vec<String> = fluxvm_plists(t.path()).into_iter().map(|p| p.0).collect();
+        assert_eq!(labels, ["dev.zyvor.fluxvm", "dev.zyvor.fluxvm.kube"]);
     }
 
     #[test]

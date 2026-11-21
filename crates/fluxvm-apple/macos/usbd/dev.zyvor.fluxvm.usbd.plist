@@ -6,4 +6,5 @@
   <key>MachServices</key><dict><key>dev.zyvor.fluxvm.usbd</key><true/></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>__HOME__/Library/Logs/fluxvm-usbd.err</string>
 </dict></plist>
