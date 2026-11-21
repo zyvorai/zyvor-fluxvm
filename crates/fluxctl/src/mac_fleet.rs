@@ -37,6 +37,18 @@ pub enum MacFleetCommand {
     Remove(RemoveArgs),
     /// Preflight with the exact fix for each problem (read-only).
     Doctor(DoctorArgs),
+    /// Run a command in a fresh macOS guest on the Mac the scheduler picks: it prefers a Mac that already holds the template
+    /// (name:tag@digest) and has a free macOS slot (2 at most), and can wait for one with --queue-timeout.
+    Run(crate::mac_fleet_run::RunArgs),
+    /// Stop placing new jobs on Macs (running jobs finish). `--list` shows the drained Macs.
+    Drain(crate::mac_fleet_run::DrainArgs),
+    /// Let drained Macs take jobs again.
+    Resume(crate::mac_fleet_run::DrainArgs),
+    /// `ls`: which templates each Mac holds. `distribute`: make every Mac hold one, digest-verified.
+    Templates {
+        #[command(subcommand)]
+        command: crate::mac_fleet_run::TemplatesCommand,
+    },
 }
 
 /// How to reach the Macs and how to run.
@@ -64,6 +76,10 @@ pub struct Conn {
     /// Machine-readable output.
     #[arg(long)]
     pub json: bool,
+    /// Deadline in seconds for each ssh call, which is each step of a plan (install, daemon, enroll, k3s, probe...). A
+    /// step that runs over is killed and reported as timed out. 0 = no deadline. Raise it with a long --k3s-wait.
+    #[arg(long, value_name = "SECS", default_value_t = 1800)]
+    pub step_timeout: u64,
 }
 
 /// Which Macs: `[user@]host[:port]`, or names from `--inventory`.
@@ -140,6 +156,10 @@ pub struct UpArgs {
 pub struct ApplyArgs {
     /// Inventory file; `inventory` finds inventory.yaml, .yml or .json.
     pub file: PathBuf,
+    /// Also remove FluxVM (LaunchAgents and install; VM images and data stay) from Macs that this inventory listed at its
+    /// last `apply` and no longer lists. A Mac that still runs VMs is refused. Off by default.
+    #[arg(long)]
+    pub prune: bool,
     #[command(flatten)]
     pub flags: UpFlags,
     #[command(flatten)]
@@ -284,7 +304,7 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, f: impl Fn(&T) -> R +
         .collect()
 }
 
-fn last_lines(s: &str, n: usize) -> String {
+pub(crate) fn last_lines(s: &str, n: usize) -> String {
     let v: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
     v[v.len().saturating_sub(n)..].join(" | ")
 }
@@ -328,7 +348,7 @@ fn read_token(file: Option<&PathBuf>, stdin: bool) -> Result<Option<Secret>> {
 }
 
 /// Which Macs a command acts on, with the inventory's per-host settings, and the inventory itself.
-fn resolve(w: &Which, conn: &Conn) -> Result<(Vec<Target>, Option<Inventory>)> {
+pub(crate) fn resolve(w: &Which, conn: &Conn) -> Result<(Vec<Target>, Option<Inventory>)> {
     let inv = w.inventory.as_deref().map(Inventory::load).transpose()?;
     let mut targets = vec![];
     match (&inv, w.hosts.is_empty()) {
@@ -363,7 +383,7 @@ fn resolve(w: &Which, conn: &Conn) -> Result<(Vec<Target>, Option<Inventory>)> {
     Ok((targets, inv))
 }
 
-fn transport(conn: &Conn, inv: Option<&Inventory>) -> Box<dyn Transport> {
+pub(crate) fn transport(conn: &Conn, inv: Option<&Inventory>) -> Box<dyn Transport> {
     let opts = SshOpts {
         identity: conn.identity.clone(),
         known_hosts: conn
@@ -377,7 +397,9 @@ fn transport(conn: &Conn, inv: Option<&Inventory>) -> Box<dyn Transport> {
     if conn.dry_run {
         Box::new(DryTransport::new(opts))
     } else {
-        Box::new(SshTransport::new(opts))
+        let mut t = SshTransport::new(opts);
+        t.step_timeout = (conn.step_timeout > 0).then(|| std::time::Duration::from_secs(conn.step_timeout));
+        Box::new(t)
     }
 }
 
@@ -493,7 +515,7 @@ pub fn build_settings(
 
 // ---- per-host work ---------------------------------------------------------------------------------------------------
 
-fn fail(mut r: HostResult, msg: impl Into<String>) -> HostResult {
+pub(crate) fn fail(mut r: HostResult, msg: impl Into<String>) -> HostResult {
     r.ok = false;
     r.error = Some(msg.into());
     r
@@ -516,7 +538,7 @@ fn probe(
     }
 }
 
-fn blank(target: &Target) -> HostResult {
+pub(crate) fn blank(target: &Target) -> HostResult {
     HostResult {
         host: target.label(),
         name: target.name.clone(),
@@ -923,7 +945,7 @@ pub fn render_doctor(rs: &[HostResult]) -> String {
     out
 }
 
-fn finish(rs: &[HostResult], what: &str) -> Result<()> {
+pub(crate) fn finish(rs: &[HostResult], what: &str) -> Result<()> {
     let bad = rs.iter().filter(|r| !r.ok).count();
     if bad > 0 {
         bail!(
@@ -944,7 +966,7 @@ fn print_dry(tr: &dyn Transport, targets: &[Target]) {
     }
 }
 
-fn jobs(conn: &Conn) -> usize {
+pub(crate) fn jobs(conn: &Conn) -> usize {
     if conn.dry_run { 1 } else { conn.jobs }
 }
 
@@ -965,7 +987,19 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
             };
             let (mut targets, inv) = resolve(&which, &a.conn)?;
             let s = build_settings(&a.flags, inv.as_ref(), &mut targets, None)?;
-            do_up(&a.conn, inv.as_ref(), &targets, &s)?;
+            let up = do_up(&a.conn, inv.as_ref(), &targets, &s);
+            let inv_key = crate::mac_fleet_inv::resolve_path(&a.file)
+                .and_then(|p| Ok(p.canonicalize()?))
+                .map(|p| p.display().to_string())?;
+            crate::mac_fleet_run::after_apply(
+                &a.conn,
+                transport(&a.conn, inv.as_ref()).as_ref(),
+                &inv_key,
+                &targets,
+                a.prune,
+                &crate::mac_fleet_sched::state_path()?,
+            )?;
+            up?;
             if !a.conn.dry_run {
                 println!();
                 do_status(&a.conn, inv.as_ref(), &targets)?;
@@ -1051,6 +1085,10 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
             report(&a.conn, tr.as_ref(), &targets, &rs, "REMOVE")?;
             finish(&rs, "remove")
         }
+        MacFleetCommand::Run(a) => crate::mac_fleet_run::run_cmd(a),
+        MacFleetCommand::Drain(a) => crate::mac_fleet_run::drain_cmd(a, true),
+        MacFleetCommand::Resume(a) => crate::mac_fleet_run::drain_cmd(a, false),
+        MacFleetCommand::Templates { command } => crate::mac_fleet_run::templates_cmd(command),
         MacFleetCommand::Doctor(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
             let tr = transport(&a.conn, inv.as_ref());

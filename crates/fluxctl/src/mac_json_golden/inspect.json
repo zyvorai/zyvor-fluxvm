@@ -1,0 +1,40 @@
+{
+  "id": "0b1c2d3e-0000-4000-8000-000000000001",
+  "name": "ci-1",
+  "image": "macos-xcode:15",
+  "state": {
+    "status": "running",
+    "pid": null,
+    "error": null,
+    "restart_policy": "always"
+  },
+  "created": "2026-11-21T10:00:00Z",
+  "network": {
+    "ip": "192.168.64.7",
+    "ports": [
+      {
+        "host": 2222,
+        "guest": 22
+      },
+      {
+        "host": 8080,
+        "guest": 80
+      }
+    ]
+  },
+  "resources": {
+    "cpus": 4,
+    "memory_mib": 8192
+  },
+  "mounts": [],
+  "labels": {
+    "team": "ios"
+  },
+  "disk": "/state/ci-1/disk.raw",
+  "workspace": "/state/ci-1",
+  "image_config": {
+    "user": "admin",
+    "workdir": "/src"
+  },
+  "schema_version": 1
+}

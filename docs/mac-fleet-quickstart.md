@@ -74,7 +74,8 @@ fluxctl mac-fleet apply fleet --dry-run     # `fleet` finds fleet.yaml, .yml or 
 fluxctl mac-fleet apply fleet               # converge every host, then print status
 ```
 
-`apply` adds and repairs; it does not remove Macs that left the file (use `remove`). Unknown keys in the file are errors, so a typo is caught.
+`apply` adds and repairs; it does not remove Macs that left the file unless you pass `--prune` (see [mac-fleet-scheduler.md](mac-fleet-scheduler.md#removing-macs-apply---prune)), or use `remove`.
+To run jobs on these Macs with a scheduler, drain a Mac, or distribute templates, see [mac-fleet-scheduler.md](mac-fleet-scheduler.md); for GitHub Actions runners, [mac-runner.md](mac-runner.md). Unknown keys in the file are errors, so a typo is caught.
 Other commands take `-f fleet.yaml` and then default to all its hosts, or name some of them: `fluxctl mac-fleet status -f fleet.yaml mini-1`.
 
 ## The other commands

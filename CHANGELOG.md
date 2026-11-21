@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+`fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
+
+- New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
+  `headless-check` reports the unlocked-session requirement with an exact fix per finding. `keepawake` manages a `caffeinate` LaunchAgent (no sudo). `tune` only prints, unless `--apply --only NAME` names the `sudo pmset -a` changes to run.
+  `rosetta` compares the runner's availability with the runtime file and prints the guest mount and binfmt steps. Research with dated sources and a 32-item backlog: [docs/apple-host-research.md](docs/apple-host-research.md).
+Mac integrations: MCP tools, lifecycle events, Prometheus metrics. Unit-tested with fakes only; **not run against a live daemon, a real macOS VM, a k3s node, an MCP client, a webhook receiver or a Prometheus** (see [docs/mac-integrations.md](docs/mac-integrations.md)).
+
+- `fluxctl mcp serve` gains 10 tools (module `mac_mcp`): `mac_images`, `mac_ps`, `mac_build_dry_run`, `mac_compose_ps`, `kube_apple_list`, `kube_apple_status`, `kube_apple_snapshot_ls`, `kube_apple_logs` (reads, always offered) and `mac_run`, `mac_exec` (writes, only with `--allow-write`). Nothing prints to the protocol's stdout; no tool returns a token, kubeconfig, host key or an instance's environment, and `kube_apple_logs` withholds lines that look like credentials.
+- New `fluxctl mac watch` and `mac events` (module `mac_events`): one lifecycle event per change of a macOS instance (`mac.instance.created|started|paused|resumed|stopped|failed|removed`, `mac.slots.full|free`) and, with `--kube`, of a `kube apple` node or cluster (`kube.apple.node.*`, `kube.apple.cluster.*`), carrying ids, names, images and `kairon.zyvor.dev/*` labels only. `--record-to DIR` appends them to the daemon's `events.jsonl`, so `/v1/events`, the SSE stream and `[[event_sinks]]` webhooks carry them.
+- New `fluxctl mac metrics` (module `mac_metrics`): Prometheus text for instances by state, macOS slots used of 2, template store size and, with `--kube`, `kube apple` node readiness and etcd snapshot age; `--textfile` writes it atomically for node_exporter.
+- `kube_apple` submodules are now `pub(crate)` so these modules can reuse the lifecycle and journal types.
+macOS guests, "make it real" (research backlog items 1, 2, 3, 5, 6). Unit-tested with fakes and golden files; **none of it has been run against a real daemon or macOS VM**, and the acceptance script has not been run on hardware.
+
+- New `scripts/test-mac-vz.sh`: a live acceptance script for `fluxctl mac` (import, `run --rm`, detach + `wait-ready`, `exec`, `ps`/`inspect` JSON, `cp`, stop/start, `commit`, `build`, `--queue`, `push`/`pull` to a local registry, `prune`). `--self-test` runs it against a fake `fluxctl` so CI can check the script itself.
+- New `fluxctl mac doctor [--json]`: Apple silicon, macOS version, macOS VM slots, free disk, APFS and same-volume clone check, unlocked login session, daemon reachable, ssh key, FileVault, store location; each problem prints an exact fix and a failure exits 1.
+- New `fluxctl mac wait-ready NAME [--timeout S] [--check CMD] [--json]`.
+- `fluxctl mac run --queue [--queue-timeout SECS]` waits for a free macOS slot instead of failing with 409. Not first-come-first-served across several waiting clients.
+- Stable, documented `--json` (schema version 1) for `mac run`, `ps` and `inspect`, pinned by golden files. **Changed:** `mac ps --json` now prints one object per instance with the contract keys; the daemon's raw record moved under each object's `vm` key. `mac run --json` is new.
+A scheduler for the Mac fleet and GitHub Actions runners on it. Unit-tested with fake ssh and a fake GitHub only; **not run on a real Mac, a real macOS guest or GitHub**.
+
+- New `fluxctl mac-fleet run`, `drain`, `resume`, `templates ls|distribute` and `fluxctl mac run --fleet`. Each Mac reports its free CPU, memory, disk, power and the templates it holds as `name:tag@digest`; placement is `apple_placement::score` plus a bonus for the exact digest, with labels, disk, AC power, drain and the 2-macOS-guest limit as hard filters that explain themselves. `--queue-timeout` waits for a slot, short in-process leases keep two placements from taking one slot, and the Mac's own daemon creates the guest (`fluxctl mac run --rm` over ssh). `templates distribute` has each Mac pull and then compares its digest with the pinned one.
+- `mac-fleet apply --prune` removes FluxVM from Macs that the previous `apply` of that inventory listed and this one does not (opt-in; a Mac with running VMs is refused; VM data stays).
+- Per-step timeouts: `--step-timeout` (default 1800 s) bounds every ssh call of every `mac-fleet` command; the new commands add `--timeout`, `--probe-timeout`, `--pull-timeout`. A call over its deadline is killed and reported as timed out.
+- New `fluxctl mac runner`: one ephemeral macOS VM per GitHub Actions job using a just-in-time runner. The GitHub token comes from a 0600 file or stdin and the JIT configuration travels on ssh stdin, so neither is ever an argument or in a log; the guest is deleted after the job; never more than 2 guests per Mac. See [docs/mac-fleet-scheduler.md](docs/mac-fleet-scheduler.md) and [docs/mac-runner.md](docs/mac-runner.md). New modules `mac_fleet_sched`, `mac_fleet_run`, `mac_fleet_timed`, `mac_runner`.
+
+macOS images: signing, licence guard, build cache, chunk reuse, labels, search and contents manifest for `fluxctl mac`. Unit-tested with fakes and mock registries; **not run against a real registry, Mac or macOS template**.
+
+- `mac keys generate|ls|trust|untrust`, `mac push --sign`, `mac sign`, `mac pull --verify`, `mac verify`: Ed25519 signatures (the catalog's `fluxvm_core::signing`) over the manifest digest, attached as an OCI referrer, checked against a local trust store; a verified pull fetches the verified digest. Not cosign.
+- `mac push` refuses well-known public registries unless `--i-have-checked-the-licence` / `FLUXVM_MAC_ALLOW_PUBLIC_REGISTRY=1`; the text calls itself unverified, non-legal advice about Apple's licence terms and stamps an annotation when overridden.
+- `mac build` step cache (key = step hash chained from the parent digest, stored as intermediate templates), `--no-cache`, `mac cache ls|prune`, budget `FLUXVM_MAC_CACHE_MAX`.
+- `fluxvm-image`: `vm_artifact::pull_with` + `PullOptions::seeds` reuse identical chunks from local images (format unchanged; `PullReport` gains `chunks_reused`, `bytes_reused`); `oci_manage::catalog` lists `/v2/_catalog`.
+- `mac images --filter label=|reference=|source=`, `mac label`, `mac push --label`, `mac search REGISTRY [TERM]`, `mac sbom` / `mac image sbom` (file list with sizes and sha256). See [docs/macos-containers.md](docs/macos-containers.md).
+
 Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
 
 - New `fluxctl kube apple create|join|kubeconfig|tunnel|status|list|stop|start|persist|upgrade|backup|restore|recover|delete|logs` (module `kube_apple`, see [docs/apple-k3s.md](docs/apple-k3s.md)).
@@ -12,6 +45,17 @@ Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per 
   `backup`/`restore` save the SQLite or embedded-etcd datastore as a private, checksummed archive and verify it before stopping anything. `persist mark|verify|cycle` proves data survives a stop/start.
   `snapshot save|ls|delete|prune|pull|restore` wrap `k3s etcd-snapshot` for `--embedded-etcd` clusters (names validated, pulled files private and checksummed). Agents join with a separate agent token sent on stdin (`--agent-token-file`), so no token is in cloud-init or on a command line.
   `recover` repairs the journal from VM ownership labels (adopts, relabels, reports orphans, never touches another owner's VMs). `status` exits non-zero when unhealthy and flags version skew.
+- `fluxctl kube apple` HA and day-2 (the "ideas not done" of the first cut), in `crates/fluxctl/src/kube_apple/`. Unit-tested against the fake host (and the failover forwarder over real loopback sockets); **none of it was run on real hardware**.
+  - `create --servers 3` (odd, up to 7; implies embedded etcd): servers join one at a time, a failed join is finished by running `create` again, shared server flags (`--cluster-cidr`, `--service-cidr`,
+    `--cluster-dns`, `--cluster-domain`, `--disable`, `--secrets-encryption`) are journalled and written into every server's unit and compared again by `doctor`. Stable endpoint: `--endpoint proxy` (default; a
+    failover TCP forwarder on the Mac over a pinned-host-key ssh tunnel per server) or `kube-vip` (`--vip`, a static pod on every server). The kubeconfig gets one context per server. `status` reports lost quorum.
+  - `token rotate --agent|--server`: new values made on the Mac, sent on stdin, servers first one at a time; no token in an argument, script or the journal. `snapshot schedule` sets cron, retention, compression and an
+    S3 target on every server (S3 keys only from a mode-600 file or `AWS_*` environment, on stdin into a root-only drop-in; never in argv, the journal or messages), plus `--show` and `--reset`.
+  - `remove NAME NODE`: refuses to break etcd quorum or remove the only server, then cordon, drain, stop k3s, delete the node object (k3s drops the etcd member), delete the VM, update the journal; `--force` for a dead node.
+  - `tunnel --install-agent|--remove-agent|--agent-status|--foreground`: a LaunchAgent (`dev.zyvor.fluxvm.k3s-tunnel.NAME`) that keeps the tunnel, or the multi-server forwarder, up.
+  - `rebuild NAME [--accept-host-keys]`: writes a new journal for a lost one from the ownership labels and the guests, and lists what cannot be recovered (the creation-time host-key pins, the published digest, VM sizing).
+    `doctor NAME`: quorum, shared-flag drift, endpoint, LaunchAgent, snapshot schedule/age/offsite, token age, each with its fix.
+  - New `scripts/test-kube-apple.sh` hardware acceptance script with an offline `--self-test`.
 Several Macs as one fleet from one command line. Unit-tested with a fake ssh transport only; **not run against a real Mac**.
 
 - New `fluxctl mac-fleet up|add user@host...`, `apply inventory`, `status`, `exec`, `upgrade`, `remove`, `doctor`. Over the system `ssh`

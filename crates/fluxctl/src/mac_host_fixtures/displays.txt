@@ -1,0 +1,19 @@
+Graphics/Displays:
+
+    Apple M6:
+
+      Chipset Model: Apple M6
+      Type: GPU
+      Bus: Built-In
+      Total Number of Cores: 12
+      Vendor: Apple (0x106b)
+      Metal Support: Metal 4
+      Displays:
+        Display:
+          Resolution: 1920 x 1080 (1080p FHD - Full High Definition)
+          UI Looks like: 1920 x 1080 @ 60.00Hz
+          Main Display: Yes
+          Mirror: Off
+          Online: Yes
+          Rotation: Supported
+

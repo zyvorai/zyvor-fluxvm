@@ -39,6 +39,20 @@ struct Fake {
     lose_canary: Cell<bool>,
     seq: Cell<u32>,
     stuck_after_swap: RefCell<Vec<String>>,
+    /// Every script run, as `(node, script)`.
+    scripts: RefCell<Vec<(String, String)>>,
+    /// The `ExecStart` line each node's unit was installed with.
+    exec: RefCell<std::collections::BTreeMap<String, String>>,
+    /// Nodes that got a kube-vip manifest.
+    vip: RefCell<Vec<String>>,
+    etcd_members: RefCell<Vec<String>>,
+    snapshot_config: RefCell<String>,
+    newest_age: Cell<Option<u64>>,
+    /// What `k3s token rotate` was given: `OLD\nNEW\n`.
+    rotated: RefCell<Option<String>>,
+    dir_secret: RefCell<String>,
+    leak_stdin: Cell<bool>,
+    member_log: Cell<bool>,
 }
 
 impl Fake {
@@ -60,6 +74,16 @@ impl Fake {
             lose_canary: Cell::new(false),
             seq: Cell::new(0),
             stuck_after_swap: RefCell::default(),
+            scripts: RefCell::default(),
+            exec: RefCell::default(),
+            vip: RefCell::default(),
+            etcd_members: RefCell::default(),
+            snapshot_config: RefCell::default(),
+            newest_age: Cell::new(Some(3600)),
+            rotated: RefCell::default(),
+            dir_secret: RefCell::new(TOKEN.into()),
+            leak_stdin: Cell::new(false),
+            member_log: Cell::new(false),
         }
     }
     fn log(&self, s: impl Into<String>) {
@@ -87,8 +111,32 @@ impl Fake {
     }
 }
 
+/// Scripts that begin with `: fluxvm-op NAME;` are classified by that name.
+const OPS: [&str; 15] = [
+    "write-dropin",
+    "remove-dropin",
+    "restart",
+    "snapshot-config",
+    "snapshot-age",
+    "unit-probe",
+    "rotate-server-secret",
+    "write-server-secret",
+    "read-server-dir-secret",
+    "cordon",
+    "etcd-members",
+    "etcd-member-log",
+    "disable-unit",
+    "kube-vip-probe",
+    "kube-vip",
+];
+
 fn tag(script: &str) -> &'static str {
     let s = script;
+    for t in OPS {
+        if s.starts_with(&format!(": fluxvm-op {t};")) {
+            return t;
+        }
+    }
     if s.contains("uname -m") {
         "preflight"
     } else if s.contains("sha256sum -c") && s.contains("k3s.new") {
@@ -293,8 +341,13 @@ impl Host for Fake {
                 .borrow_mut()
                 .push((node.into(), t.into(), s.to_vec()));
         }
+        self.scripts.borrow_mut().push((node.into(), script.into()));
         let key = format!("{node}:{t}");
         if let Some((_, m)) = self.fail.borrow().iter().find(|(k, _)| *k == key) {
+            if self.leak_stdin.get() {
+                // A transport that echoes what it was sent, to prove callers scrub secrets from errors.
+                bail!("{m} {}", String::from_utf8_lossy(stdin.unwrap_or_default()));
+            }
             bail!("{m}");
         }
         let ver = self.version.borrow().clone();
@@ -360,7 +413,66 @@ impl Host for Fake {
                 v.extend([0u8; 64]);
                 v
             }
+            "unit-probe" => {
+                let e = self.exec.borrow().get(node).cloned().unwrap_or_default();
+                format!("[Service]\nExecStart={e}\n").into_bytes()
+            }
+            "kube-vip" => {
+                self.vip.borrow_mut().push(node.into());
+                vec![]
+            }
+            "kube-vip-probe" => {
+                if self.vip.borrow().iter().any(|n| n == node) {
+                    b"name: address, value: \"10.89.0.250\"\n".to_vec()
+                } else {
+                    b"absent\n".to_vec()
+                }
+            }
+            "etcd-members" => self
+                .etcd_members
+                .borrow()
+                .iter()
+                .map(|m| format!("node/{m}\n"))
+                .collect::<String>()
+                .into_bytes(),
+            "etcd-member-log" => {
+                if self.member_log.get() {
+                    b"level=info msg=\"Removing member dev-s3 from etcd cluster\"\n".to_vec()
+                } else {
+                    vec![]
+                }
+            }
+            "snapshot-config" => self.snapshot_config.borrow().clone().into_bytes(),
+            "snapshot-age" => match self.newest_age.get() {
+                Some(a) => format!("now=100000000\nnewest={}\n", 100000000 - a).into_bytes(),
+                None => b"now=100000000\nnewest=\n".to_vec(),
+            },
+            "rotate-server-secret" => {
+                let s = String::from_utf8_lossy(stdin.unwrap_or_default()).into_owned();
+                if let Some(new) = s.lines().nth(1) {
+                    *self.dir_secret.borrow_mut() = new.to_owned();
+                }
+                *self.rotated.borrow_mut() = Some(s);
+                vec![]
+            }
+            "read-server-dir-secret" => self.dir_secret.borrow().clone().into_bytes(),
+            "delete-node" => {
+                let gone = script
+                    .split("delete node ")
+                    .nth(1)
+                    .and_then(|r| r.split_whitespace().next())
+                    .unwrap_or_default()
+                    .to_owned();
+                self.nodes.borrow_mut().retain(|n| n.name != gone);
+                vec![]
+            }
             "unit" => {
+                if let Some(line) = script
+                    .lines()
+                    .find_map(|l| l.strip_prefix("ExecStart="))
+                {
+                    self.exec.borrow_mut().insert(node.into(), line.into());
+                }
                 let mut nodes = self.nodes.borrow_mut();
                 if !nodes.iter().any(|n| n.name == node) {
                     nodes.push(NodeInfo {
@@ -431,6 +543,28 @@ impl Host for Fake {
         self.log("kubeconfig removed");
         let _ = std::fs::remove_file(self.root.join(format!("{}.kubeconfig", st.name)));
     }
+    fn kubeconfig_exists(&self, st: &State) -> bool {
+        self.root.join(format!("{}.kubeconfig", st.name)).is_file()
+    }
+    async fn serve_tunnel(&self, _st: &State) -> Result<()> {
+        self.log("serve tunnel");
+        Ok(())
+    }
+    fn install_tunnel_agent(&self, st: &State) -> Result<PathBuf> {
+        self.log("agent install");
+        Ok(self.root.join(format!("{}.plist", st.name)))
+    }
+    fn remove_tunnel_agent(&self, _st: &State) -> Result<bool> {
+        self.log("agent remove");
+        Ok(true)
+    }
+    fn tunnel_agent_status(&self, _st: &State) -> Result<Value> {
+        Ok(serde_json::json!({"installed": true, "loaded": true}))
+    }
+    async fn scan_host_key(&self, _st: &State, node: &str) -> Result<String> {
+        self.log(format!("scan {node}"));
+        Ok(format!("ssh-ed25519 SCANNED-{node}"))
+    }
 }
 
 fn setup() -> (tempfile::TempDir, Store, Fake) {
@@ -462,6 +596,10 @@ fn create_req(name: &str) -> CreateReq {
         },
         kubeconfig: None,
         user: "mini".into(),
+        servers: 1,
+        endpoint: None,
+        vip: None,
+        flags: SharedFlags::default(),
     }
 }
 
@@ -584,6 +722,12 @@ async fn crash_after_vm_creation_is_adopted_by_owner_label_on_rerun() {
         params: params(),
         nodes: vec![],
         canary: None,
+        servers_wanted: 1,
+        flags: SharedFlags::default(),
+        endpoint: None,
+        snapshots: None,
+        agent_secret_rotated: None,
+        server_secret_rotated: None,
     };
     st.nodes.push(Node {
         name: "dev".into(),
@@ -1489,6 +1633,7 @@ fn script_helpers_used_by_the_fake_stay_in_sync() {
         join_url: None,
         token_file: false,
         agent_token_file: false,
+        flags: None,
     };
     use script::*;
     assert_eq!(tag(&preflight_script()), "preflight");
@@ -1647,3 +1792,6 @@ async fn upgrade_of_an_etcd_cluster_snapshots_first() {
     assert!(pos(&l, "ssh dev backup") < pos(&l, "ssh dev swap"));
     assert!(script::backup_script(Datastore::Etcd, "1").contains("etcd-snapshot save"));
 }
+
+#[path = "tests_ha.rs"]
+mod ha;

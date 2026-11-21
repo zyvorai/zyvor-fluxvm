@@ -149,7 +149,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - k3s binary verified by SHA-256 on the Mac and again in the guest; SSH host key pinned before first boot; join token travels on stdin only and is redacted from errors
 - Journal written before each VM exists, ownership labels on every VM, `recover` adopts/relabels/reports orphans and never touches another owner's guests; failed joins and partial deletes clean up and stay retryable
 - `upgrade` is server-first with a backup, skew checks, per-node Ready-at-version wait and rollback; `persist cycle` checks that data survives a stop/start
-- Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware
+- HA control plane (`create --servers 3`: embedded etcd, one-at-a-time joins that resume, shared server flags, a failover forwarder on the Mac or kube-vip, per-server kubeconfig contexts), `token rotate`, `snapshot schedule` (cron, retention, S3 with credentials from a private file or environment), `remove` (cordon, drain, etcd-safe), `tunnel --install-agent` (LaunchAgent), `rebuild` of a lost journal, `doctor`, and `scripts/test-kube-apple.sh` for hardware acceptance
+- Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware. The HA, rotation, S3, kube-vip, LaunchAgent, removal and rebuild paths have never run on a real cluster
 
 ### Kubernetes on Apple VZ (macOS LaunchAgents)
 - `fluxctl kube agent install|uninstall|status` runs `kube supervise` (k3s in a Virtualization.framework VM) as a per-user LaunchAgent; `docker agent` does the same for the Docker engine VM
@@ -161,11 +162,28 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ### macOS image store (`fluxctl mac`)
 - `fluxctl mac images|pull|push|tag|rmi|import` keeps macOS guest templates in a local store (`~/.fluxvm/mac-images`, or `$FLUXVM_MAC_STORE`) and moves them to and from an OCI registry; names can share files, which are freed with the last name
 - `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build` runs a Macfile (RUN over SSH, COPY over scp) in a throwaway instance and stores the result as a template, `--dry-run` prints the plan (SNAPSHOT and IPSW refused; the step logic is unit-tested with a fake host, live execution not verified); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
+- `mac doctor` (preflight with exact fixes), `mac wait-ready NAME [--check CMD]`, `mac run --queue` (wait for a free macOS slot instead of a 409) and a versioned `--json` schema for `mac run|ps|inspect` (golden-tested); `scripts/test-mac-vz.sh` is a live acceptance script with a fake-`fluxctl` `--self-test`. Unit-tested only; the acceptance script has not been run on hardware ([docs/macos-containers.md](docs/macos-containers.md))
+
+### Mac as a host (`fluxctl mac host`)
+- `status` (power, sleep holders, session lock, auto-login, FileVault, displays, free disk, thermal; `--json`), `headless-check` (the unlocked-session requirement with a fix per finding; exit 1 on failure), `rosetta` (runner answer vs runtime file, guest steps)
+- `keepawake install|uninstall|status` manages a `caffeinate` LaunchAgent, no sudo; `tune` prints recommended `pmset` settings and changes only what `--apply --only NAME` names, via `sudo pmset -a`; auto-login, screen lock and FileVault are never changed
+- Parsers tested on captured command output, decisions and apply on a fake host; read-only commands run on one Mac, `keepawake install` and `tune --apply` not run ([docs/macos-host.md](docs/macos-host.md), research and backlog in [docs/apple-host-research.md](docs/apple-host-research.md))
+### Mac integrations: MCP, events, metrics
+- MCP tools (`fluxctl mcp serve`): `mac_images`, `mac_ps`, `mac_build_dry_run`, `mac_compose_ps`, `kube_apple_list|status|snapshot_ls|logs` (read-only, always offered) and `mac_run`, `mac_exec` (need `--allow-write`); no secrets in output
+- `mac watch` / `mac events`: lifecycle events (`mac.instance.*`, `mac.slots.full|free`, `kube.apple.node.*`, `kube.apple.cluster.*`) into the daemon's event log, SSE stream and signed webhooks with `--record-to`; Kairon labels carried
+- `mac metrics`: Prometheus text (instances by state, macOS slots n/2, template store bytes, `kube apple` node readiness, snapshot age), stdout or an atomic textfile ([docs/mac-integrations.md](docs/mac-integrations.md)); unit-tested with fakes, not run live
+
+- Image trust and housekeeping: `mac keys|push --sign|sign|pull --verify|verify` (Ed25519 over the manifest digest, OCI referrer, local trust store; not cosign), a licence guard that refuses public registries unless overridden, a `mac build` step cache (`--no-cache`, `mac cache ls|prune`, size budget), chunk reuse on `mac pull` from other local tags (format unchanged), labels and `mac images --filter`, `mac search` over `/v2/_catalog`, `mac sbom` (bundle file list with sha256); unit-tested with fakes, not run against a real registry or macOS template ([docs/macos-containers.md](docs/macos-containers.md))
 
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
 - `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere
 - System `ssh` with `BatchMode=yes` and pinned host keys (`--accept-new-hostkey` is explicit); remote commands are pure functions with golden tests and the transport is a trait with a fake ([docs/mac-fleet-quickstart.md](docs/mac-fleet-quickstart.md)); unit-tested, not run on real Macs
+
+### Mac fleet scheduler and GitHub runners (`fluxctl mac-fleet run`, `fluxctl mac runner`)
+- `mac-fleet run --template name:tag@sha256:HEX -- CMD` (and `mac run --fleet`) probes every Mac over ssh, scores them (tightest fit plus a bonus for already holding the exact template digest; labels, free disk, AC power, drain and Apple's 2 macOS guests per Mac are hard filters) and runs `fluxctl mac run --rm` on the winner; `--queue-timeout` waits for a free slot instead of failing; in-process 120 s leases stop two placements taking the same slot; "no Mac" always says why per Mac
+- `mac-fleet drain|resume HOST` (state file `~/.config/fluxvm/mac-fleet-state.json`), `mac-fleet templates ls|distribute` (each Mac pulls, the pulled digest is compared with the pinned one, a mismatch is reported and that Mac is not used for that digest), `apply --prune` (removes FluxVM from Macs that left the inventory since the last `apply`; refuses a Mac with running VMs), `--step-timeout` on every fleet command and `--timeout`/`--probe-timeout`/`--pull-timeout` on the new ones
+- `mac runner --repo OWNER/REPO|--org ORG --template REF [--fleet fleet.yaml]`: one ephemeral macOS VM per job with a just-in-time runner (token from a 0600 file or stdin, JIT config on ssh stdin only), deleted after the job, never more than 2 guests per Mac ([docs/mac-fleet-scheduler.md](docs/mac-fleet-scheduler.md), [docs/mac-runner.md](docs/mac-runner.md)); unit-tested with fakes, not run on real Macs or against GitHub
 
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 

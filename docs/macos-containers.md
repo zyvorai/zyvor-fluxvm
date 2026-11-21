@@ -20,6 +20,8 @@ Status: the commands below are implemented and unit-tested. Nothing has been run
 | `run -e/--env-file/-v/-w/--label/--restart/--cpus/--memory/-d`, `ps -a/-f/--format/-q`, `exec -e/-w` | Implemented (section "Run options"), same caveat. |
 | `history`, `save`, `load`, `commit`, `image inspect/prune/history/save/load`, `system df/prune` | Implemented (section "Image tools"). Store-side parts run on temporary stores in tests; `commit`, `df`'s instance half and `prune --all` need the daemon. |
 | Macfile `ENV`, `ARG`, `WORKDIR`, `LABEL`, `EXPOSE`, `CMD`, `ENTRYPOINT`, `ADD`, `HEALTHCHECK`; `.macignore` | Implemented (section "Macfile reference"). Parser and planner unit-tested; never built on a real VM. |
+| `mac doctor`, `mac wait-ready`, `run --queue`, `run/ps/inspect --json` | Implemented (sections "Preflight", "Waiting", "JSON output"). Unit-tested with fakes and golden files; **never run against a real daemon or VM**. `mac doctor`'s probes were run once on a developer Mac, which has no daemon. |
+| `scripts/test-mac-vz.sh` | A live acceptance script for all of the above. **Written, not yet run on hardware**; its `--self-test` (fake `fluxctl`) runs anywhere. |
 | `compose up/down/ps` | Implemented (section "Compose"). **At most 2 services (2 macOS VMs).** `up --dry-run` is client-side; the rest needs the daemon and was never run. |
 
 The image commands are client-side only: they talk to a registry and the local store, never to the daemon. `run` and the other instance
@@ -87,7 +89,7 @@ Builds an image from a Macfile (default `CONTEXT/Macfile`; `CONTEXT` defaults to
 5. Deletes the instance.
 
 On any failure the instance is deleted and the error names the failing step, numbered as in `--dry-run` (`build failed at step 3 (...)`).
-There is no layer cache: every build starts from `FROM`. The build instance runs on the daemon's Mac, so the daemon must be on this machine
+By default the build uses a step cache (see [Build cache](#build-cache)); `--no-cache` runs the plain straight-through build above. The build instance runs on the daemon's Mac, so the daemon must be on this machine
 (the template and the result are local paths).
 
 ## Run options
@@ -234,11 +236,173 @@ fluxctl mac images
 fluxctl mac rmi macos-xcode:stable
 ```
 
+## Preflight: `fluxctl mac doctor [--json]`
+
+Read-only checks of the limits listed under "Hard limits", so they fail early with a fix instead of late with a 409, a 503 or a
+20 GB copy. It creates the store directory if missing (to test that it is writable) and changes nothing else. The exit status is 1
+when any check is `FAIL`; a `warn` does not fail it. Each non-ok line is followed by `fix: ...`.
+
+| Check | Fails or warns when |
+|---|---|
+| apple silicon, macOS version | not arm64 / older than macOS 14 (FAIL) |
+| store location | the store directory cannot be created or written (FAIL); shows whether `FLUXVM_MAC_STORE` set it |
+| free disk | under 25 GiB free on the store's volume (FAIL), under 80 GiB (warn) |
+| store filesystem | not APFS (FAIL: `import` and every clone become full copies) |
+| clone volume | the store and the daemon's instance directory are on different volumes (FAIL). The instance directory comes from `FLUXVM_STATE_DIR`, else from an existing instance's workspace; with neither it warns |
+| login session | the screen is locked or nobody is on the console (FAIL: the daemon answers 503) |
+| daemon | no address configured (warn), or `/healthz` unanswered (FAIL). Reads `--server`, `FLUXVM_URL` or the current context |
+| macOS VM slots | 2 of 2 `fluxctl mac` instances running or paused (warn: `run` would answer 409; use `--queue`). A macOS VM that `fluxctl mac` did not create also holds a slot and is not counted here |
+| ssh key | no `~/.ssh/id_*.pub` and no generated `~/.ssh/fluxvm_ed25519` (warn) |
+| FileVault (host) | on (warn: no auto-login, so a headless Mac cannot start guests after a reboot) |
+
+`--json` prints `{"ok": bool, "checks": [{"name", "status": "ok|warn|fail", "detail", "fix"}]}`, the same shape as `vz doctor --json`.
+FileVault inside the **template** cannot be checked from the host; see "Hard limits".
+
+## Waiting: `mac wait-ready` and `run --queue`
+
+`fluxctl mac wait-ready NAME [--timeout S] [--user U] [--check CMD] [--json]` blocks until the instance is `running`, has an address,
+and accepts a TCP connection on port 22; with `--check`, `CMD` must also exit 0 in the guest over SSH (BatchMode, so a missing key
+makes it time out rather than prompt). `--timeout` defaults to 900, `0` waits forever. A `stopped`, `failed` or `paused` instance
+fails at once with the reason. On success it prints `ready: NAME IP (after Ns)`, or with `--json`
+`{"schema_version":1,"name","id","ready":true,"ip","waited_secs"}`. A timeout says what was still missing (no address, port 22 closed, check failing).
+
+`fluxctl mac run --queue [--queue-timeout SECS]` waits for a free macOS slot instead of failing with 409 (default 3600 s, `0` forever).
+While 2 `fluxctl mac` instances are running or paused it only waits, so it does not clone a disk each time; otherwise it tries, and a
+409 naming the guest limit sends it back to waiting. Any other error ends the run. Limits: the queue lives in each client process, so
+several waiting clients are **not** served first-come-first-served; and a macOS VM that `fluxctl mac` did not create is visible only
+through that 409. Ctrl-C while waiting creates nothing to clean up. `mac build` has no `--queue` yet.
+
+## JSON output (schema version 1)
+
+`mac run --json`, `mac ps --json` and `mac inspect` print documents with a `schema_version` key. **Within a version, keys are only
+added; none is renamed, removed or retyped.** A new incompatible shape gets a new version number. The `vm` key is the daemon's raw
+VM record: a passthrough, not part of the contract. Golden files in `crates/fluxctl/src/mac_json_golden/` pin the shape (a change
+fails the tests; regenerate with `UPDATE_GOLDEN=1`).
+
+**`mac ps --json`**: an array, one object per listed instance (`-a`, `-f` apply as usual). Before this schema `ps --json` printed
+the raw VM records; those are now under each object's `vm` key.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema_version` | number | `1` |
+| `id`, `short_id` | string | full VM id; first 12 hex characters |
+| `name`, `image` | string | instance name; `name:tag` it was started from (`null` if unlabelled) |
+| `status` | string | `creating`, `running`, `paused`, `stopped`, `failed`, or `unknown` |
+| `ip` | string or null | guest address once it has one |
+| `ports` | array | `{"host": n, "guest": n}` per published port |
+| `ssh_port` | number or null | the host port forwarding to guest port 22, if `-p` published one |
+| `created` | string or null | the daemon's creation time |
+| `restart_policy` | string | `no`, `always`, `unless-stopped`, `on-failure` |
+| `project`, `service` | string or null | compose project and service |
+| `labels` | object | the labels you set (`--label`); `fluxvm.mac*` are hidden |
+| `vm` | object | raw record (unstable) |
+
+**`mac inspect NAME...`**: an array with one object per name: `schema_version`, `id`, `name`, `image`, `state` (`status`, `pid`, `error`,
+`restart_policy`), `created`, `network` (`ip`, `ports`), `resources` (`cpus`, `memory_mib`), `mounts` (`source`, `destination`,
+`read_only`), `labels`, `disk`, `workspace`, `image_config`, `vm` (raw, unstable).
+
+**`mac run --json`**: with `--json`, the instance name is not printed; instead one compact JSON object is the **last line of stdout**
+(the command's own output goes before it on stdout, ssh's stderr stays on stderr). It is printed only when the run succeeded; a failed
+`CMD` or boot is an error message and a non-zero exit, with no JSON.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `schema_version` | number | `1` |
+| `name`, `id`, `image` | string | the instance |
+| `status` | string | `removed` after `--rm`, else `running` |
+| `ip` | string or null | null when the run did not wait for SSH (no CMD, no `-v`) |
+| `removed` | bool | the instance was deleted |
+| `ran_command` | bool | a command ran (in the background with `-d`) |
+| `detached` | bool | `-d` was given |
+
+Not covered yet: `images`, `system df` and `stats` already print JSON but have no versioned schema.
+
+## Live acceptance: `scripts/test-mac-vz.sh`
+
+A script for a real Mac that exercises every command above: import a template, `run --rm`, `run -d` + `wait-ready`, `exec`,
+`ps`/`inspect` JSON, `cp` both ways, `stop`/`start` (the disk survives), `commit`, `build` of a tiny Macfile, `--queue` with both slots
+taken, `push`/`pull` against a local registry (`FLUXVM_E2E_REGISTRY`, or a `registry:2` container if docker exists), `prune`, `system df`.
+It uses its own temporary store, names its instances `acc-*`, and cleans up. It needs a template whose guest accepts your SSH key and
+two free macOS slots. Exit 0/1/2 = all passed / a check failed / a precondition is missing; skipped checks are listed.
+
+```
+FLUXCTL=./target/release/fluxctl FLUXVM_URL=http://127.0.0.1:7788 FLUXVM_MAC_TEMPLATE_DIR=/Volumes/X/macos-15 scripts/test-mac-vz.sh
+scripts/test-mac-vz.sh --self-test     # no Mac needed: the same script against a fake fluxctl
+```
+
+**It has not been run on hardware.** `--self-test` proves the script's own logic (including that a broken command is reported and that a
+missing template or a failing `doctor` stops it); it says nothing about `fluxctl mac`. The first live run will show how a real
+registry treats `http://localhost`, how long a clone takes to answer SSH, and whether the checks' expected strings match real output.
+
+## Signing, licence guard, cache, search and contents
+
+Added on top of the commands above. Unit-tested with fakes and the mock registries of `fluxvm-image`; **nothing here was run against a
+real registry, a real Mac or a real macOS template**.
+
+### Signing and verification
+
+`fluxctl mac keys generate` creates an Ed25519 keypair (the same scheme as the image catalog, `fluxvm_core::signing`) in
+`$FLUXVM_MAC_TRUST` or `~/.fluxvm/mac-trust/` (next to the store, never inside it); the private key file is mode 0600 and is never
+overwritten. `mac keys trust NAME FILE` adds someone's public key, `mac keys ls` lists them (your own key shows as `self`), `mac keys untrust NAME` removes one.
+
+- `mac push --sign REF [REMOTE]` signs `fluxvm-mac-image-v1\n<manifest digest>` and attaches the signature as an OCI referrer (artifact type
+  `application/vnd.zyvor.fluxvm.signature.v1+json`; the signature and signer key are in the referrer's annotations). `mac sign REGISTRY_REF` signs an image already pushed.
+- `mac pull --verify REF` (or `FLUXVM_MAC_REQUIRE_SIGNED=1`) fetches the signatures, requires one from a trusted key, and then pulls **that
+  digest** (`repo@sha256:...`), so a tag that moves after the check cannot swap the image. Unsigned, signed by an untrusted key, and signed
+  for a different digest are three distinct errors. The verified signatures are kept beside the trust store.
+- `mac verify REF` checks a registry reference (asks the registry), or a local image against the signatures kept at pull or push time. It exits 1 on failure; `--json` for scripts.
+
+This is **not cosign**: no keyless flow, no transparency log, no certificate chain. A key inside a signature proves nothing unless you
+trusted it. A signature covers the manifest digest, hence the config and every chunk; it does not say the image is safe. The referrers
+API or the `sha256-<hex>` tag fallback must be available on the registry. Local-only images (built or imported, never pushed) have no manifest digest and cannot be signed.
+
+### Licence guard
+
+`mac push` refuses well-known public registries (Docker Hub, GHCR, Quay, public ECR, GitLab, MCR, Codeberg, registry.k8s.io) before any
+upload. Apple's macOS licence terms may restrict copying and redistributing macOS; the message says plainly that FluxVM cannot tell what
+your licence allows, that it is not legal advice and that the clauses were not verified. Pass `--i-have-checked-the-licence` (or
+`FLUXVM_MAC_ALLOW_PUBLIC_REGISTRY=1`) to proceed; a warning is printed and the image gets the annotation
+`dev.zyvor.fluxvm.licence-ack=public-registry-override`. The list is a safety default, not a statement that other registries are fine:
+a private registry on a public host name is your responsibility.
+
+### Build cache
+
+`mac build` keeps an intermediate template after every `RUN`/`COPY` as `fluxvm-cache/<key>:c` in the store (hidden from `mac images`
+unless `--all`). The key chains: `sha256(previous key, step text, hash of the COPY source tree)`, starting from the `FROM` template's
+digest (or its store directory for a local import). A later build restarts from the longest cached prefix; a fully cached build starts no
+VM at all and just clones the entry into `-t NAME`. Macfile line numbers and `--dry-run` do not affect keys; `ENV`, `ARG`, `WORKDIR` are folded into the `RUN` text and so are part of it.
+
+- `--no-cache` runs the old straight-through build and neither reads nor writes the cache.
+- `mac cache ls [--json]`; `mac cache prune [--older-than 7d] [--all] [--dry-run]`.
+- Size budget: `FLUXVM_MAC_CACHE_MAX` (`50g`, `512m`; default 100g). After each build the oldest entries beyond it are removed, except those that build used. Sizes are allocated blocks; APFS clones share blocks, so the total can overstate what deleting frees.
+- Costs: every checkpoint stops the guest and boots a new one from the stored disk (a macOS boot takes minutes), so a long Macfile pays that once per step. Non-deterministic steps (a `curl`, a package index) are cached like any other: use `--no-cache` to refresh. `mac system prune --all` and `image prune --all` treat cache entries as unused images.
+
+### Chunk reuse on pull and push
+
+The `vm-image` format is unchanged (64 MiB zstd chunks, each annotated with file, offset and raw sha256). **Push** already skips chunks the registry has (`HEAD` per layer) and all-zero chunks. **Pull** now takes up to two other local tags of the
+same repository as seeds: a chunk whose raw sha256 already matches the bytes at the same file and offset in a seed is copied locally and never downloaded; everything is still checked against the manifest. This helps point releases that change some blocks in place; a disk that grew or shifted data gets no reuse. `mac pull --no-reuse` disables it. There is no cross-repository mount on push and no peer or LAN chunk source.
+
+### Labels and `mac images --filter`
+
+`LABEL` in a Macfile already records labels in the image config. `mac label IMAGE k=v ... [-k KEY]` edits them (names sharing the image's files share labels); `mac push --label k=v` adds more. Labels travel as push annotations (`dev.zyvor.fluxvm.label.<key>`) and in the pushed `config.json`.
+`mac images --filter label=KEY[=VALUE] --filter reference=GLOB --filter source=TEXT` (all must match; `*` wildcard); `--json` includes the labels.
+
+### `mac search REGISTRY [TERM]`
+
+Lists repositories from `GET /v2/_catalog` (follows pagination), filtered by substring; `--tags` adds each repository's tags, `--limit N`. Many
+registries, including Docker Hub and GHCR, do not serve the catalog; the error says so. It lists names, not whether an image is a macOS image.
+
+### `mac sbom REF` (also `mac image sbom REF`)
+
+A JSON contents manifest of the template bundle: every file (`disk.raw`, `hardware.bin`, `auxiliary.bin`, `config.json`) with size and sha256, plus the registry digest, labels and
+build history. `--to FILE` writes it; `--attach REGISTRY_REF` publishes it as a referrer (`application/vnd.zyvor.fluxvm.contents.v1+json`). It does
+**not** list the files inside the guest's disk, so it is not an SPDX/CycloneDX software inventory. Hashing reads the sparse `disk.raw` at its full size: minutes for a 64 GiB disk.
+
 ## Hard limits
 
 These come from the design and from macOS itself; they apply to the whole workflow.
 
-- **At most 2 macOS VMs at a time** on one host (`MAX_MACOS_GUESTS`). `run` and `build` refuse at the limit, not queue.
+- **At most 2 macOS VMs at a time** on one host (`MAX_MACOS_GUESTS`). `run` and `build` refuse at the limit; `run --queue` waits instead.
 - **No fork or branching.** A saved state is bound to its machine identifier and MAC, so "fast" means cloning a stopped template, not
   many restores of one snapshot.
 - **Restore needs an unlocked login session** on the host. A headless server needs a dedicated auto-login user with the lock off.
@@ -247,7 +411,7 @@ These come from the design and from macOS itself; they apply to the whole workfl
 - FileVault must be off in a template, or key login fails on clones.
 - Not supported for macOS guests: extra disks, Rosetta, nested virtualization, private networks, console ports, tagged shares.
 - **Apple's licence terms limit where macOS images may be stored.** Pushing a template to a public registry is likely not allowed; use
-  a private registry. This is a caution, not a legal reading; check the terms that apply to you.
+  a private registry. This is a caution, not a legal reading; check the terms that apply to you. `mac push` refuses well-known public registries unless overridden (see the licence guard).
 
 ## See also
 
@@ -260,5 +424,5 @@ Written from the source. The commands are covered by unit tests on a temporary s
 against a real registry or daemon, and no imported, pulled, built or committed template was booted. Specifically unverified: the
 virtiofs share names inside a macOS guest, the generated `export ...; cd ... &&` shell text on a real guest, `scp` and `curl` in a
 guest, the `/logs`, `/stats`, `/pause`, `/resume`, `/restart` routes' exact output for macOS VMs, `tar` on a multi-GiB sparse disk,
-and everything in `compose`. `build --dry-run`, `compose up --dry-run` and the image tools on a store are the parts you can try
+and everything in `compose`. Also unverified: signing and verification against a real registry's referrers API, `--sign` attach, `mac search` against a real catalog, the build cache on a real guest (stop, clone, reboot per step), chunk reuse on a real 20+ GB template, and `mac sbom --attach`. `build --dry-run`, `compose up --dry-run` and the image tools on a store are the parts you can try
 without a VM.

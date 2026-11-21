@@ -509,7 +509,7 @@ const ROSETTA_MOUNT: &str = "/mnt/rosetta";
 
 /// The `binfmt_misc` registration Apple documents for Rosetta: x86-64 ELF executables, with `F` (the interpreter is
 /// opened at registration, so containers need not hold it) and `C` (credentials from the binary, so setuid works).
-fn rosetta_binfmt() -> String {
+pub(crate) fn rosetta_binfmt() -> String {
     format!(
         r":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:{ROSETTA_MOUNT}/rosetta:CF"
     )

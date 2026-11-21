@@ -8,9 +8,8 @@
 
 use crate::mac_fleet_remote::{Secret, sh_quote};
 use anyhow::{Context, Result, bail};
-use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// One Mac: where to connect and what the fleet knows about it.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -202,6 +201,18 @@ impl ExecOut {
 pub trait Transport: Send + Sync {
     /// Run `command` on `t`. `stdin`, if any, is written to the remote command's stdin; it is never part of argv.
     fn run(&self, t: &Target, command: &str, stdin: Option<&Secret>) -> Result<ExecOut>;
+    /// Like `run`, but the command is killed after `timeout` and reported as exit 124. Transports that cannot time out
+    /// (the test fake, the dry-run printer) ignore it.
+    fn run_timed(
+        &self,
+        t: &Target,
+        command: &str,
+        stdin: Option<&Secret>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<ExecOut> {
+        let _ = timeout;
+        self.run(t, command, stdin)
+    }
     /// The dry-run printer, when this is one.
     fn as_dry(&self) -> Option<&DryTransport> {
         None
@@ -211,6 +222,8 @@ pub trait Transport: Send + Sync {
 pub struct SshTransport {
     pub opts: SshOpts,
     pub binary: String,
+    /// Deadline for every ssh call (each step of a plan is one call). `None`: no deadline.
+    pub step_timeout: Option<std::time::Duration>,
 }
 
 impl SshTransport {
@@ -218,33 +231,26 @@ impl SshTransport {
         Self {
             opts,
             binary: std::env::var("FLUXVM_SSH").unwrap_or_else(|_| "ssh".into()),
+            step_timeout: None,
         }
     }
 }
 
 impl Transport for SshTransport {
     fn run(&self, t: &Target, command: &str, stdin: Option<&Secret>) -> Result<ExecOut> {
-        let mut child = Command::new(&self.binary)
-            .args(ssh_args(t, &self.opts, command))
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("starting {} (is OpenSSH installed?)", self.binary))?;
-        if let (Some(s), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            // A remote command that exits early closes the pipe; its exit code says why.
-            let _ = pipe.write_all(s.expose());
-        }
-        let out = child.wait_with_output()?;
-        Ok(ExecOut {
-            code: out.status.code().unwrap_or(255),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        self.run_timed(t, command, stdin, self.step_timeout)
+    }
+    fn run_timed(
+        &self,
+        t: &Target,
+        command: &str,
+        stdin: Option<&Secret>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<ExecOut> {
+        let mut c = Command::new(&self.binary);
+        c.args(ssh_args(t, &self.opts, command));
+        let what = format!("{} (is OpenSSH installed?)", self.binary);
+        crate::mac_fleet_timed::run_with_timeout(c, stdin, timeout, &what)
     }
 }
 

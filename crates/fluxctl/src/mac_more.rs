@@ -67,6 +67,12 @@ pub enum ImageCommand {
     },
     /// How an image was built (same as `mac history`).
     History { reference: String },
+    /// Every file of the image bundle with size and sha256, as JSON (same as `mac sbom`).
+    Sbom {
+        reference: String,
+        #[arg(long = "to", value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Write an image to a tar file (same as `mac save`).
     Save {
         reference: String,
@@ -235,6 +241,53 @@ pub enum MacMore {
         #[command(subcommand)]
         command: crate::mac_compose::ComposeCommand,
     },
+    /// Recorded lifecycle events of instances and `kube apple` nodes (`mac.*`, `kube.apple.*`) from the daemon's event log.
+    /// `mac watch --record-to DIR` produces them. `-f` keeps printing new ones.
+    Events {
+        /// Newest N events.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// One JSON object per line (the event log's own shape).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Watch instances (and, with `--kube`, `kube apple` nodes) and print one event per change: created, started, paused,
+    /// resumed, stopped, failed, removed, `mac.slots.full|free`, node and cluster changes. The first poll is the baseline.
+    /// `--record-to DIR` also appends them to DIR/events.jsonl, the daemon's state directory, so `fluxctl events`, the SSE
+    /// stream and `[[event_sinks]]` webhooks (`events = ["mac.", "kube.apple."]`) carry them. See docs/mac-integrations.md.
+    Watch {
+        /// Seconds between polls.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+        /// Stop after N polls (0 = until interrupted).
+        #[arg(long, default_value_t = 0)]
+        polls: u32,
+        /// Also watch the local `kube apple` clusters.
+        #[arg(long)]
+        kube: bool,
+        /// This Mac's name in the fleet, put on every event as `node`.
+        #[arg(long)]
+        node: Option<String>,
+        /// Append events to DIR/events.jsonl (the daemon's state directory; needs write access to it).
+        #[arg(long, value_name = "DIR")]
+        record_to: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prometheus text: instances by state, macOS slots used (of 2), template store size and, with `--kube`, `kube apple`
+    /// node readiness and snapshot age. `--textfile PATH` writes it atomically for node_exporter's textfile collector.
+    Metrics {
+        /// Value of the `node` label (this Mac's name in the fleet).
+        #[arg(long)]
+        node: Option<String>,
+        /// Also read the `kube apple` clusters (connects to each node over ssh).
+        #[arg(long)]
+        kube: bool,
+        #[arg(long, value_name = "PATH")]
+        textfile: Option<PathBuf>,
+    },
 }
 
 impl MacMore {
@@ -345,7 +398,10 @@ pub async fn ps(r: &crate::remote::Remote, json_out: bool, o: PsOpts) -> Result<
     let all: Vec<&Value> = items.iter().collect();
     let rows = view::select(&all, o.all, &filters);
     if json_out {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&crate::mac_json::ps_document(&rows))?
+        );
     } else if o.quiet {
         print!("{}", view::render_quiet(&rows));
     } else if let Some(f) = &o.format {
@@ -518,6 +574,17 @@ pub fn run_client(cmd: MacMore) -> Result<()> {
         } => {
             prune_store(&open_store()?, &[], dry_run, force)?;
         }
+        MacMore::Image {
+            command: ImageCommand::Sbom { reference, output },
+        } => {
+            let text =
+                serde_json::to_string_pretty(&crate::mac_plus::sbom(&open_store()?, &reference)?)?;
+            match output {
+                Some(p) => std::fs::write(&p, text)
+                    .with_context(|| format!("writing {}", p.display()))?,
+                None => println!("{text}"),
+            }
+        }
         MacMore::Compose { command } => crate::mac_compose::run_client(command)?,
         _ => bail!("this command needs the daemon: pass --server (or select a context)"),
     }
@@ -567,6 +634,32 @@ fn prune_store(store: &Store, unused: &[String], dry_run: bool, force: bool) -> 
 pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
     use reqwest::Method;
     match cmd {
+        MacMore::Events {
+            limit,
+            follow,
+            json,
+        } => crate::mac_events::run_events(r, limit, follow, json).await?,
+        MacMore::Watch {
+            interval,
+            polls,
+            kube,
+            node,
+            record_to,
+            json,
+        } => {
+            let o = crate::mac_events::WatchOpts {
+                interval: std::time::Duration::from_secs(interval.max(1)),
+                polls: (polls > 0).then_some(polls),
+                node,
+                record_to,
+            };
+            crate::mac_events::run_watch(r, o, json, kube).await?
+        }
+        MacMore::Metrics {
+            node,
+            kube,
+            textfile,
+        } => crate::mac_metrics::run(r, node, kube, textfile.as_deref()).await?,
         MacMore::Inspect { names } => {
             let mut out = Vec::new();
             for n in &names {
@@ -578,7 +671,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                 let cfg = image_config_of(&full)
                     .map(serde_json::to_value)
                     .transpose()?;
-                out.push(view::inspect(&full, cfg));
+                out.push(crate::mac_json::inspect_v1(view::inspect(&full, cfg)));
             }
             println!("{}", serde_json::to_string_pretty(&out)?);
         }

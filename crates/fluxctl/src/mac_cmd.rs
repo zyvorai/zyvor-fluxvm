@@ -19,14 +19,25 @@ pub enum MacCommand {
     Images {
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        extra: crate::mac_plus::ImagesExtra,
     },
     /// Pull `registry/repo:tag` into the local store (credentials: FLUXVM_REGISTRY_USER / FLUXVM_REGISTRY_PASSWORD).
-    Pull { reference: String },
+    /// `--verify` demands a signature from a trusted key and pulls exactly the verified digest; chunks identical to another local
+    /// tag of the same repository are reused instead of downloaded.
+    Pull {
+        reference: String,
+        #[command(flatten)]
+        extra: crate::mac_plus::PullExtra,
+    },
     /// Push a local image to a registry. REMOTE defaults to REFERENCE when that already names a registry.
     /// Apple's licence terms limit where macOS images may be stored: use a private registry.
+    /// Public registries (Docker Hub, GHCR, Quay, ...) are refused unless you pass --i-have-checked-the-licence.
     Push {
         reference: String,
         remote: Option<String>,
+        #[command(flatten)]
+        extra: crate::mac_plus::PushExtra,
     },
     /// Give an image a second name (no copy).
     Tag { source: String, target: String },
@@ -54,6 +65,9 @@ pub enum MacCommand {
         /// Set an `ARG` of the Macfile: `NAME=value`. Repeatable.
         #[arg(long = "build-arg", value_name = "NAME=VALUE")]
         build_arg: Vec<String>,
+        /// Ignore the build cache and run every step from FROM (the cache is also not written). See `mac cache`.
+        #[arg(long)]
+        no_cache: bool,
         /// Build context directory: COPY sources are relative to it.
         // Own id: `context` is the global --context flag (a String) and clap panics on the clash.
         #[arg(id = "build_context", value_name = "CONTEXT", default_value = ".")]
@@ -82,6 +96,13 @@ pub enum MacCommand {
         wait: u64,
         #[command(flatten)]
         opts: crate::mac_instance::RunOpts,
+        #[command(flatten)]
+        queue: crate::mac_queue::QueueOpts,
+        /// Print one JSON object (schema in docs/macos-containers.md) as the last line of stdout instead of the instance name.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        sched: crate::mac_fleet_run::FleetRun,
         /// A local image (`fluxctl mac images`).
         image: String,
         /// The command to run in the guest, after `--`.
@@ -110,8 +131,46 @@ pub enum MacCommand {
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
+    /// Preflight: Apple silicon, macOS version, free macOS VM slots, free disk and APFS clone volume, login session, daemon,
+    /// ssh key, FileVault, store location. Read-only (it creates the store directory); every problem prints a fix. Exits 1
+    /// when a check fails.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Block until an instance is running, has an address and answers on SSH (and, with --check, until CMD exits 0 in the guest).
+    #[command(
+        name = "wait-ready",
+        after_help = "Example:
+  fluxctl mac run -d --name ci macos-xcode:15 && fluxctl mac wait-ready ci --check 'xcodebuild -version'"
+    )]
+    WaitReady {
+        name: String,
+        /// Give up after this many seconds (0 = never).
+        #[arg(long, default_value_t = 900)]
+        timeout: u64,
+        /// SSH user for --check.
+        #[arg(long, default_value = "admin")]
+        user: String,
+        /// A command that must exit 0 in the guest (over SSH) before the instance counts as ready.
+        #[arg(long, value_name = "CMD")]
+        check: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// GitHub Actions runners on macOS: one ephemeral VM per job, registered just in time, deleted after the job. Spreads over
+    /// a Mac fleet with --fleet and never runs more than 2 guests per Mac. See docs/mac-runner.md.
+    Runner(crate::mac_runner::RunnerArgs),
     #[command(flatten)]
     More(crate::mac_more::MacMore),
+    /// The Mac that runs FluxVM as a server: power and sleep status, a keep-awake LaunchAgent, the unlocked-session check,
+    /// recommended settings and Rosetta. Read-only unless you pass `--apply`. See docs/macos-host.md.
+    Host {
+        #[command(subcommand)]
+        command: crate::mac_host::HostCommand,
+    },
+    #[command(flatten)]
+    Plus(crate::mac_plus::MacPlus),
 }
 
 impl MacCommand {
@@ -119,10 +178,17 @@ impl MacCommand {
     pub fn is_client_side(&self) -> bool {
         match self {
             Self::Build { dry_run, .. } => *dry_run,
+            // The fleet scheduler talks to the Macs over ssh, not to a daemon from here.
+            Self::Run { sched, .. } => sched.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
+            Self::Plus(_) => true,
             _ => !matches!(
                 self,
-                Self::Run { .. } | Self::Ps { .. } | Self::Rm { .. } | Self::Exec { .. }
+                Self::Run { .. }
+                    | Self::Ps { .. }
+                    | Self::Rm { .. }
+                    | Self::Exec { .. }
+                    | Self::WaitReady { .. }
             ),
         }
     }
@@ -301,9 +367,43 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             user,
             wait,
             opts,
+            queue,
+            json,
             image,
             cmd,
-        } => crate::mac_instance::run(r, rm, name, publish, user, wait, image, cmd, opts).await,
+            ..
+        } => {
+            let outcome = crate::mac_queue::run_queued(r, &queue, || {
+                crate::mac_instance::run_outcome(
+                    r,
+                    rm,
+                    name.clone(),
+                    publish.clone(),
+                    user.clone(),
+                    wait,
+                    image.clone(),
+                    cmd.clone(),
+                    opts.clone(),
+                )
+            })
+            .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&crate::mac_json::run_document(&outcome))?
+                );
+            } else if outcome.print_name {
+                println!("{}", outcome.name);
+            }
+            Ok(())
+        }
+        MacCommand::WaitReady {
+            name,
+            timeout,
+            user,
+            check,
+            json,
+        } => crate::mac_ready::run(r, &name, timeout, &user, check, json).await,
         MacCommand::Ps { json, opts } => crate::mac_more::ps(r, json, opts).await,
         MacCommand::Rm { name } => {
             let vm = find_instance(r, &name).await?;
@@ -324,6 +424,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             context,
             wait,
             build_arg,
+            no_cache,
             ..
         } => {
             let src = read_macfile(file, &context)?;
@@ -341,7 +442,11 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
                 wait,
                 instance: None,
             };
-            crate::mac_build_exec::execute(&mut host, &steps).await?;
+            if no_cache {
+                crate::mac_build_exec::execute(&mut host, &steps).await?;
+            } else {
+                run_cached_build(&mut host, &steps).await?;
+            }
             crate::mac_image_ops::write_build_config(&host.store, &key, config)?;
             println!("built {key}");
             Ok(())
@@ -434,6 +539,21 @@ impl crate::mac_build_exec::BuildHost for DaemonHost<'_> {
     }
 
     async fn stop_and_store(&mut self) -> Result<()> {
+        let key = self.key.clone();
+        self.stop_and_store_as(&key).await
+    }
+
+    async fn delete(&mut self) -> Result<()> {
+        match self.instance.take() {
+            Some((id, _)) => delete_instance(self.r, &id).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl DaemonHost<'_> {
+    /// Stop the instance and store its files as the template `key`.
+    async fn stop_and_store_as(&mut self, key: &str) -> Result<()> {
         use reqwest::Method;
         let id = self.ready()?.0.to_string();
         let r = self.r;
@@ -459,15 +579,68 @@ impl crate::mac_build_exec::BuildHost for DaemonHost<'_> {
                 .as_str()
                 .context("the VM record has no workspace")?,
         );
-        store_instance_files(&self.store, &self.key, &disk, &ws)
+        store_instance_files(&self.store, key, &disk, &ws)
+    }
+}
+
+impl crate::mac_cache::CachedHost for DaemonHost<'_> {
+    fn cache_has(&self, cache_ref: &str) -> bool {
+        self.store.resolve(cache_ref).is_ok()
     }
 
-    async fn delete(&mut self) -> Result<()> {
-        match self.instance.take() {
-            Some((id, _)) => delete_instance(self.r, &id).await,
-            None => Ok(()),
+    fn cache_touch(&mut self, cache_ref: &str) {
+        // Re-adding with a fresh time keeps what a build uses out of the way of `mac cache prune`.
+        if let Ok(rows) = self.store.list()
+            && let Some((_, mut e)) = rows.into_iter().find(|(n, _)| n == cache_ref)
+        {
+            e.added_unix = crate::mac_image_ops::now_unix();
+            self.store.add(cache_ref, e).ok();
         }
     }
+
+    async fn checkpoint(&mut self, cache_ref: &str, describe: &str, restart: bool) -> Result<()> {
+        use crate::mac_build_exec::BuildHost;
+        self.stop_and_store_as(cache_ref).await?;
+        crate::mac_cache::note_step(&self.store, cache_ref, describe);
+        if restart {
+            self.delete().await?;
+            self.create(cache_ref).await?;
+            self.wait_ready().await?;
+        }
+        Ok(())
+    }
+
+    fn materialize(&mut self, cache_ref: &str) -> Result<()> {
+        crate::mac_cache::materialize(&self.store, cache_ref, &self.key)
+    }
+}
+
+/// Plan the cache keys for `steps` and run them through the cached executor; falls back to a plain build when the plan has
+/// nothing to cache. Trims the cache to its budget afterwards.
+async fn run_cached_build(
+    host: &mut DaemonHost<'_>,
+    steps: &[crate::mac_build::Step],
+) -> Result<()> {
+    let Some((base, work)) = crate::mac_cache::split(steps) else {
+        return crate::mac_build_exec::execute(host, steps).await;
+    };
+    let base_id = crate::mac_cache::base_id(&host.store, base)?;
+    let context = host.context.clone();
+    let keys = crate::mac_cache::chain_keys(&base_id, work, &|src| {
+        let staged = crate::mac_ignore::stage(&context, src)?;
+        crate::mac_cache::hash_context(&staged.path)
+    })?;
+    let rep = crate::mac_cache::execute_cached(host, steps, &keys).await?;
+    eprintln!("cache: {} steps reused, {} run", rep.cached, rep.ran);
+    match crate::mac_cache::enforce_budget(&host.store, &keys) {
+        Ok((0, _)) => {}
+        Ok((n, freed)) => eprintln!(
+            "cache: removed {n} old entries ({}) to stay within FLUXVM_MAC_CACHE_MAX",
+            human(freed)
+        ),
+        Err(e) => eprintln!("warning: could not trim the build cache: {e:#}"),
+    }
+    Ok(())
 }
 
 /// Clone a stopped instance's disk, hardware model and auxiliary storage into the store as a template named `key`.
@@ -542,67 +715,41 @@ pub async fn run(command: MacCommand) -> Result<()> {
         command.is_client_side(),
         "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
     );
+    let command = match command {
+        MacCommand::Host { command } => return crate::mac_host::run(command),
+        c => c,
+    };
+    match command {
+        MacCommand::Runner(a) => return tokio::task::block_in_place(|| crate::mac_runner::run(a)),
+        MacCommand::Run {
+            publish,
+            name,
+            user,
+            wait,
+            opts,
+            sched,
+            queue,
+            image,
+            cmd,
+            ..
+        } => {
+            return tokio::task::block_in_place(|| {
+                crate::mac_fleet_run::mac_run_fleet(publish, name, user, wait, opts, sched, &queue, image, cmd)
+            });
+        }
+        _ => {}
+    }
     let store = Store::open(mac_store::default_root()?)?;
     match command {
-        MacCommand::Images { json } => {
-            let rows = store.list()?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!(
-                        rows.iter()
-                            .map(|(n, e)| serde_json::json!({
-                                "reference": n, "digest": e.digest, "source": e.source,
-                                "size_bytes": dir_size(&store.root().join(&e.dir)),
-                            }))
-                            .collect::<Vec<_>>()
-                    ))?
-                );
-            } else {
-                print!("{}", render_images(&store, &rows));
-            }
-        }
-        MacCommand::Pull { reference } => {
-            let key = mac_store::normalize(&reference)?;
-            let scratch = store.scratch("pull");
-            let report = image::vm_artifact::pull(&key, &scratch, creds())
-                .await
-                .with_context(|| format!("pulling {key}"))?;
-            let adopted = check_template(&scratch)
-                .and_then(|()| mac_store::dir_for_digest(&report.manifest_digest))
-                .and_then(|dir| store.adopt(&scratch, &dir).map(|()| dir));
-            let dir = match adopted {
-                Ok(d) => d,
-                Err(e) => {
-                    std::fs::remove_dir_all(&scratch).ok();
-                    return Err(e);
-                }
-            };
-            store.add(
-                &key,
-                Entry {
-                    dir,
-                    digest: report.manifest_digest.clone(),
-                    source: key.clone(),
-                    added_unix: 0,
-                },
-            )?;
-            println!("pulled {key} ({})", report.manifest_digest);
-        }
-        MacCommand::Push { reference, remote } => {
-            let dir = store.resolve(&reference)?;
+        MacCommand::Images { json, extra } => crate::mac_plus::images(&store, json, &extra)?,
+        MacCommand::Pull { reference, extra } => crate::mac_plus::pull(&store, &reference, &extra).await?,
+        MacCommand::Push {
+            reference,
+            remote,
+            extra,
+        } => {
             let target = remote_reference(&reference, remote.as_deref())?;
-            let opts = image::vm_artifact::PushOptions {
-                chunk_size: 0,
-                exclude: Vec::new(),
-                os: Some("macos".into()),
-                name: Some(reference.clone()),
-                annotations: Default::default(),
-            };
-            let out = image::vm_artifact::push(&dir, &target, creds(), &opts)
-                .await
-                .with_context(|| format!("pushing {} to {target}", dir.display()))?;
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            crate::mac_plus::push(&store, &reference, &target, &extra).await?;
         }
         MacCommand::Tag { source, target } => println!("tagged {}", store.tag(&source, &target)?),
         MacCommand::Rmi { reference } => {
@@ -635,6 +782,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
             );
         }
         MacCommand::More(m) => return crate::mac_more::run_client(m),
+        MacCommand::Plus(p) => return crate::mac_plus::run(&store, p).await,
         MacCommand::Import { dir, reference } => {
             check_template(&dir)?;
             let key = mac_store::normalize(&reference)?;
@@ -659,10 +807,16 @@ pub async fn run(command: MacCommand) -> Result<()> {
             )?;
             println!("imported {} as {key}", dir.display());
         }
+        MacCommand::Doctor { json } => {
+            return crate::mac_doctor::run(json, crate::remote::from_argv_env()).await;
+        }
         MacCommand::Run { .. }
+        | MacCommand::Runner(_)
         | MacCommand::Ps { .. }
         | MacCommand::Rm { .. }
-        | MacCommand::Exec { .. } => unreachable!("rejected above"),
+        | MacCommand::Exec { .. }
+        | MacCommand::Host { .. }
+        | MacCommand::WaitReady { .. } => unreachable!("rejected above"),
     }
     Ok(())
 }
@@ -699,7 +853,7 @@ fn build_plan_text_with(
     ))
 }
 
-fn creds() -> Option<image::oci_registry::Credentials> {
+pub(crate) fn creds() -> Option<image::oci_registry::Credentials> {
     let username = std::env::var("FLUXVM_REGISTRY_USER").ok()?;
     let password = std::env::var("FLUXVM_REGISTRY_PASSWORD").unwrap_or_default();
     Some(image::oci_registry::Credentials { username, password })
@@ -737,7 +891,7 @@ pub(crate) fn short_id() -> String {
 }
 
 /// Whether the first path component names a registry host (`ghcr.io`, `localhost:5000`), as Docker decides it.
-fn names_a_registry(reference: &str) -> bool {
+pub(crate) fn names_a_registry(reference: &str) -> bool {
     match reference.split_once('/') {
         Some((host, _)) => host.contains('.') || host.contains(':') || host == "localhost",
         None => false,
@@ -783,7 +937,7 @@ pub(crate) fn human(bytes: u64) -> String {
     }
 }
 
-fn render_images(store: &Store, rows: &[(String, Entry)]) -> String {
+pub(crate) fn render_images(store: &Store, rows: &[(String, Entry)]) -> String {
     if rows.is_empty() {
         return "no macOS images (fluxctl mac pull REF, or fluxctl mac import DIR NAME)\n".into();
     }
@@ -1015,5 +1169,68 @@ mod tests {
             }
             .is_client_side()
         );
+    }
+
+    #[test]
+    fn doctor_is_client_side_and_wait_ready_needs_the_daemon() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            c: MacCommand,
+        }
+        let p = |a: &[&str]| {
+            let mut v = vec!["t"];
+            v.extend(a);
+            T::try_parse_from(v).unwrap().c
+        };
+        assert!(p(&["doctor", "--json"]).is_client_side());
+        let w = p(&[
+            "wait-ready",
+            "ci",
+            "--timeout",
+            "30",
+            "--check",
+            "true",
+            "--json",
+        ]);
+        assert!(!w.is_client_side());
+        let MacCommand::WaitReady {
+            name,
+            timeout,
+            check,
+            json,
+            user,
+        } = w
+        else {
+            panic!("not wait-ready")
+        };
+        assert_eq!(
+            (name.as_str(), timeout, json, user.as_str()),
+            ("ci", 30, true, "admin")
+        );
+        assert_eq!(check.as_deref(), Some("true"));
+        let MacCommand::Run {
+            queue, json, rm, ..
+        } = p(&[
+            "run",
+            "--rm",
+            "--queue",
+            "--queue-timeout",
+            "120",
+            "--json",
+            "img",
+            "--",
+            "true",
+        ])
+        else {
+            panic!("not run")
+        };
+        assert!(queue.queue && json && rm);
+        assert_eq!(queue.queue_timeout, 120);
+        let MacCommand::Run { queue, json, .. } = p(&["run", "img"]) else {
+            panic!("not run")
+        };
+        assert!(!queue.queue && !json);
     }
 }

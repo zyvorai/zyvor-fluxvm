@@ -7,6 +7,7 @@
 //! "ask the daemon for a VM" and "remember its id" can be repaired from the ownership labels (see `recover`).
 //! It never holds the cluster token.
 
+pub use super::ha_model::*;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -115,9 +116,50 @@ pub struct State {
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub canary: Option<Canary>,
+    /// Control-plane nodes the cluster is meant to have (`create --servers N`); 1 for an ordinary cluster.
+    #[serde(default = "one_server")]
+    pub servers_wanted: u8,
+    /// Flags every server must agree on (k3s misbehaves when they differ).
+    #[serde(default)]
+    pub flags: SharedFlags,
+    /// The stable registration endpoint of a multi-server cluster.
+    #[serde(default)]
+    pub endpoint: Option<EndpointCfg>,
+    /// The scheduled-snapshot policy last applied (never credentials).
+    #[serde(default)]
+    pub snapshots: Option<SnapshotPolicy>,
+    /// UTC stamps of the last rotation of the agent secret and of the server secret.
+    #[serde(default)]
+    pub agent_secret_rotated: Option<String>,
+    #[serde(default)]
+    pub server_secret_rotated: Option<String>,
 }
 
 impl State {
+    pub fn servers(&self) -> Vec<&Node> {
+        self.nodes
+            .iter()
+            .filter(|n| n.role == Role::Server)
+            .collect()
+    }
+    /// True when the Mac reaches the API through the failover forwarder instead of one ssh tunnel.
+    pub fn uses_proxy(&self) -> bool {
+        self.servers_wanted > 1 || self.servers().len() > 1
+    }
+    /// The Mac-side port of the tunnel to the i-th server, in journal order (the forwarder's backends).
+    pub fn backend_port(&self, i: usize) -> u16 {
+        self.api_port + 1 + i as u16
+    }
+    pub fn next_server_name(&self) -> String {
+        let mut i = 2;
+        loop {
+            let n = format!("{}-s{i}", self.name);
+            if self.node(&n).is_none() {
+                return n;
+            }
+            i += 1;
+        }
+    }
     pub fn server(&self) -> Option<&Node> {
         self.nodes.iter().find(|n| n.role == Role::Server)
     }
@@ -497,6 +539,12 @@ pub(crate) fn sample_state(name: &str) -> State {
             version: None,
         }],
         canary: None,
+        servers_wanted: 1,
+        flags: SharedFlags::default(),
+        endpoint: None,
+        snapshots: None,
+        agent_secret_rotated: None,
+        server_secret_rotated: None,
     }
 }
 
