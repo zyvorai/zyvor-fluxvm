@@ -28,3 +28,6 @@ reach, turn on API auth, and pass that address as `--advertise-url`.
 
 For the `agent-micro` image, register it in the catalog on every Mac (see [docs/agent-micro.md](../docs/agent-micro.md)); a Mac
 without it fails creates that ask for it.
+
+To check the whole stack on one Mac (daemon, unlocked session, Kubernetes, Kairon CRDs, this Mac registered as a Node, kairon-node, Veyron),
+run `scripts/stack-check.sh`. It changes nothing and prints a fix for every layer that fails; a layer whose prerequisite failed is skipped.

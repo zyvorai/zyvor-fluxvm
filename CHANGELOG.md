@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+
+- New `scripts/stack-check.sh` (read-only): checks the FluxVM + Kairon + Veyron stack on one Mac layer by layer (daemon, unlocked session,
+  Kubernetes API, Kairon CRDs, this Mac as a Node, kairon-node health, Veyron) and prints a fix for each failure. `scripts/test-stack-check.sh`
+  tests it offline with fake `curl`/`kubectl`/`fluxctl`.
+=======
 LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not yet run against a live cluster.
 
 - `fluxctl kube agent install` and `docker agent install` write the Homebrew `opt/` path of `fluxctl` (via `stable_exe`), so a
@@ -20,6 +25,7 @@ LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not 
   `--rosetta`, `supervise --active` (sleep and wake-on-connect) and, with `--agent`, the LaunchAgent. Written, **not yet run**; it needs
   an unlocked Mac. On a real Apple Silicon host, `docker agent status`, `kube agent status` and `doctor` ran correctly against live launchd.
 - The vmnetd and usbd helper plists log to `~/Library/Logs/fluxvm-{vmnetd,usbd}.err` instead of `/tmp`; the install scripts fill in the home directory.
+
 
 
 - **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`
