@@ -136,6 +136,13 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `MicroVMJob.spec.ttlSecondsAfterFinished` — Kubernetes-`Job`-style auto-cleanup: the Job controller deletes a finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) once it has sat in `Succeeded`/`Failed` for that long, instead of it (and every completed CI-style child VM) needing to be deleted by hand
 - Not KubeVirt — no CDI or `virtctl`; QEMU has `fluxctl migrate` + migration receivers (not KubeVirt migration parity). See [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
 
+### Kubernetes on Apple VZ (macOS LaunchAgents)
+- `fluxctl kube agent install|uninstall|status` runs `kube supervise` (k3s in a Virtualization.framework VM) as a per-user LaunchAgent; `docker agent` does the same for the Docker engine VM
+- Plist uses the Homebrew `opt/` path (survives `brew upgrade`), `ProcessType=Interactive`, and `--restart`/`--throttle-secs`; install is refused beside a supervisor that launchd does not own
+- `kube supervise` holds a sleeping cluster asleep while the Mac is locked or logged out, then restores it once unlocked
+- `fluxctl doctor` reports stale binary paths and unloaded agents across all `dev.zyvor.fluxvm*` LaunchAgents, including the vmnetd/usbd helpers
+- VZ restores saved state only in an unlocked login session, so these are LaunchAgents, not LaunchDaemons ([deploy/launchd-notes.md](deploy/launchd-notes.md)); unit-tested, not yet verified on a live cluster
+
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 
 - Central fleet registry + per-host heartbeat client

@@ -476,12 +476,43 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Launchd knobs a LaunchAgent may vary; the default is what the kube and docker agents use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlistOpts {
+    /// Restart the process whenever it exits (`KeepAlive`); false restarts only after a crash.
+    pub keep_alive: bool,
+    /// `ProcessType`: `Interactive` keeps VM work from being throttled in the background.
+    pub process_type: &'static str,
+    /// Minimum seconds between restarts.
+    pub throttle_secs: u32,
+}
+
+impl Default for PlistOpts {
+    fn default() -> Self {
+        Self {
+            keep_alive: true,
+            process_type: "Interactive",
+            throttle_secs: 30,
+        }
+    }
+}
+
 /// A LaunchAgent that runs `args` at login and restarts it if it exits. Shared with `fluxctl kube`.
 pub(crate) fn render_plist(
     label: &str,
     args: &[String],
     log: &Path,
     env: &[(String, String)],
+) -> String {
+    render_plist_with(label, args, log, env, &PlistOpts::default())
+}
+
+pub(crate) fn render_plist_with(
+    label: &str,
+    args: &[String],
+    log: &Path,
+    env: &[(String, String)],
+    o: &PlistOpts,
 ) -> String {
     let items: String = args
         .iter()
@@ -502,9 +533,16 @@ pub(crate) fn render_plist(
             .collect();
         format!("  <key>EnvironmentVariables</key>\n  <dict>\n{rows}  </dict>\n")
     };
+    let keep_alive = if o.keep_alive {
+        "<true/>".to_string()
+    } else {
+        "<dict><key>SuccessfulExit</key><false/></dict>".to_string()
+    };
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{label}</string>\n  <key>ProgramArguments</key>\n  <array>\n{items}  </array>\n{env_block}  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ThrottleInterval</key><integer>30</integer>\n  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{label}</string>\n  <key>ProgramArguments</key>\n  <array>\n{items}  </array>\n{env_block}  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key>{keep_alive}\n  <key>ProcessType</key><string>{pt}</string>\n  <key>ThrottleInterval</key><integer>{th}</integer>\n  <key>StandardOutPath</key><string>{log}</string>\n  <key>StandardErrorPath</key><string>{log}</string>\n</dict>\n</plist>\n",
         log = xml_escape(&log.display().to_string()),
+        pt = xml_escape(o.process_type),
+        th = o.throttle_secs,
     )
 }
 
@@ -564,6 +602,11 @@ pub fn render_agent(
     render_plist(AGENT_LABEL, &args, log, env)
 }
 
+pub(crate) fn agent_status() -> Result<serde_json::Value> {
+    let (plist, log) = agent_paths(&home()?);
+    crate::launch_agent::status_of(AGENT_LABEL, &plist, &log)
+}
+
 fn agent_paths(home: &Path) -> (PathBuf, PathBuf) {
     (
         home.join("Library/LaunchAgents")
@@ -613,7 +656,7 @@ pub(crate) fn launchctl_unload(label: &str, plist: &Path) -> Result<bool> {
 pub fn agent_install(o: &EngineOptions) -> Result<PathBuf> {
     let home = home()?;
     let (plist, log) = agent_paths(&home);
-    let exe = std::env::current_exe().context("finding fluxctl's own path")?;
+    let exe = crate::stable_exe::stable_exe().context("finding fluxctl's own path")?;
     std::fs::create_dir_all(plist.parent().unwrap())?;
     std::fs::write(&plist, render_agent(&exe, o, &log, &carried_env()))?;
     launchctl_load(AGENT_LABEL, &plist)?;
@@ -802,5 +845,24 @@ mod tests {
             };
             assert!(user_name(&o).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn plist_options_change_keepalive_and_throttle() {
+        let args = vec!["/f".to_string(), "x".to_string()];
+        let log = Path::new("/l");
+        let d = render_plist("l", &args, log, &[]);
+        assert!(d.contains("<key>KeepAlive</key><true/>"));
+        assert!(d.contains("<key>ProcessType</key><string>Interactive</string>"));
+        assert!(d.contains("<key>ThrottleInterval</key><integer>30</integer>"));
+        let o = PlistOpts {
+            keep_alive: false,
+            process_type: "Background",
+            throttle_secs: 5,
+        };
+        let c = render_plist_with("l", &args, log, &[], &o);
+        assert!(c.contains("<key>SuccessfulExit</key><false/>"));
+        assert!(c.contains("<string>Background</string>"));
+        assert!(c.contains("<integer>5</integer>"));
     }
 }

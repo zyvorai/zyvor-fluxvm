@@ -257,6 +257,8 @@ enum DockerAgentCommand {
     Install(DockerEngineArgs),
     /// Unload and delete it.
     Uninstall,
+    /// Whether it is installed and loaded, its pid and last exit code, as JSON.
+    Status,
 }
 
 /// Options shared by the `fluxctl kube` commands that create or supervise the cluster VM.
@@ -849,9 +851,13 @@ enum KubeAgentCommand {
         cluster: KubeArgs,
         #[command(flatten)]
         flags: kube_host::SuperviseFlags,
+        #[command(flatten)]
+        launchd: kube_host::LaunchdFlags,
     },
     /// Unload and delete it.
     Uninstall,
+    /// Whether it is installed and loaded, its pid and last exit code, as JSON.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -8263,6 +8269,12 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
                     serde_json::json!({"ok": true, "removed": docker_host::agent_uninstall()?})
                 );
             }
+            DockerAgentCommand::Status => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&docker_host::agent_status()?)?
+                );
+            }
         },
     }
     Ok(())
@@ -8712,9 +8724,14 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
         KubeCommand::Agent { command } => match command {
-            KubeAgentCommand::Install { cluster, flags } => {
+            KubeAgentCommand::Install {
+                cluster,
+                flags,
+                launchd,
+            } => {
                 flags.check()?;
-                let plist = kube_host::agent_install(&cluster.options()?, &flags.args())?;
+                let plist =
+                    kube_host::agent_install(&cluster.options()?, &flags.args(), &launchd.opts()?)?;
                 println!(
                     "{}",
                     serde_json::json!({"ok": true, "plist": plist, "label": kube_host::AGENT_LABEL})
@@ -8724,6 +8741,12 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 println!(
                     "{}",
                     serde_json::json!({"ok": true, "removed": kube_host::agent_uninstall()?})
+                );
+            }
+            KubeAgentCommand::Status => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&kube_host::agent_status()?)?
                 );
             }
         },
