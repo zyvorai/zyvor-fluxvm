@@ -142,6 +142,13 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `MicroVMJob.spec.ttlSecondsAfterFinished` — Kubernetes-`Job`-style auto-cleanup: the Job controller deletes a finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) once it has sat in `Succeeded`/`Failed` for that long, instead of it (and every completed CI-style child VM) needing to be deleted by hand
 - Not KubeVirt — no CDI or `virtctl`; QEMU has `fluxctl migrate` + migration receivers (not KubeVirt migration parity). See [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
 
+### Apple-native k3s (`fluxctl kube apple`)
+- Persistent ARM64 Linux guest per node on Apple Virtualization: `create`, `join` (also to a cluster on another Mac with `--url --token-file`), `status`, `stop`/`start`, `upgrade`, `backup`/`restore`, `recover`, `delete` ([docs/apple-k3s.md](docs/apple-k3s.md))
+- k3s binary verified by SHA-256 on the Mac and again in the guest; SSH host key pinned before first boot; join token travels on stdin only and is redacted from errors
+- Journal written before each VM exists, ownership labels on every VM, `recover` adopts/relabels/reports orphans and never touches another owner's guests; failed joins and partial deletes clean up and stay retryable
+- `upgrade` is server-first with a backup, skew checks, per-node Ready-at-version wait and rollback; `persist cycle` checks that data survives a stop/start
+- Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware
+
 ### Kubernetes on Apple VZ (macOS LaunchAgents)
 - `fluxctl kube agent install|uninstall|status` runs `kube supervise` (k3s in a Virtualization.framework VM) as a per-user LaunchAgent; `docker agent` does the same for the Docker engine VM
 - Plist uses the Homebrew `opt/` path (survives `brew upgrade`), `ProcessType=Interactive`, and `--restart`/`--throttle-secs`; install is refused beside a supervisor that launchd does not own

@@ -44,6 +44,7 @@ mod guest_cmd;
 mod image_mgmt;
 mod infer;
 mod instancetype_cmd;
+mod kube_apple;
 mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
@@ -854,6 +855,12 @@ enum KubeCommand {
     Agent {
         #[command(subcommand)]
         command: KubeAgentCommand,
+    },
+    /// An Apple-silicon native k3s cluster, one persistent ARM64 Linux VM per node: checksum-verified k3s, pinned SSH
+    /// host key, join, tunnel, upgrade, datastore backup/restore and recovery from ownership labels. See docs/apple-k3s.md.
+    Apple {
+        #[command(subcommand)]
+        command: kube_apple::AppleCommand,
     },
 }
 
@@ -8969,6 +8976,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         KubeCommand::Wake { cluster } => {
             println!("{}", kube_checkpoint::wake(api, &cluster.options()?).await?);
         }
+        KubeCommand::Apple { command } => kube_apple::run(api, command).await?,
         KubeCommand::Services { cluster } => {
             let v = kube_host::services(api, &cluster.options()?).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
