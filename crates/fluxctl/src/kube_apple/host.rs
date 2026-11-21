@@ -38,6 +38,15 @@ pub struct LabelledVm {
 
 #[allow(async_fn_in_trait)]
 pub trait Host {
+    /// The VM backend this host runs guests with; decides the VM request's network, the guest architecture and whether
+    /// several nodes can share a private network.
+    fn backend(&self) -> crate::vm_net::Backend {
+        crate::vm_net::Backend::Vz
+    }
+    /// The host port for a new VM's loopback SSH forward (`Qemu` only): free now, stable per VM name.
+    fn ssh_forward_port(&self, vm_name: &str) -> u16 {
+        crate::stack::ssh_forward_port(vm_name)
+    }
     fn user(&self) -> String;
     fn ssh_pub(&self) -> String;
     fn new_host_key(&self) -> Result<HostKey>;
@@ -171,6 +180,13 @@ fn describe_exit(out: &std::process::Output) -> String {
 }
 
 impl<A: VmApi> Host for RealHost<'_, A> {
+    fn backend(&self) -> crate::vm_net::Backend {
+        crate::vm_net::Backend::host()
+    }
+    fn ssh_forward_port(&self, vm_name: &str) -> u16 {
+        crate::vm_net::pick_ssh_port(vm_name, &crate::vm_net::loopback_port_free)
+            .unwrap_or_else(|| crate::stack::ssh_forward_port(vm_name))
+    }
     fn user(&self) -> String {
         self.user.clone()
     }
@@ -535,6 +551,12 @@ impl<A: VmApi> Host for RealHost<'_, A> {
     }
 
     fn install_tunnel_agent(&self, st: &State) -> Result<PathBuf> {
+        if !cfg!(target_os = "macos") {
+            bail!(
+                "--install-agent writes a macOS LaunchAgent; on Linux run `fluxctl kube cluster tunnel {} --foreground` from a systemd unit",
+                st.name
+            );
+        }
         let home = crate::docker_host::home()?;
         let exe = crate::stable_exe::stable_exe().context("locating fluxctl")?;
         let root = std::env::var_os("FLUXVM_APPLE_K3S_HOME").map(PathBuf::from);

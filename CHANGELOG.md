@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+One k3s lifecycle for Mac and Linux ([docs/kubernetes-unified.md](docs/kubernetes-unified.md)). Unit-tested; the Linux path has not been verified on a live host unless stated in the PR.
+
+- Fix: on Linux `fluxctl kube up` and `fluxctl docker up` waited forever for the guest's address (QEMU user networking has none). The VM request now carries a loopback-only ssh forward on a free port (new module `vm_net`, `Backend::{Vz,Qemu}`), which the existing endpoint lookup reads back for `wait_ssh`, ssh and the tunnels.
+- `fluxctl kube cluster` is the one lifecycle (journal, pinned host keys, HA, upgrade, backup, recover); `kube apple` is an alias that prints a deprecation note. On Linux it uses the host's architecture (`k3s`, `sha256sum-amd64.txt`); `--servers N>1`, joining local nodes, `--workers`, `--rosetta` and `--install-agent` say they are Mac-only.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.

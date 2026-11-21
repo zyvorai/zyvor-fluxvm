@@ -103,6 +103,17 @@ pub fn parse_share(s: &str, cwd: &Path, home: Option<&Path>) -> Result<Value> {
 
 /// The VM request for the engine: Debian 13, Docker from apt, the user's SSH key, folders shared at matching paths.
 pub fn engine_spec(o: &EngineOptions, user: &str, key: &str, shares: Vec<Value>) -> Value {
+    engine_spec_net(o, user, key, shares, crate::vm_net::host_network_spec(&o.name, vec![]))
+}
+
+/// [`engine_spec`] with the `network` member given (see `vm_net`).
+pub fn engine_spec_net(
+    o: &EngineOptions,
+    user: &str,
+    key: &str,
+    shares: Vec<Value>,
+    network: Value,
+) -> Value {
     json!({
         "name": o.name,
         "backend": "auto",
@@ -110,7 +121,7 @@ pub fn engine_spec(o: &EngineOptions, user: &str, key: &str, shares: Vec<Value>)
         "vcpus": o.cpus,
         "memory_mib": o.memory_mib,
         "disk_size_gib": o.disk_gib,
-        "network": {"mode": "user", "forwards": []},
+        "network": network,
         "shared_folders": shares,
         "cloud_init": {
             "hostname": o.name,

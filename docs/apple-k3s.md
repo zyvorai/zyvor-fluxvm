@@ -1,4 +1,6 @@
-# Apple-silicon native k3s (`fluxctl kube apple`)
+# Apple-silicon native k3s (`fluxctl kube cluster`, formerly `kube apple`)
+
+> This is now the one k3s lifecycle for Mac and Linux: see [kubernetes-unified.md](kubernetes-unified.md). `fluxctl kube apple` is an alias of `fluxctl kube cluster`. Everything below describes the Mac (vz) backend; on Linux (QEMU) the guest is reached through a loopback ssh forward, and multi-node clusters, Rosetta and the LaunchAgent are Mac-only.
 
 `fluxctl kube apple` runs k3s in **persistent ARM64 Linux guests on Apple Virtualization, one VM per node**, and drives the whole
 lifecycle from the Mac. It sits next to [`fluxctl kube up`](kubernetes-on-mac.md), which it does not replace:

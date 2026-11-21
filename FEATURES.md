@@ -144,7 +144,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `MicroVMJob.spec.ttlSecondsAfterFinished` — Kubernetes-`Job`-style auto-cleanup: the Job controller deletes a finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) once it has sat in `Succeeded`/`Failed` for that long, instead of it (and every completed CI-style child VM) needing to be deleted by hand
 - Not KubeVirt — no CDI or `virtctl`; QEMU has `fluxctl migrate` + migration receivers (not KubeVirt migration parity). See [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
 
-### Apple-native k3s (`fluxctl kube apple`)
+### One k3s lifecycle, Mac and Linux (`fluxctl kube cluster`, alias `kube apple`)
+- Swappable VM backend (`vm_net::Backend`): Apple Virtualization on a Mac, QEMU/KVM on Linux (guest reached through a loopback-only ssh forward on a free port; single server; multi-node, Rosetta and the LaunchAgent are Mac-only); also fixes `kube up` and `docker up` hanging on Linux. Unit-tested; see [docs/kubernetes-unified.md](docs/kubernetes-unified.md)
 - Persistent ARM64 Linux guest per node on Apple Virtualization: `create`, `join` (also to a cluster on another Mac with `--url --token-file`), `status`, `stop`/`start`, `upgrade`, `backup`/`restore`, `recover`, `delete` ([docs/apple-k3s.md](docs/apple-k3s.md))
 - k3s binary verified by SHA-256 on the Mac and again in the guest; SSH host key pinned before first boot; join token travels on stdin only and is redacted from errors
 - Journal written before each VM exists, ownership labels on every VM, `recover` adopts/relabels/reports orphans and never touches another owner's guests; failed joins and partial deletes clean up and stay retryable

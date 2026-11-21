@@ -20,6 +20,22 @@ mod script_ha;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tests_backend {
+    use super::*;
+
+    fn a(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_old_name_is_noted_but_the_forwarder_and_the_new_name_are_not() {
+        assert!(wants_deprecation_note(&a(&["fluxctl", "kube", "apple", "list"])));
+        assert!(!wants_deprecation_note(&a(&["fluxctl", "kube", "cluster", "list"])));
+        assert!(!wants_deprecation_note(&a(&["fluxctl", "kube", "apple", "tunnel", "dev", "--foreground"])));
+    }
+}
+
 use crate::run::VmApi;
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
@@ -29,13 +45,13 @@ use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct BinaryArgs {
-    /// The official k3s-arm64 release binary, downloaded on the Mac. Its SHA-256 is checked here and again in the guest.
+    /// The official k3s release binary for the guests' architecture (`k3s-arm64` on a Mac, `k3s` on x86-64 Linux), downloaded on this host. Its SHA-256 is checked here and again in the guest.
     #[arg(long, value_name = "FILE")]
     binary: Option<PathBuf>,
     /// The binary's published SHA-256 (64 hexadecimal characters).
     #[arg(long, value_name = "HEX")]
     sha256: Option<String>,
-    /// A `sha256sum-arm64.txt` from the release; the entry named like the binary is used.
+    /// The release's `sha256sum-arm64.txt` (`sha256sum-amd64.txt` on x86-64 Linux); the entry named like the binary is used.
     #[arg(long, value_name = "FILE")]
     sha256_file: Option<PathBuf>,
     /// The image already has k3s and its systemd service; install nothing.
@@ -405,7 +421,7 @@ pub fn resolve_install(b: &BinaryArgs, default: Option<Install>) -> Result<Insta
             let entry = path
                 .file_name()
                 .and_then(|f| f.to_str())
-                .unwrap_or("k3s-arm64");
+                .unwrap_or(crate::vm_net::Backend::host().k3s_binary());
             let Some(sha) = expected_sha(b.sha256.as_deref(), b.sha256_file.as_deref(), entry)?
             else {
                 bail!("--binary requires its published --sha256 (or --sha256-file)");
@@ -424,6 +440,19 @@ pub fn resolve_install(b: &BinaryArgs, default: Option<Install>) -> Result<Insta
             })
         }
     }
+}
+
+/// `kube apple` is the old name of `kube cluster`; say so on stderr, except for the long-running forwarder (its own
+/// output goes to a log). Machine output on stdout is never touched.
+pub fn deprecation_note(args: &[String]) {
+    if wants_deprecation_note(args) {
+        eprintln!("note: `fluxctl kube apple` is now `fluxctl kube cluster` (the same command on a Mac and on Linux); the old name still works.");
+    }
+}
+
+fn wants_deprecation_note(args: &[String]) -> bool {
+    let typed = |w: &str| args.iter().any(|a| a == w);
+    typed("apple") && !typed("cluster") && !typed("--foreground")
 }
 
 pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
