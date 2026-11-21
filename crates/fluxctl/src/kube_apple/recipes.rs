@@ -5,7 +5,6 @@
 //! address pool (replacing ServiceLB), cert-manager, and a stock metrics-server for clusters that turned the bundled one off.
 //! The generators (`metallb_pool_yaml`) are pure; the installs go through [`Remote`]. Not run against real hardware.
 
-use super::model::*;
 use super::pins::{self, Pin, Source};
 use super::platform::Remote;
 use super::script::K3S_BIN;
