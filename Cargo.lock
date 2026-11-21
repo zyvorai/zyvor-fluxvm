@@ -2337,6 +2337,7 @@ dependencies = [
  "fluxvm-apple",
  "fluxvm-backup-s3",
  "fluxvm-core",
+ "fluxvm-ctr",
  "fluxvm-guest-protocol",
  "fluxvm-image",
  "fluxvm-intelligence",
@@ -2604,6 +2605,18 @@ dependencies = [
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "uuid",
+]
+
+[[package]]
+name = "fluxvm-ctr"
+version = "0.4.21"
+dependencies = [
+ "anyhow",
+ "fluxvm-procbox",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2890,6 +2903,7 @@ dependencies = [
  "fluxvm-cgroup",
  "fluxvm-cloud-hypervisor",
  "fluxvm-core",
+ "fluxvm-ctr",
  "fluxvm-diskinject",
  "fluxvm-firecracker",
  "fluxvm-guest-protocol",

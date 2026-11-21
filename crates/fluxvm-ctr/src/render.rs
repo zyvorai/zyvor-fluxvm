@@ -7,9 +7,11 @@
 //! `sandbox inspect`), the `systemd-run` command line the daemon runs, and the golden tests.
 
 use crate::spec::{ContainerSpec, Net, Restart, Seccomp};
+use serde::{Deserialize, Serialize};
 
 /// Who manages the container's cgroup and lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Manager {
     /// `systemd-run` on the system manager (daemon runs as root).
     SystemdSystem,

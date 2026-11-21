@@ -719,6 +719,13 @@ pub async fn gather(listen: &str, state_dir: &Path, host_only: bool) -> Vec<Chec
                 .map(|t| t.trim() == "1"),
         ));
         out.push(check_open_files(open_files_soft()));
+        for l in fluxvm_ctr::probe::probe().doctor() {
+            out.push(match l.level {
+                "ok" => Check::ok(l.name, l.detail),
+                "warn" => Check::warn(l.name, l.detail, l.fix),
+                _ => Check::fail(l.name, l.detail, l.fix),
+            });
+        }
     }
 
     out.push(check_disk(state_dir, free_bytes(state_dir)));

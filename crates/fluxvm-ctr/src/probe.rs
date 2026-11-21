@@ -114,9 +114,9 @@ impl HostFacts {
     /// Lines for `fluxctl doctor`: `(level, name, detail, fix)`, level one of ok/warn/fail.
     pub fn doctor(&self) -> Vec<DoctorLine> {
         let mut v = Vec::new();
-        let line = |level: &'static str, name: &str, detail: String, fix: &str| DoctorLine {
+        let line = |level: &'static str, name: &'static str, detail: String, fix: &str| DoctorLine {
             level,
-            name: name.to_string(),
+            name,
             detail,
             fix: fix.to_string(),
         };
@@ -228,7 +228,7 @@ impl HostFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DoctorLine {
     pub level: &'static str,
-    pub name: String,
+    pub name: &'static str,
     pub detail: String,
     pub fix: String,
 }

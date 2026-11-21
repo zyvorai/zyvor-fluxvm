@@ -80,9 +80,43 @@ pub struct RunArgs {
     /// Give up (and stop following) after this many seconds.
     #[arg(long, default_value_t = 3600)]
     pub timeout_seconds: u64,
+    #[command(flatten)]
+    pub rt: RuntimeArgs,
     /// Replaces the image's `Cmd`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+/// Which runtime runs the image, and the settings only FluxVM's own Linux container runtime has.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct RuntimeArgs {
+    /// `auto` (default: a container for --trust dev/trusted, a microVM for untrusted/agent), `container` (FluxVM's own
+    /// Linux container runtime: fast, shares the host kernel) or `vm` (a microVM: its own kernel). See docs/linux-runtime.md.
+    #[arg(long)]
+    pub runtime: Option<String>,
+    /// `dev`, `trusted`, `untrusted` or `agent`. Drives `auto`, and `--runtime container` is refused for the last two.
+    /// Default: the daemon's `sandbox.container.default_trust` (untrusted).
+    #[arg(long)]
+    pub trust: Option<String>,
+    /// Run untrusted/agent code in a container anyway (shared host kernel). The operator must also allow it
+    /// (`sandbox.container.allow_untrusted`).
+    #[arg(long)]
+    pub allow_container_untrusted: bool,
+    /// Container CPU limit in percent of one core (`CPUQuota=`).
+    #[arg(long)]
+    pub cpu_percent: Option<u32>,
+    /// Container process limit (`TasksMax=`).
+    #[arg(long)]
+    pub pids: Option<u64>,
+    /// Container block I/O weight, 1-10000 (`IOWeight=`).
+    #[arg(long)]
+    pub io_weight: Option<u16>,
+    /// Container network: `none` (default, loopback only) or `host` (trust dev/trusted only).
+    #[arg(long)]
+    pub net: Option<String>,
+    /// Print the container as the systemd unit it would be, and the systemd-run command, then exit. Runs nothing.
+    #[arg(long)]
+    pub print_unit: bool,
 }
 
 impl RunArgs {
@@ -135,6 +169,35 @@ impl RunArgs {
             "offline": self.offline,
             "allow_hosts": self.allow_hosts,
         });
+        let rt = &self.rt;
+        if let Some(r) = &rt.runtime {
+            req["runtime"] = json!(r.parse::<fluxvm_ctr::runtime::Runtime>().map_err(anyhow::Error::msg)?.as_str());
+        }
+        if let Some(t) = &rt.trust {
+            req["trust"] = json!(t.parse::<fluxvm_ctr::runtime::Trust>().map_err(anyhow::Error::msg)?.as_str());
+        }
+        if rt.allow_container_untrusted {
+            req["allow_container_untrusted"] = json!(true);
+        }
+        let mut container = serde_json::Map::new();
+        if let Some(c) = rt.cpu_percent {
+            container.insert("cpu_percent".into(), json!(c));
+        }
+        if let Some(p) = rt.pids {
+            container.insert("pids".into(), json!(p));
+        }
+        if let Some(w) = rt.io_weight {
+            container.insert("io_weight".into(), json!(w));
+        }
+        if let Some(n) = &rt.net {
+            if !matches!(n.as_str(), "none" | "host") {
+                bail!("--net {n:?}: use none or host");
+            }
+            container.insert("net".into(), json!(n));
+        }
+        if !container.is_empty() {
+            req["container"] = Value::Object(container);
+        }
         for (k, v) in [
             ("profile", json!(self.profile)),
             ("vcpus", json!(self.vcpus)),
@@ -200,21 +263,22 @@ pub enum Target<'a> {
 }
 
 impl Target<'_> {
-    async fn create(&self, req: Value) -> Result<Uuid> {
-        let id = match self {
+    async fn create(&self, req: Value) -> Result<(Uuid, Vec<String>)> {
+        Ok(match self {
             Target::Local(m) => {
                 let req: SandboxCreateRequest = serde_json::from_value(req)?;
-                m.create_sandbox(req, None, None).await?.id
+                let vm = m.create_sandbox(req, None, None).await?;
+                (vm.id, runtime_note(&serde_json::to_value(&vm.labels)?))
             }
             Target::Remote(r) => {
                 let vm = r.call(Method::POST, "/v1/sandboxes", Some(req)).await?;
-                vm["id"]
+                let id = vm["id"]
                     .as_str()
                     .context("the daemon returned no sandbox id")?
-                    .parse()?
+                    .parse()?;
+                (id, runtime_note(&vm["labels"]))
             }
-        };
-        Ok(id)
+        })
     }
 
     pub async fn logs(&self, id: Uuid, lines: usize) -> Result<SandboxLogs> {
@@ -240,6 +304,99 @@ impl Target<'_> {
                 .map(drop),
         }
     }
+}
+
+/// The runtime the daemon chose and why, from the record's labels: printed so the choice is never silent.
+fn runtime_note(labels: &Value) -> Vec<String> {
+    let Some(rt) = labels["fluxvm.runtime"].as_str() else {
+        return Vec::new();
+    };
+    let mut out = vec![format!(
+        "runtime: {rt} ({})",
+        labels["fluxvm.runtime.reason"].as_str().unwrap_or("")
+    )];
+    out.push(
+        match rt {
+            "container" => fluxvm_ctr::runtime::CONTAINER_ISOLATION,
+            _ => fluxvm_ctr::runtime::VM_ISOLATION,
+        }
+        .to_string(),
+    );
+    out
+}
+
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-:=@%+,".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// `--print-unit`: the container as the systemd unit it would be, built with the same code the daemon uses
+/// (and this machine's defaults, so the daemon's `sandbox.container` limits may differ).
+pub fn print_unit(args: &RunArgs) -> Result<String> {
+    use fluxvm_core::config::ContainerRuntimeConfig;
+    use fluxvm_ctr::{render, runtime::Trust};
+    use fluxvm_scheduler::container_sandbox::{ContainerOptions, SpecInputs, build_spec};
+    if let Some(r) = &args.rt.runtime
+        && r != "container"
+    {
+        bail!("--print-unit renders the native container runtime: use --runtime container (not {r})");
+    }
+    if args.rt.runtime.is_none() {
+        bail!("--print-unit needs --runtime container: it prints what that runtime would start");
+    }
+    let req: SandboxCreateRequest = serde_json::from_value(args.request()?)?;
+    let oci = req.oci.clone().context("no image")?;
+    fluxvm_scheduler::container_sandbox::refuse_unsupported(&req, &oci)?;
+    let trust: Trust = args.rt.trust.as_deref().unwrap_or("untrusted").parse().map_err(anyhow::Error::msg)?;
+    let facts = fluxvm_ctr::probe::probe();
+    let id = Uuid::new_v4();
+    let argv: Vec<String> = match (&oci.entrypoint, &oci.command) {
+        (None, None) => vec!["<the image's Entrypoint and Cmd, read when the image is pulled>".into()],
+        (e, c) => e.iter().chain(c.iter()).flatten().cloned().collect(),
+    };
+    let process = fluxvm_oci_init::config::ProcessSpec {
+        argv,
+        env: oci.env.clone(),
+        cwd: oci.workdir.clone().unwrap_or_else(|| "/".into()),
+        user: oci.user.clone().unwrap_or_else(|| "0:0".into()),
+    };
+    let launcher = facts.launcher.clone().unwrap_or_else(|| "/usr/bin/fluxvm-container-run".into());
+    let manager = facts.manager();
+    let options: ContainerOptions = req.container.clone().unwrap_or_default();
+    let state = std::path::PathBuf::from(format!("/var/lib/fluxvm/instances/{id}"));
+    let rootfs = std::path::PathBuf::from("/var/lib/fluxvm/ctr/rootfs/<manifest-digest>");
+    let spec = build_spec(&SpecInputs {
+        id,
+        state_dir: &state,
+        rootfs: &rootfs,
+        image_ref: &args.image,
+        process: &process,
+        oci: &oci,
+        req: &req,
+        options: &options,
+        cfg: &ContainerRuntimeConfig::default(),
+        trust,
+        rootless: !facts.root,
+        launcher: &launcher,
+        manager,
+    })?;
+    let mut out = format!(
+        "# Nothing was run. This is the container `fluxctl sandbox run {} --runtime container` would start on this host
+# (manager: {}; limits and defaults of this machine's config).
+",
+        args.image,
+        manager.as_str()
+    );
+    out.push_str(&render::unit_file(&spec, !facts.root));
+    out.push_str("
+# The same thing as a command:
+");
+    out.push_str(&render::systemd_run_argv(&spec, manager).iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" \\\n  "));
+    out.push('\n');
+    Ok(out)
 }
 
 /// Console lines written by init, the guest agent, or as protocol markers rather than by the container.
@@ -272,8 +429,15 @@ fn unseen<'a>(printed: &[&str], now: &'a str) -> Vec<&'a str> {
 
 /// Creates the sandbox, follows its console until the process exits, and returns the process's exit code.
 pub async fn run(target: Target<'_>, args: &RunArgs) -> Result<i32> {
-    let id = target.create(args.request()?).await?;
+    if args.rt.print_unit {
+        print!("{}", print_unit(args)?);
+        return Ok(0);
+    }
+    let (id, note) = target.create(args.request()?).await?;
     eprintln!("sandbox {id} started from {}", args.image);
+    for line in note {
+        eprintln!("{line}");
+    }
     let outcome = follow(&target, id, Duration::from_secs(args.timeout_seconds)).await;
     if args.rm
         && let Err(e) = target.delete(id).await
@@ -326,6 +490,63 @@ async fn follow(target: &Target<'_>, id: Uuid, timeout: Duration) -> Result<i32>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        args: RunArgs,
+    }
+
+    impl RunArgs {
+        fn try_parse_from<I: IntoIterator<Item = &'static str>>(it: I) -> Result<RunArgs, clap::Error> {
+            Wrap::try_parse_from(it).map(|w| w.args)
+        }
+    }
+
+    #[test]
+    fn the_runtime_choice_is_always_explained() {
+        let labels = json!({"fluxvm.runtime": "container", "fluxvm.runtime.reason": "auto: trust=dev"});
+        let n = runtime_note(&labels);
+        assert_eq!(n[0], "runtime: container (auto: trust=dev)");
+        assert!(n[1].contains("shares the host kernel"));
+        let n = runtime_note(&json!({"fluxvm.runtime": "vm", "fluxvm.runtime.reason": "r"}));
+        assert!(n[1].contains("own kernel"));
+        assert!(runtime_note(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn bad_runtime_trust_and_net_are_rejected_before_anything_is_sent() {
+        let mut a = RunArgs::try_parse_from(["run", "alpine"]).unwrap();
+        a.rt.runtime = Some("docker".into());
+        assert!(a.request().unwrap_err().to_string().contains("unknown runtime"));
+        a.rt.runtime = Some("vm".into());
+        a.rt.trust = Some("hostile".into());
+        assert!(a.request().unwrap_err().to_string().contains("unknown trust"));
+        a.rt.trust = None;
+        a.rt.net = Some("bridge".into());
+        assert!(a.request().unwrap_err().to_string().contains("none or host"));
+    }
+
+    #[test]
+    fn print_unit_needs_the_container_runtime_and_runs_nothing() {
+        let mut a = RunArgs::try_parse_from(["run", "alpine:3.22", "--print-unit"]).unwrap();
+        assert!(print_unit(&a).unwrap_err().to_string().contains("--runtime container"));
+        a.rt.runtime = Some("vm".into());
+        assert!(print_unit(&a).unwrap_err().to_string().contains("not vm"));
+        let a = RunArgs::try_parse_from([
+            "run", "alpine:3.22", "--runtime", "container", "--trust", "dev", "--memory-mib", "128", "--pids", "32", "--print-unit", "--", "echo", "hi",
+        ])
+        .unwrap();
+        let u = print_unit(&a).unwrap();
+        assert!(u.contains("Nothing was run"), "{u}");
+        assert!(u.contains("MemoryMax=128M") && u.contains("TasksMax=32"), "{u}");
+        assert!(u.contains("[X-FluxVM-Container]") && u.contains("PrivateNetwork=yes"), "{u}");
+        assert!(u.contains("systemd-run"), "{u}");
+        assert!(u.contains("'--description=FluxVM container"), "{u}");
+        let ports = RunArgs::try_parse_from(["run", "nginx", "--runtime", "container", "-p", "8080:80", "--print-unit"]).unwrap();
+        assert!(print_unit(&ports).unwrap_err().to_string().contains("does not support ports"));
+    }
 
     #[test]
     fn unseen_lines_follow_a_moving_tail() {
@@ -383,6 +604,13 @@ mod tests {
             rm: true,
             timeout_seconds: 10,
             command: vec!["echo".into(), "hi".into()],
+            rt: RuntimeArgs {
+                runtime: Some("container".into()),
+                trust: Some("dev".into()),
+                cpu_percent: Some(50),
+                pids: Some(64),
+                ..Default::default()
+            },
         };
         let req: SandboxCreateRequest = serde_json::from_value(args.request().unwrap()).unwrap();
         let oci = req.oci.unwrap();
@@ -404,6 +632,9 @@ mod tests {
         assert_eq!(req.volumes.len(), 2);
         assert!(req.volumes[1].read_only && req.volumes[1].guest_path == "/srv/cfg");
         assert_eq!(req.memory_mib, Some(256));
+        assert_eq!(req.runtime, Some(fluxvm_ctr::runtime::Runtime::Container));
+        assert_eq!(req.trust, Some(fluxvm_ctr::runtime::Trust::Dev));
+        assert_eq!(req.container.unwrap().pids, Some(64));
         assert!(volumes_json(&["bad".into()]).is_err());
         assert!(volumes_json(&["a:/b:xx".into()]).is_err());
     }

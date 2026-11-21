@@ -26,6 +26,10 @@ curl localhost:8080
 MCP: `sandbox_create` with `oci_image` (plus optional `oci_command`, `oci_env` and `oci_ports`), then `sandbox_exec`,
 `sandbox_read_file` and `sandbox_write_file` as for any sandbox. `sandbox_logs` returns the console and the exit code.
 
+**On Linux** the same command runs the image with FluxVM's own container runtime (`--runtime container`, a transient systemd unit with
+namespaces, cgroup v2 and seccomp) or, for untrusted code, is refused until the one-VM-per-container flow is extended to the Linux backends. The choice, the
+support matrix and the limits are in [linux-runtime.md](linux-runtime.md).
+
 Several containers that work together (a database and an app, say) are a stack: see
 [macos-stacks.md](macos-stacks.md#container-services), which can also import a `docker-compose.yml`.
 

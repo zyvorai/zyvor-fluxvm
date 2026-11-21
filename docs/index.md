@@ -11,7 +11,7 @@ Every feature area and every document, in one place.
 | A Mac with Apple silicon | [install-macos.md](install-macos.md) (Homebrew) or [install.md](install.md) (`curl \| bash`, no sudo), then [macos.md](macos.md) |
 | A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
 | A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
-| Something that is not working | [troubleshooting.md](troubleshooting.md) |
+| Something that is not working | [troubleshooting.md](troubleshooting.md), or `fluxctl cluster status` and `fluxctl fix` ([cluster-home.md](cluster-home.md)) |
 | A job in mind (CI runners, agent sandboxes, per-branch environments) | [Use cases](#use-cases) below |
 
 ## Feature highlights
@@ -110,6 +110,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Native macOS backend (`vz`), Mac sandboxes and agent density | [docs/macos.md](macos.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
 | Guest-network observability (flows, DNS, capture) and FluxDisk overlays (`fluxvm-blockd`) | [docs/netobs.md](netobs.md) · [docs/flux-disk.md](flux-disk.md) |
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
+| Linux: run an image as FluxVM's own container or as a microVM, `--runtime auto\|container\|vm` | [docs/linux-runtime.md](linux-runtime.md) |
 | A real Docker engine on a Mac (`docker build`, Compose, bind mounts) | [docs/docker-engine.md](docker-engine.md) |
 | A Kubernetes (k3s) cluster on a Mac | [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
 | Undo a bad `kubectl apply`, bisect cluster history, reset to a clean state, chaos-test, sleep and wake a cluster | [docs/kubernetes-on-mac.md#time-travel-for-your-cluster](kubernetes-on-mac.md#time-travel-for-your-cluster) |

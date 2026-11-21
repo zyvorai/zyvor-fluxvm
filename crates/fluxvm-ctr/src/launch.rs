@@ -367,11 +367,20 @@ fn child(spec: &ContainerSpec, rootless: bool) -> Result<std::convert::Infallibl
     Err(anyhow::Error::from(exec_argv(spec)).context(format!("executing {}", spec.argv[0])))
 }
 
-/// Run `argv` inside the running container whose init has host pid `pid`, with the container's restrictions.
-pub fn exec_in(spec: &ContainerSpec, pid: i32, argv: &[String]) -> Result<i32> {
-    if argv.is_empty() {
-        bail!("exec needs a command");
-    }
+/// Move this process into the cgroup of host pid `pid`. Refused, not skipped: an exec that escaped the memory limit
+/// would make the limit meaningless.
+fn join_cgroup_of(pid: i32) -> Result<()> {
+    let raw = fs::read_to_string(format!("/proc/{pid}/cgroup")).with_context(|| format!("reading /proc/{pid}/cgroup (is the container running?)"))?;
+    let rel = crate::probe::parse_self_cgroup(&raw).context("the container is not in a cgroup v2 hierarchy")?;
+    let dir = format!("/sys/fs/cgroup{}", rel.trim_end_matches('/'));
+    fs::write(format!("{dir}/cgroup.procs"), std::process::id().to_string()).with_context(|| {
+        format!("joining the container's cgroup {dir}: run the daemon where it can write to it (a unit with Delegate=yes, or as root)")
+    })
+}
+
+/// Join the namespaces of the container whose init has host pid `pid` (user first: it grants the capabilities the
+/// others need). Afterwards this process's root is the container's root.
+fn join_namespaces(pid: i32) -> Result<()> {
     let ns = |n: &str| PathBuf::from(format!("/proc/{pid}/ns/{n}"));
     let open = |n: &str| -> Result<i32> {
         let c = cstr(&ns(n))?;
@@ -387,8 +396,6 @@ pub fn exec_in(spec: &ContainerSpec, pid: i32, argv: &[String]) -> Result<i32> {
             _ => false,
         }
     };
-    let rootless = unsafe { libc::geteuid() } != 0;
-    // The user namespace first: it grants the capabilities the others need.
     for (name, flag) in [
         ("user", libc::CLONE_NEWUSER),
         ("mnt", libc::CLONE_NEWNS),
@@ -406,6 +413,55 @@ pub fn exec_in(spec: &ContainerSpec, pid: i32, argv: &[String]) -> Result<i32> {
         }
         unsafe { libc::close(fd) };
     }
+    Ok(())
+}
+
+/// Read `path` as the container sees it. Returns `(mode, bytes)`; refuses anything over `max` bytes.
+pub fn read_in(pid: i32, path: &str, max: u64) -> Result<(u32, Vec<u8>)> {
+    use std::io::Read;
+    join_namespaces(pid)?;
+    let f = fs::File::open(path).with_context(|| format!("opening {path} in the container"))?;
+    let meta = f.metadata()?;
+    if !meta.is_file() {
+        bail!("{path} is not a regular file");
+    }
+    if meta.len() > max {
+        bail!("{path} is {} bytes; the limit is {max}", meta.len());
+    }
+    let mut buf = Vec::new();
+    f.take(max + 1).read_to_end(&mut buf)?;
+    Ok((std::os::unix::fs::MetadataExt::mode(&meta) & 0o7777, buf))
+}
+
+/// Write `data` to `path` as the container sees it, creating parent directories.
+pub fn write_in(pid: i32, path: &str, mode: u32, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    join_namespaces(pid)?;
+    if let Some(parent) = Path::new(path).parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {} in the container", parent.display()))?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)
+        .with_context(|| format!("writing {path} in the container"))?;
+    f.write_all(data)?;
+    Ok(())
+}
+
+/// Run `argv` inside the running container whose init has host pid `pid`, with the container's restrictions.
+pub fn exec_in(spec: &ContainerSpec, pid: i32, argv: &[String]) -> Result<i32> {
+    if argv.is_empty() {
+        bail!("exec needs a command");
+    }
+    let rootless = unsafe { libc::geteuid() } != 0;
+    // Same cgroup as the container, so the limits cover what exec starts. Before the mount namespace changes,
+    // while /sys/fs/cgroup is still the host's.
+    join_cgroup_of(pid)?;
+    join_namespaces(pid)?;
     install_forwarding();
     let pid_child = unsafe { libc::fork() };
     if pid_child < 0 {

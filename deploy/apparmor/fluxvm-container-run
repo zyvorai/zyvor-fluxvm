@@ -1,0 +1,24 @@
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+#
+# AppArmor profile that lets FluxVM's container launcher create user namespaces.
+#
+# Why: Ubuntu 23.10+ sets kernel.apparmor_restrict_unprivileged_userns=1. An unprivileged program without a profile that
+# says `userns,` gets a user namespace with no capabilities (mount(2) and pivot_root(2) then fail), so a ROOTLESS native
+# container cannot start. This profile names the launcher and allows it, the same way Ubuntu's own profiles do for
+# runc, crun and podman. It confines nothing else: the container's confinement is namespaces, cgroup v2, seccomp and
+# dropped capabilities inside the launcher (docs/linux-runtime.md).
+#
+# Install: sudo cp deploy/apparmor/fluxvm-container-run /etc/apparmor.d/fluxvm-container-run
+#          sudo apparmor_parser -r /etc/apparmor.d/fluxvm-container-run
+# Adjust the path below if the launcher is installed elsewhere. A root daemon does not need this.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile fluxvm-container-run /usr/{local/,}bin/fluxvm-container-run flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/fluxvm-container-run>
+}
