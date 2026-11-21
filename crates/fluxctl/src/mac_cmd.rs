@@ -112,6 +112,12 @@ pub enum MacCommand {
     },
     #[command(flatten)]
     More(crate::mac_more::MacMore),
+    /// The Mac that runs FluxVM as a server: power and sleep status, a keep-awake LaunchAgent, the unlocked-session check,
+    /// recommended settings and Rosetta. Read-only unless you pass `--apply`. See docs/macos-host.md.
+    Host {
+        #[command(subcommand)]
+        command: crate::mac_host::HostCommand,
+    },
 }
 
 impl MacCommand {
@@ -542,6 +548,10 @@ pub async fn run(command: MacCommand) -> Result<()> {
         command.is_client_side(),
         "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
     );
+    let command = match command {
+        MacCommand::Host { command } => return crate::mac_host::run(command),
+        c => c,
+    };
     let store = Store::open(mac_store::default_root()?)?;
     match command {
         MacCommand::Images { json } => {
@@ -662,7 +672,8 @@ pub async fn run(command: MacCommand) -> Result<()> {
         MacCommand::Run { .. }
         | MacCommand::Ps { .. }
         | MacCommand::Rm { .. }
-        | MacCommand::Exec { .. } => unreachable!("rejected above"),
+        | MacCommand::Exec { .. }
+        | MacCommand::Host { .. } => unreachable!("rejected above"),
     }
     Ok(())
 }

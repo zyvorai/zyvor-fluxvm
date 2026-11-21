@@ -162,6 +162,11 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `fluxctl mac images|pull|push|tag|rmi|import` keeps macOS guest templates in a local store (`~/.fluxvm/mac-images`, or `$FLUXVM_MAC_STORE`) and moves them to and from an OCI registry; names can share files, which are freed with the last name
 - `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build` runs a Macfile (RUN over SSH, COPY over scp) in a throwaway instance and stores the result as a template, `--dry-run` prints the plan (SNAPSHOT and IPSW refused; the step logic is unit-tested with a fake host, live execution not verified); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
 
+### Mac as a host (`fluxctl mac host`)
+- `status` (power, sleep holders, session lock, auto-login, FileVault, displays, free disk, thermal; `--json`), `headless-check` (the unlocked-session requirement with a fix per finding; exit 1 on failure), `rosetta` (runner answer vs runtime file, guest steps)
+- `keepawake install|uninstall|status` manages a `caffeinate` LaunchAgent, no sudo; `tune` prints recommended `pmset` settings and changes only what `--apply --only NAME` names, via `sudo pmset -a`; auto-login, screen lock and FileVault are never changed
+- Parsers tested on captured command output, decisions and apply on a fake host; read-only commands run on one Mac, `keepawake install` and `tune --apply` not run ([docs/macos-host.md](docs/macos-host.md), research and backlog in [docs/apple-host-research.md](docs/apple-host-research.md))
+
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
 - `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere

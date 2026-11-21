@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+`fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
+
+- New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
+  `headless-check` reports the unlocked-session requirement with an exact fix per finding. `keepawake` manages a `caffeinate` LaunchAgent (no sudo). `tune` only prints, unless `--apply --only NAME` names the `sudo pmset -a` changes to run.
+  `rosetta` compares the runner's availability with the runtime file and prints the guest mount and binfmt steps. Research with dated sources and a 32-item backlog: [docs/apple-host-research.md](docs/apple-host-research.md).
+
 Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
 
 - New `fluxctl kube apple create|join|kubeconfig|tunnel|status|list|stop|start|persist|upgrade|backup|restore|recover|delete|logs` (module `kube_apple`, see [docs/apple-k3s.md](docs/apple-k3s.md)).

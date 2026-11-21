@@ -1,0 +1,36 @@
+2026-01-01 00:00:00 +0000 
+Assertion status system-wide:
+   BackgroundTask                 0
+   ApplePushServiceTask           0
+   UserIsActive                   1
+   PreventUserIdleDisplaySleep    0
+   SoftwareUpdateTask             0
+   PreventSystemSleep             1
+   PreventSystemSleepSecurityIndicator 0
+   ExternalMedia                  1
+   PreventUserIdleSystemSleep     1
+   NetworkClientActive            1
+Listed by owning process:
+   pid 68320(screensharingd): [0x00002a7b00078c52] 03:06:58 PreventSystemSleep named: "Remote user is connected"  
+   pid 68320(screensharingd): [0x000027e400098b72] 03:05:57 UserIsActive named: "Remote user active"  
+   pid 594(powerd): [0x0000006d00018009] 06:06:24 PreventUserIdleSystemSleep named: "Powerd - Prevent sleep while display is on"  
+   pid 594(powerd): [0x0000006d00088000] 06:06:24 ExternalMedia named: "com.apple.powermanagement.externalmediamounted"  
+   pid 594(powerd): [0x0000006d0009800a] 06:06:24 UserIsActive named: "com.apple.powerd.ws.initialize"  
+   pid 594(powerd): [0x00002a8500118c55] 03:06:48 NetworkClientActive named: "com.apple.powermanagement.ttyassertion"  
+   pid 51214(caffeinate): [0x000055da00018f14] 00:01:55 PreventUserIdleSystemSleep named: "caffeinate command-line tool"  
+	Details: caffeinate asserting for 300 secs
+	Localized=THE CAFFEINATE TOOL IS PREVENTING SLEEP.
+	Timeout will fire in 185 secs Action=TimeoutActionRelease
+   pid 653(WindowServer): [0x00000086000981b8] 03:05:57 UserIsActive named: "com.apple.iohideventsystem.queue.tickle.nxevent service:IOHIDSystem pid:68321 process:ScreensharingAgent"  
+   pid 1506(caffeinate): [0x0000008c0001864a] 06:05:53 PreventUserIdleSystemSleep named: "caffeinate command-line tool"  
+	Details: caffeinate asserting forever
+	Localized=THE CAFFEINATE TOOL IS PREVENTING SLEEP.
+   pid 1506(caffeinate): [0x0000008c0007864b] 06:05:53 PreventSystemSleep named: "caffeinate command-line tool"  
+	Details: caffeinate asserting forever
+	Localized=THE CAFFEINATE TOOL IS PREVENTING SLEEP.
+   pid 608(mds): [0x00000d48000b8989] 05:11:33 BackgroundTask named: "com.apple.metadata.mds.power"  
+Kernel Assertions: 0x104=USB,MAGICWAKE
+   id=563  level=255 0x4=USB creat= description=com.apple.usb.externaldevice.02110000 owner=USB2.0 Hub
+   id=565  level=255 0x4=USB creat= description=com.apple.usb.externaldevice.02210000 owner=USB3.1 Hub
+   id=567  level=255 0x4=USB creat= description=com.apple.usb.externaldevice.02212000 owner=USB 10/100/1000 LAN
+   id=574  level=255 0x100=MAGICWAKE creat= description=en1 owner=IOSkywalkNetworkBSDClient

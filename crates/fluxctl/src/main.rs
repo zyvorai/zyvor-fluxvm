@@ -88,6 +88,7 @@ mod mac_fleet;
 mod mac_fleet_inv;
 mod mac_fleet_remote;
 mod mac_fleet_ssh;
+mod mac_host;
 mod mac_compose;
 mod mac_config;
 mod mac_cp;
