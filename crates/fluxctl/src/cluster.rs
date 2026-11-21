@@ -889,6 +889,9 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
             })?;
             match fleet_client::deregister(&a.c.central, Some(&op), &a.node).await {
                 Ok(()) => println!("{} removed from the cluster", a.node),
+                Err(e) if format!("{e:#}").contains("404") => {
+                    println!("{} is not registered with this central (already removed?)", a.node)
+                }
                 Err(e) => println!(
                     "{}'s credential is revoked, but central still counts it as healthy ({e:#}). Re-run in about 30 seconds, after it has stopped.",
                     a.node
@@ -1058,7 +1061,9 @@ fn run_k3s(k: K3sArgs) -> Result<()> {
 /// The one fix most likely to matter for what the test printed. Mirrors `selftest_hint` in scripts/install.sh.
 pub fn selftest_hint(output: &str) -> &'static str {
     let o = output;
-    if o.contains("kvm") && o.contains("ermission") {
+    if o.contains("waiting for the guest's address") {
+        "fluxctl run cannot reach a guest on Linux's user-mode network yet (no port forwards); the fix is in the kube-unified work. The cluster itself is fine; re-run: fluxctl cluster selftest after upgrading."
+    } else if o.contains("kvm") && o.contains("ermission") {
         "Your user cannot open /dev/kvm: sudo usermod -aG kvm $USER, then log out and in (or: newgrp kvm)."
     } else if o.contains("/dev/kvm") || o.contains("KVM") {
         "No usable /dev/kvm: enable virtualisation in the firmware; on a cloud VM use an instance type with nested virtualisation."
@@ -1292,6 +1297,7 @@ mod tests {
     #[test]
     fn the_hint_names_the_kvm_fix() {
         assert!(selftest_hint("qemu: Could not access KVM kernel module: Permission denied /dev/kvm").contains("usermod -aG kvm"));
+        assert!(selftest_hint("still waiting for the guest's address (60s)…").contains("user-mode network"));
         assert!(selftest_hint("cloud-localds: not found").contains("cloud-image-utils"));
         assert!(selftest_hint("mkdir /run/fluxvm: Permission denied").contains("FLUXVM_CONFIG"));
         assert!(selftest_hint("weird").contains("fluxctl doctor"));

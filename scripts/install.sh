@@ -451,7 +451,7 @@ fetch_verified() { # URL DEST SUMS-URL ALGO NAME-IN-SUMS: resumable download che
   if [ -z "$want" ]; then printf 'warning: %s is not listed in %s\n' "$name" "$sums" >&2; return 1; fi
   if [ -f "$dest" ] && [ "$(sha_of "$algo" "$dest")" = "$want" ]; then say "Cached and verified: $dest"; return 0; fi
   say "Downloading $name (resumable; run again to resume if it is interrupted)"
-  if ! curl -fL -C - "$PROGRESS" -o "$dest.part" "$url"; then
+  if ! curl -fL -C - --retry 5 --retry-delay 2 --retry-all-errors "$PROGRESS" -o "$dest.part" "$url"; then
     printf 'warning: download failed (%s); run again to resume\n' "$url" >&2; return 1
   fi
   got="$(sha_of "$algo" "$dest.part")"
@@ -506,6 +506,7 @@ ensure_engine_image() { # a pre-baked Docker engine image, when a URL is configu
 # ---------------------------------------------------------------------------------------------- self-test
 selftest_hint() { # OUTPUT: the fix most likely to matter
   case "$1" in
+    *"waiting for the guest's address"*) echo "fluxctl run cannot reach a guest on Linux's user-mode network yet (no port forwards); the fix is in the kube-unified work. The cluster itself is fine; re-run: fluxctl cluster selftest after upgrading." ;;
     *kvm*ermission*|*ermission*kvm*) echo "Your user cannot open /dev/kvm: sudo usermod -aG kvm \$USER, then log out and in (or: newgrp kvm)." ;;
     */dev/kvm*|*KVM*) echo "No usable /dev/kvm: enable virtualisation in the firmware; on a cloud VM use an instance type with nested virtualisation." ;;
     *cloud-localds*) echo "Install cloud-image-utils (cloud-localds): sudo apt-get install cloud-image-utils (Fedora: cloud-utils)." ;;
