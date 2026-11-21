@@ -393,6 +393,30 @@ impl EnrollState {
         }
     }
 
+    /// The credential for a machine a person approved by short code (`central_pair.rs`). It goes through exactly the
+    /// same path as a join token: a single-use token limited to this one name is minted, spent on `enroll` and revoked,
+    /// so pairing adds no credential type, no way past `--node-auth`, and leaves no token behind.
+    pub(super) fn issue_paired(
+        &mut self,
+        name: &str,
+        node_id: &str,
+        now: i64,
+    ) -> Result<String, EnrollError> {
+        self.ensure_secret();
+        let (id, token) = self.create_token(
+            now,
+            Some(60),
+            Some(1),
+            Some(name.to_owned()),
+            "paired by short code".into(),
+        );
+        let out = self.enroll(&token, name, node_id, now);
+        if let Some(t) = self.tokens.get_mut(&id) {
+            t.revoked = true;
+        }
+        out
+    }
+
     /// A deregistered node loses its credential.
     pub(super) fn forget(&mut self, name: &str) {
         self.rebind(name);
@@ -406,6 +430,8 @@ pub(super) struct Enroll {
     lock: Option<PathBuf>,
     /// Tighter than the heartbeat bucket: enrollment is rare and each attempt hashes a secret.
     pub(super) admission: super::registry::Admission,
+    /// Machines asking to join by short code (memory only; see `central_pair.rs`).
+    pub(super) pair: tokio::sync::Mutex<fluxvm_core::pairing::PairBook>,
 }
 
 impl Default for Enroll {
@@ -415,6 +441,7 @@ impl Default for Enroll {
             path: None,
             lock: None,
             admission: super::registry::Admission::new(500.0, 1000.0, 256),
+            pair: Default::default(),
         }
     }
 }
@@ -432,7 +459,12 @@ impl Enroll {
             path: Some(path),
             lock: Some(state_dir.join("fleet-enroll.lock")),
             admission: super::registry::Admission::new(500.0, 1000.0, 256),
+            pair: Default::default(),
         }
+    }
+
+    pub(super) fn save_state(&self, st: &EnrollState) {
+        self.save(st);
     }
 
     fn save(&self, st: &EnrollState) {

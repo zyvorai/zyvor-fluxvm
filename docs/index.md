@@ -103,6 +103,9 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) |
 | The Linux package: what is in it, how it is built and checked | [docs/linux-package.md](linux-package.md) |
 | Per-node enrollment: join tokens, node credentials, `--node-auth` | [docs/fleet-enroll.md](fleet-enroll.md) |
+| Add a machine with a short code (`fluxctl cluster pair`), LAN discovery, threat model | [docs/cluster-pairing.md](cluster-pairing.md) |
+| Recipes: dev database, website, CI runner, private registry, monitoring | [docs/recipes.md](recipes.md) |
+| The cluster passport: one shareable document (`fluxctl cluster report`) | [docs/cluster-passport.md](cluster-passport.md) |
 | Installing FluxVM on many nodes: signed releases, waves, the pull installer | [docs/fleet-install.md](fleet-install.md) |
 | The container image: how it is assembled, signed and pinned; Kubernetes host prep and its limits | [docs/container-image.md](container-image.md) |
 | Use FluxVM from a serverless backend, with live events | [docs/serverless-agent.md](serverless-agent.md) |

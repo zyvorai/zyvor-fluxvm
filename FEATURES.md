@@ -185,6 +185,11 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `mac-fleet drain|resume HOST` (state file `~/.config/fluxvm/mac-fleet-state.json`), `mac-fleet templates ls|distribute` (each Mac pulls, the pulled digest is compared with the pinned one, a mismatch is reported and that Mac is not used for that digest), `apply --prune` (removes FluxVM from Macs that left the inventory since the last `apply`; refuses a Mac with running VMs), `--step-timeout` on every fleet command and `--timeout`/`--probe-timeout`/`--pull-timeout` on the new ones
 - `mac runner --repo OWNER/REPO|--org ORG --template REF [--fleet fleet.yaml]`: one ephemeral macOS VM per job with a just-in-time runner (token from a 0600 file or stdin, JIT config on ssh stdin only), deleted after the job, never more than 2 guests per Mac ([docs/mac-fleet-scheduler.md](docs/mac-fleet-scheduler.md), [docs/mac-runner.md](docs/mac-runner.md)); unit-tested with fakes, not run on real Macs or against GitHub
 
+### Cluster pairing, recipes and passport (`fluxctl cluster`, `fluxctl recipe`)
+- `fluxctl cluster pair` adds a Mac or Linux machine to a fleet with a short code: LAN discovery (mDNS, `fluxvm-agent central --pairing`), a code both screens show, operator approval (`cluster pending|approve|deny`), and the existing node credential delivered sealed and once. No URL or token typed. [docs/cluster-pairing.md](docs/cluster-pairing.md) (threat model included). mDNS verified on loopback only.
+- `fluxctl recipe list|show|run|credentials|uninstall`: dev database, website, CI runner (GitHub Actions, macOS and Linux), private registry, monitoring; each prints URL, where credentials are (0600), a backup schedule and an uninstall. [docs/recipes.md](docs/recipes.md)
+- `fluxctl cluster report [--format md|html|json] [--serve]`: one shareable document (machines, versions, health, how to add, back up, undo, logs, contacts); secrets scrubbed and tested. [docs/cluster-passport.md](docs/cluster-passport.md)
+
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 
 - Central fleet registry + per-host heartbeat client

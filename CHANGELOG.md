@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Cluster pairing, recipes and the cluster passport. Unit-tested with fakes and golden files; the pairing routes are tested in-process against the real enrollment code. **Not verified: mDNS discovery on a real LAN (only loopback), two real machines pairing, the Studio pages in a browser (UI bundles not rebuilt), any recipe against a real Docker engine, k3s cluster or GitHub.** Authentication code: no external security review.
+
+- New `fluxctl cluster pair | pending | approve | deny` ([docs/cluster-pairing.md](docs/cluster-pairing.md)): a machine finds the fleet on the LAN (mDNS `_fluxvm-pair._tcp`, a small announcer and browser in `fluxvm-core`, no new dependency crate beyond `ring` and `socket2`, both already in the tree), shows a short code, and receives its node credential when an operator approves it. The credential is the existing `fvnc_` enrollment credential (`EnrollState::issue_paired` spends a single-use, single-name join token and revokes it), sealed to the machine's key (X25519, HKDF, AES-256-GCM) and delivered once. Requests are signed with the machine's ed25519 key, expire in 10 minutes, are capped and rate limited. `fluxvm-agent central --pairing [--pairing-name NAME]` turns it on (off by default; public routes `POST /fleet/pair/request` and `/claim`, operator routes `GET /fleet/pair/pending` and `POST /fleet/pair/{key}/approve|deny`).
+- New `fluxctl recipe list | show | run | credentials | uninstall` ([docs/recipes.md](docs/recipes.md)): dev-database, website, ci-runner (macOS via `mac runner`, Linux container), registry, monitoring, layered over `kube add` and the Docker engine. Generated credentials are 0600 and never in argv or output.
+- New `fluxctl cluster report [--format md|html|json] [--out FILE] [--serve]` ([docs/cluster-passport.md](docs/cluster-passport.md)): machines, versions, health, how to add a machine, back up, undo, logs and a contacts/notes field in one document; secrets are scrubbed in every format and tested.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.

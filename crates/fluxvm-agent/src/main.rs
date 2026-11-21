@@ -70,6 +70,13 @@ enum Command {
         /// Seconds between the metrics collector's samples of every node (graphs and `GET /metrics`).
         #[arg(long, env = "FLUXVM_AGENT_METRICS_INTERVAL_SECS", default_value = "15")]
         metrics_interval_secs: u64,
+        /// Let machines ask to join by short code, and announce this central on the LAN (mDNS `_fluxvm-pair._tcp`) so
+        /// they find it. Nothing is granted until an operator approves a request (docs/cluster-pairing.md).
+        #[arg(long, env = "FLUXVM_PAIRING")]
+        pairing: bool,
+        /// The fleet's name as shown to a machine that finds it (default: this host's name).
+        #[arg(long, env = "FLUXVM_PAIRING_NAME")]
+        pairing_name: Option<String>,
         /// Console single sign-on (OpenID Connect). See docs/mac-cloud-tenancy.md.
         #[command(flatten)]
         sso: fluxvm_agent::central::SsoArgs,
@@ -210,6 +217,58 @@ enum Command {
 }
 
 /// Resolves on Ctrl-C or SIGTERM.
+/// Announces this central as `_fluxvm-pair._tcp` so a machine running `fluxctl cluster pair` finds it. Best effort: a
+/// network that blocks multicast only means the machine is told to pass `--server`.
+fn announce_pairing(
+    listen: SocketAddr,
+    name: Option<String>,
+    tls: bool,
+) -> Option<fluxvm_core::mdns::Announcer> {
+    let host = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|h| h.trim().split('.').next().unwrap_or("").to_lowercase())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "fluxvm".into());
+    let host_label: String = host
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    let instance = name
+        .unwrap_or_else(|| host.clone())
+        .replace('.', " ")
+        .chars()
+        .take(60)
+        .collect::<String>();
+    let Some(ip) = fluxvm_core::mdns::local_ipv4() else {
+        tracing::warn!("pairing: no LAN address found; machines must use --server");
+        return None;
+    };
+    let svc = fluxvm_core::mdns::Service {
+        instance,
+        host: format!("{host_label}.local"),
+        port: listen.port(),
+        addrs: vec![ip],
+        txt: [
+            ("v".to_owned(), "1".to_owned()),
+            ("scheme".to_owned(), if tls { "https" } else { "http" }.to_owned()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    match fluxvm_core::mdns::Announcer::start(svc, fluxvm_core::mdns::PAIR_SERVICE) {
+        Ok(a) => {
+            tracing::info!(addr = %ip, port = listen.port(), "pairing on: announcing _fluxvm-pair._tcp on the LAN");
+            Some(a)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "pairing: could not announce on the LAN; machines must use --server");
+            None
+        }
+    }
+}
+
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -258,6 +317,8 @@ async fn main() -> Result<()> {
             metrics_token,
             metrics_interval_secs,
             sso,
+            pairing,
+            pairing_name,
             stripe_secret_key_file,
             stripe_webhook_secret_file,
             stripe_api_base,
@@ -265,6 +326,7 @@ async fn main() -> Result<()> {
             signup_mail_secret_file,
         } => {
             fluxvm_agent::central::set_node_auth(node_auth);
+            fluxvm_agent::central::set_pairing(pairing);
             // `--public-url` is declared once (in the SSO flags) and used by Stripe Checkout too.
             let public_url = sso
                 .public_url
@@ -417,6 +479,12 @@ async fn main() -> Result<()> {
             let addr: SocketAddr = listen
                 .parse()
                 .with_context(|| format!("parsing listen address {listen}"))?;
+            // Kept alive until central exits; dropping it stops the announcement.
+            let _announcer = if pairing {
+                announce_pairing(addr, pairing_name, tls_cert.is_some())
+            } else {
+                None
+            };
             match (tls_cert, tls_key) {
                 (Some(cert), Some(key)) => {
                     let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
