@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- New `scripts/stack-check.sh` (read-only): checks the FluxVM + Kairon + Veyron stack on one Mac layer by layer (daemon, unlocked session,
+  Kubernetes API, Kairon CRDs, this Mac as a Node, kairon-node health, Veyron) and prints a fix for each failure. `scripts/test-stack-check.sh`
+  tests it offline with fake `curl`/`kubectl`/`fluxctl`.
+
 
 - **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`
   (`{group, mode}`) and `topologySpread` (`{key, maxSkew, mode, group}`), `required` or `preferred`, applied to automatic placement
