@@ -231,7 +231,7 @@ spec:\n  ipAddressPools:\n  - lan\n"
         assert!(cert_manager(&r, bad).await.unwrap_err().to_string().contains("nothing was sent"));
         assert!(r.log.borrow().is_empty());
         let data = b"apiVersion: v1\n".to_vec();
-        let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&data));
+        let sha = super::super::model::sha256_hex(&data);
         cert_manager(&r, PinSrc::File { data: data.clone(), sha: sha.clone() }).await.unwrap();
         let log = r.log.borrow();
         assert_eq!(log[0].2.as_deref(), Some("apiVersion: v1\n"));

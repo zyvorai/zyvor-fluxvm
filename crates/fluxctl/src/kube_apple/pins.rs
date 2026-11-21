@@ -127,8 +127,7 @@ pub fn parse_sha256_override(s: &str) -> anyhow::Result<String> {
 
 /// Verifies a user-supplied manifest file against a digest on the Mac before it is sent anywhere.
 pub fn verify_bytes(data: &[u8], sha256: &str) -> anyhow::Result<()> {
-    use sha2::{Digest, Sha256};
-    let got = hex::encode(Sha256::digest(data));
+    let got = super::model::sha256_hex(data);
     if got != sha256.to_ascii_lowercase() {
         anyhow::bail!("the manifest's SHA-256 is {got}, not the expected {sha256}; nothing was sent");
     }
@@ -174,7 +173,7 @@ mod tests {
 
     #[test]
     fn verify_bytes_rejects_a_different_file() {
-        let good = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"abc"));
+        let good = super::model::sha256_hex(b"abc");
         assert!(verify_bytes(b"abc", &good).is_ok());
         assert!(verify_bytes(b"abd", &good).is_err());
         assert!(parse_sha256_override("zz").is_err());
