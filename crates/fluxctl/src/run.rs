@@ -922,7 +922,7 @@ mod tests {
     fn a_stalled_first_boot_is_explained() {
         let h = no_address_help("docker-engine");
         assert!(
-            h.contains("180s")
+            h.contains(&format!("{}s", wait_budget().as_secs()))
                 && h.contains("fluxctl serial docker-engine")
                 && h.contains("cloud-init")
         );
