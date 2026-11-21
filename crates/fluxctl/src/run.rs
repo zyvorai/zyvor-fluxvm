@@ -443,7 +443,7 @@ pub async fn ssh_to(
 }
 
 /// `~/.ssh/fluxvm_ed25519`, when `fluxctl run` had to create it because the user has no key of their own.
-fn generated_identity() -> Option<PathBuf> {
+pub(crate) fn generated_identity() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let own = ["id_ed25519", "id_ecdsa", "id_rsa"]
         .iter()

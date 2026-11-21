@@ -2,7 +2,8 @@
 <!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0 -->
 # Design: a Docker-style workflow for macOS guests
 
-Status: **proposal, nothing implemented.** It lives in this repository for now; it can move to its own project once the shape
+Status: **phase 1 (store and registry) is implemented** as `fluxctl mac images|pull|push|tag|rmi|import`; see
+[macos-containers.md](macos-containers.md). Phase 2 (`run`, `ps`, `rm`, `exec`) is implemented but unit-tested only, never run on a real VM. Phase 3 (`mac build`: Macfile parser, `--dry-run`, and running the steps in a throwaway instance) is implemented, unit-tested with a fake host only and never run against a real macOS guest; `SNAPSHOT` and `FROM IPSW latest` are refused, and the no-Setup-Assistant provisioning account is not part of it. A later pass added the instance and image commands, the wider Macfile, `.macignore` and `mac compose`, all described in [macos-containers.md](macos-containers.md) and equally unverified on a real VM. Phase 4 (warm start) is still a proposal. It lives in this repository for now; it can move to its own project once the shape
 is settled, because it only needs FluxVM's daemon API.
 
 ## Goal
@@ -60,7 +61,8 @@ and `logs` are SSH (or the vsock agent when it is enabled and answering).
 **Build** = a file of provisioning steps run in a throwaway instance, then stopped and stored as a new template:
 
 ```
-FROM macos-base:15            # a template, or: IPSW latest
+# a template, or: IPSW latest
+FROM macos-base:15
 USER builder
 RUN  softwareupdate --install-rosetta --agree-to-license
 COPY ./ci-tools /opt/ci-tools
@@ -86,7 +88,7 @@ and a changed file rebuilds from `FROM`. A cache keyed by step plus parent diges
 - Apple's licence terms for redistributing macOS images through a registry: pushing a template to a *public* registry is likely not
   allowed; private registries need a statement in the docs. Needs a legal read, not an engineering decision.
 - Is `ps` per host enough, or should it list across a fleet (the macOS pool and `fluxvm-agent` already carry labels)?
-- Should `build` support `SNAPSHOT`, given that a saved state cannot be moved to another Mac?
+- Should `build` support `SNAPSHOT`, given that a saved state cannot be moved to another Mac? (Currently refused with a "not supported" error.)
 
 ## Not verified
 

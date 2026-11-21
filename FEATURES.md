@@ -127,6 +127,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 ## Kubernetes & Fleet
 
+- k3s add-ons (`fluxctl kube addons`): generated `config.yaml` (add-on toggles, Cilium, node labels/taints/reservations, Secrets encryption and rotation, CIS profile and `cis-check`, Traefik HelmChartConfig, ServiceLB pools), `registries.yaml` mirrors, embedded registry and airgap preload, kubeconfig merge/rename, host preflight, virtiofs PV and Rosetta recipes; unit-tested, not run on real hardware. See [docs/apple-k3s-addons.md](docs/apple-k3s-addons.md)
+
 ### `DisposableVm` CRD (`fluxvm-kube`)
 
 - Node-local operator, one instance per node, reconciles only CRs whose `spec.node` matches
@@ -142,12 +144,28 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `MicroVMJob.spec.ttlSecondsAfterFinished` — Kubernetes-`Job`-style auto-cleanup: the Job controller deletes a finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) once it has sat in `Succeeded`/`Failed` for that long, instead of it (and every completed CI-style child VM) needing to be deleted by hand
 - Not KubeVirt — no CDI or `virtctl`; QEMU has `fluxctl migrate` + migration receivers (not KubeVirt migration parity). See [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
 
+### Apple-native k3s (`fluxctl kube apple`)
+- Persistent ARM64 Linux guest per node on Apple Virtualization: `create`, `join` (also to a cluster on another Mac with `--url --token-file`), `status`, `stop`/`start`, `upgrade`, `backup`/`restore`, `recover`, `delete` ([docs/apple-k3s.md](docs/apple-k3s.md))
+- k3s binary verified by SHA-256 on the Mac and again in the guest; SSH host key pinned before first boot; join token travels on stdin only and is redacted from errors
+- Journal written before each VM exists, ownership labels on every VM, `recover` adopts/relabels/reports orphans and never touches another owner's guests; failed joins and partial deletes clean up and stay retryable
+- `upgrade` is server-first with a backup, skew checks, per-node Ready-at-version wait and rollback; `persist cycle` checks that data survives a stop/start
+- Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware
+
 ### Kubernetes on Apple VZ (macOS LaunchAgents)
 - `fluxctl kube agent install|uninstall|status` runs `kube supervise` (k3s in a Virtualization.framework VM) as a per-user LaunchAgent; `docker agent` does the same for the Docker engine VM
 - Plist uses the Homebrew `opt/` path (survives `brew upgrade`), `ProcessType=Interactive`, and `--restart`/`--throttle-secs`; install is refused beside a supervisor that launchd does not own
 - `kube supervise` holds a sleeping cluster asleep while the Mac is locked or logged out, then restores it once unlocked
 - `fluxctl doctor` reports stale binary paths and unloaded agents across all `dev.zyvor.fluxvm*` LaunchAgents, including the vmnetd/usbd helpers
 - VZ restores saved state only in an unlocked login session, so these are LaunchAgents, not LaunchDaemons ([deploy/launchd-notes.md](deploy/launchd-notes.md)); unit-tested, not yet verified on a live cluster
+
+### macOS image store (`fluxctl mac`)
+- `fluxctl mac images|pull|push|tag|rmi|import` keeps macOS guest templates in a local store (`~/.fluxvm/mac-images`, or `$FLUXVM_MAC_STORE`) and moves them to and from an OCI registry; names can share files, which are freed with the last name
+- `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build` runs a Macfile (RUN over SSH, COPY over scp) in a throwaway instance and stores the result as a template, `--dry-run` prints the plan (SNAPSHOT and IPSW refused; the step logic is unit-tested with a fake host, live execution not verified); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
+
+### Mac fleet over SSH (`fluxctl mac-fleet`)
+- `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
+- `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere
+- System `ssh` with `BatchMode=yes` and pinned host keys (`--accept-new-hostkey` is explicit); remote commands are pure functions with golden tests and the transport is a trait with a fake ([docs/mac-fleet-quickstart.md](docs/mac-fleet-quickstart.md)); unit-tested, not run on real Macs
 
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 

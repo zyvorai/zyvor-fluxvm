@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
+
+- New `fluxctl kube apple create|join|kubeconfig|tunnel|status|list|stop|start|persist|upgrade|backup|restore|recover|delete|logs` (module `kube_apple`, see [docs/apple-k3s.md](docs/apple-k3s.md)).
+  `create` installs a k3s binary whose SHA-256 is checked on the Mac and again in the guest (or uses a preinstalled service), pins an SSH host key generated on the Mac before the guest boots, and
+  journals the cluster before any VM exists so a failed run resumes with the same command. `join` adds a VM per node on the cluster's private network; the token goes to the node on stdin and is never
+  printed, put in an argument, the journal or an error message; a node that fails to join is removed again. `join --url --token-file` joins a cluster owned by another Mac.
+- `upgrade` swaps the binary server-first with a pre-upgrade backup, refuses downgrades and skipped minor releases, waits for each node to be Ready at the new version and rolls a failed node back.
+  `backup`/`restore` save the SQLite or embedded-etcd datastore as a private, checksummed archive and verify it before stopping anything. `persist mark|verify|cycle` proves data survives a stop/start.
+  `snapshot save|ls|delete|prune|pull|restore` wrap `k3s etcd-snapshot` for `--embedded-etcd` clusters (names validated, pulled files private and checksummed). Agents join with a separate agent token sent on stdin (`--agent-token-file`), so no token is in cloud-init or on a command line.
+  `recover` repairs the journal from VM ownership labels (adopts, relabels, reports orphans, never touches another owner's VMs). `status` exits non-zero when unhealthy and flags version skew.
+Several Macs as one fleet from one command line. Unit-tested with a fake ssh transport only; **not run against a real Mac**.
+
+- New `fluxctl mac-fleet up|add user@host...`, `apply inventory`, `status`, `exec`, `upgrade`, `remove`, `doctor`. Over the system `ssh`
+  (`BatchMode=yes`, host keys pinned with `StrictHostKeyChecking=yes` unless you pass `--accept-new-hostkey`) it checks each Mac (Apple
+  silicon, macOS 14+, disk, console session, FileVault and auto-login caveats), installs a pinned, SHA-256-verified release package (`--sha256`
+  to pin the hash too, `--release-base` for a mirror, `--via brew`), starts the daemon LaunchAgent, enrolls the node with a join token, and with
+  `--k3s` installs the `kube agent` LaunchAgent that creates and keeps a k3s guest. The token goes over ssh stdin to a 0600 file on the Mac, is
+  deleted there once the node has enrolled, and is never an argument, never in a script and scrubbed from output. Macs run in parallel
+  (`--jobs`), each with its own result; one failure does not stop the rest, and re-running converges. `--dry-run` prints every ssh command.
+  Remote commands are pure functions with golden tests in `crates/fluxctl/src/mac_fleet_golden/`. See [docs/mac-fleet-quickstart.md](docs/mac-fleet-quickstart.md).
+- **`fluxctl kube addons`: generated k3s configuration.** Pure generators (golden-tested) for `/etc/rancher/k3s/config.yaml`: bundled add-on
+  toggles (Traefik, ServiceLB, local-path, metrics-server, CoreDNS), a Cilium-ready config, node labels/taints/kubelet reservations, Secrets encryption and a CIS profile with its PSA, audit and
+  sysctl files; a Traefik `HelmChartConfig` and ServiceLB pool labels, `secrets-encrypt` status and guarded key rotation, a read-only CIS settings check; `registries.yaml` mirrors/credentials/TLS, the embedded (Spegel) mirror and airgap image preload; kubeconfig merge/rename into `~/.kube/config`; a host preflight
+  (RAM/CPU/disk, time sync, ports, cgroup, Apple VZ limits); a virtiofs `hostPath` PV recipe; Rosetta-for-amd64 guidance. Prints by default; `--ssh`
+  writes over the user's ssh. Does not create or manage clusters. Unit-tested only, not run against real hardware. New modules `kube_addons`,
+  `kube_harden`, `kube_registry`, `kube_kubeconfig`, `kube_preflight`, `kube_recipes`, `kube_ingress`, `kube_secrets`. See `docs/apple-k3s-addons.md`.
+
+macOS image store, the first part of a Docker-style workflow for macOS guests. Unit-tested only; not run against a real registry or VM.
+
+- New `fluxctl mac images|pull|push|tag|rmi|import`: a local store of macOS templates (`~/.fluxvm/mac-images` or `$FLUXVM_MAC_STORE`, with an
+  `index.json`) that pulls and pushes them as OCI artifacts. Several tags can share one directory, and the files are deleted with the last
+  tag. `push` needs a registry reference; credentials come from `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD`. `import` uses APFS clones.
+  `mac run [--rm]`, `ps`, `rm` and `exec` start and manage macOS VMs cloned from an image (needs the daemon; a 409 reports the 2-guest limit, a 503 the locked session). `mac build --dry-run` checks a Macfile and prints its plan. `mac build -t NAME[:TAG]` now runs it: a throwaway instance is cloned from the `FROM` template, `RUN` goes over SSH as the `USER` and `COPY` over scp, then the instance is stopped, stored as the new template and deleted; any failure deletes it and names the failing step. `SNAPSHOT` and `FROM IPSW latest` are refused. Step order and failure cleanup are unit-tested with a fake host; **live execution against a macOS guest is not verified**. See [docs/macos-containers.md](docs/macos-containers.md).
+
 Linux installs across distributions. Unit-tested only (fake `os-release`, fake `id`/`uname`); not run on a real host of each family.
 
 - `install.sh` detects the Linux family from `/etc/os-release` (Debian, RHEL, Arch, SUSE; Alpine is recognised as musl and refused with a clear
@@ -15,7 +49,6 @@ Linux installs across distributions. Unit-tested only (fake `os-release`, fake `
 - New `scripts/stack-check.sh` (read-only): checks the FluxVM + Kairon + Veyron stack on one Mac layer by layer (daemon, unlocked session,
   Kubernetes API, Kairon CRDs, this Mac as a Node, kairon-node health, Veyron) and prints a fix for each failure. `scripts/test-stack-check.sh`
   tests it offline with fake `curl`/`kubectl`/`fluxctl`.
-=======
 LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not yet run against a live cluster.
 
 - `fluxctl kube agent install` and `docker agent install` write the Homebrew `opt/` path of `fluxctl` (via `stable_exe`), so a
@@ -33,8 +66,10 @@ LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not 
 - New `scripts/test-kube-vz.sh`: boots a throwaway k3s cluster in a VZ VM and checks checkpoint/diff/timeline, trim, git, host,
   `--rosetta`, `supervise --active` (sleep and wake-on-connect) and, with `--agent`, the LaunchAgent. Written, **not yet run**; it needs
   an unlocked Mac. On a real Apple Silicon host, `docker agent status`, `kube agent status` and `doctor` ran correctly against live launchd.
+- New `fluxctl node-agent install|uninstall|status`: runs `fluxvm-agent node` as its own LaunchAgent (`dev.zyvor.fluxvm-agent`), with the
+  token from `--token-file` (never in the plist) and automatic `kairon.zyvor.dev/{backend.vz,chip,memory-gib}` labels. The macOS tarball and
+  the Homebrew formula now include `fluxvm-agent`, and the release smoke test checks for it. Unit-tested only.
 - The vmnetd and usbd helper plists log to `~/Library/Logs/fluxvm-{vmnetd,usbd}.err` instead of `/tmp`; the install scripts fill in the home directory.
-
 
 
 - **Fleet anti-affinity and topology spread; opt-in reschedule after heartbeat loss.** `POST /fleet/vms` accepts `antiAffinity`

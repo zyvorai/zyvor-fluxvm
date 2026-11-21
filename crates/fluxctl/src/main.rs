@@ -44,6 +44,8 @@ mod guest_cmd;
 mod image_mgmt;
 mod infer;
 mod instancetype_cmd;
+mod kube_apple;
+mod kube_addons;
 mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
@@ -54,8 +56,11 @@ mod kube_diff;
 mod kube_doctor;
 mod kube_forward;
 mod kube_git;
+mod kube_harden;
 mod kube_host;
 mod kube_hostsvc;
+mod kube_ingress;
+mod kube_kubeconfig;
 mod kube_logs;
 mod kube_mcp;
 mod kube_menubar;
@@ -63,18 +68,39 @@ mod kube_names;
 mod kube_notify;
 mod kube_pin;
 mod kube_policy;
+mod kube_preflight;
 mod kube_project;
 mod kube_prompt;
 mod kube_ps;
+mod kube_recipes;
+mod kube_registry;
 mod kube_route;
+mod kube_secrets;
 mod kube_share;
 mod kube_sync;
 mod kube_tls;
 mod kube_trim;
 mod launch_agent;
+mod mac_build;
+mod mac_build_exec;
+mod mac_cmd;
+mod mac_fleet;
+mod mac_fleet_inv;
+mod mac_fleet_remote;
+mod mac_fleet_ssh;
+mod mac_compose;
+mod mac_config;
+mod mac_cp;
+mod mac_ignore;
+mod mac_image_ops;
+mod mac_inspect;
+mod mac_instance;
+mod mac_more;
+mod mac_store;
 mod mcp;
 mod mcp_install;
 mod netobs;
+mod node_agent;
 mod output;
 mod remote;
 mod run;
@@ -396,6 +422,12 @@ enum KubeGitCommand {
 
 #[derive(Subcommand)]
 enum KubeCommand {
+    /// Generated k3s configuration: add-on toggles, Cilium, registries and airgap, hardening, etcd HA and snapshots,
+    /// node flags, kubeconfig merge, preflight checks, virtiofs volume and Rosetta recipes. Nothing here creates a cluster.
+    Addons {
+        #[command(subcommand)]
+        command: kube_addons::AddonsCommand,
+    },
     /// Create or start a k3s cluster in a VM (a server, plus workers with --workers), publish its API server on this Mac and write a
     /// kubeconfig.
     /// Idempotent. The first run downloads k3s and takes a few minutes.
@@ -850,6 +882,12 @@ enum KubeCommand {
         #[command(subcommand)]
         command: KubeAgentCommand,
     },
+    /// An Apple-silicon native k3s cluster, one persistent ARM64 Linux VM per node: checksum-verified k3s, pinned SSH
+    /// host key, join, tunnel, upgrade, datastore backup/restore and recovery from ownership labels. See docs/apple-k3s.md.
+    Apple {
+        #[command(subcommand)]
+        command: kube_apple::AppleCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -954,6 +992,19 @@ enum Command {
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
+    },
+    /// Run `fluxvm-agent node` (the fleet heartbeat that registers this Mac with a central registry, or with Kairon) as its
+    /// own launchd LaunchAgent, next to the daemon's.
+    NodeAgent {
+        #[command(subcommand)]
+        command: node_agent::NodeAgentCommand,
+    },
+    /// Several Macs as one fleet over SSH: `up user@host...` installs FluxVM (pinned, checksum-verified), starts the daemon,
+    /// enrolls the node and optionally prepares k3s; plus `status`, `exec`, `upgrade`, `remove`, `doctor`, and `apply` for an
+    /// inventory file. `--dry-run` shows the ssh commands. See docs/mac-fleet-quickstart.md.
+    MacFleet {
+        #[command(subcommand)]
+        command: mac_fleet::MacFleetCommand,
     },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
@@ -1660,6 +1711,12 @@ enum Command {
     VmImage {
         #[command(subcommand)]
         command: VmImageCommand,
+    },
+    /// Docker-style workflow for macOS guests: a local image store plus pull, push, tag, rmi, import. Each image is a
+    /// macOS VM template; at most 2 macOS VMs run at once. See docs/macos-containers-design.md.
+    Mac {
+        #[command(subcommand)]
+        command: mac_cmd::MacCommand,
     },
     /// Single-file VM disks as OCI artifacts (like KubeVirt containerDisk): push a raw or qcow2 image to any OCI
     /// registry and pull it back with every digest verified. Credentials: `FLUXVM_REGISTRY_USER` /
@@ -5131,6 +5188,7 @@ async fn run_remote(
             )
             .await?,
         )?,
+        Command::Mac { command } => mac_cmd::run_daemon(r, command).await?,
         Command::MacosPool { command } => match command {
             MacosPoolCommand::List => pretty(&r.call(Method::GET, "/v1/macos-pool", None).await?)?,
             MacosPoolCommand::Status => {
@@ -6115,6 +6173,26 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
+    if let Command::MacFleet { .. } = &cli.command {
+        let Command::MacFleet { command } = cli.command else {
+            unreachable!()
+        };
+        return tokio::task::block_in_place(|| mac_fleet::run(command));
+    }
+    if let Command::NodeAgent { command } = &cli.command {
+        let out = match command {
+            node_agent::NodeAgentCommand::Install(a) => {
+                let plist = node_agent::install(a)?;
+                serde_json::json!({"ok": true, "plist": plist, "label": node_agent::LABEL})
+            }
+            node_agent::NodeAgentCommand::Uninstall => {
+                serde_json::json!({"ok": true, "removed": node_agent::uninstall()?})
+            }
+            node_agent::NodeAgentCommand::Status => node_agent::status()?,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     let format = cli.output;
     if let Command::Mcp {
         command: McpCommand::Serve { allow_write },
@@ -6205,6 +6283,14 @@ async fn main() -> Result<()> {
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
     }
+    if let Command::Mac { command } = &cli.command
+        && command.is_client_side()
+    {
+        let Command::Mac { command } = cli.command else {
+            unreachable!()
+        };
+        return mac_cmd::run(command).await;
+    }
     if let Command::Image { command } = cli.command {
         return run_image(command, format).await;
     }
@@ -6240,6 +6326,22 @@ async fn main() -> Result<()> {
     {
         println!("{}", daemon_get(&cfg, "/v1/quotas/me", Some(token)).await?);
         return Ok(());
+    }
+
+    // `kube addons` generates text and talks to a host over ssh: no daemon needed.
+    if matches!(
+        &cli.command,
+        Command::Kube {
+            command: KubeCommand::Addons { .. }
+        }
+    ) {
+        let Command::Kube {
+            command: KubeCommand::Addons { command },
+        } = cli.command
+        else {
+            unreachable!()
+        };
+        return kube_addons::run(command);
     }
 
     // `kube prompt` runs on every shell prompt: no daemon, no VmManager, nothing slow.
@@ -6410,6 +6512,8 @@ async fn main() -> Result<()> {
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
+        | Command::NodeAgent { .. }
+        | Command::MacFleet { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
@@ -8142,6 +8246,9 @@ async fn main() -> Result<()> {
             command: VznetCommand::Ls { json },
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::VmImage { command } => run_vm_image(command).await?,
+        Command::Mac { .. } => anyhow::bail!(
+            "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
+        ),
         Command::Image { command } => run_image(command, format).await?,
         Command::Oci { command } => {
             let out = match command {
@@ -8772,6 +8879,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             .await?;
         }
         KubeCommand::Prompt { .. } => unreachable!("handled before the daemon is opened"),
+        KubeCommand::Addons { .. } => unreachable!("handled before the daemon is opened"),
         KubeCommand::Share {
             cluster,
             service,
@@ -8925,6 +9033,7 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         KubeCommand::Wake { cluster } => {
             println!("{}", kube_checkpoint::wake(api, &cluster.options()?).await?);
         }
+        KubeCommand::Apple { command } => kube_apple::run(api, command).await?,
         KubeCommand::Services { cluster } => {
             let v = kube_host::services(api, &cluster.options()?).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
