@@ -155,10 +155,10 @@ fn argv(a: &[&str]) -> Vec<String> {
     a.iter().map(|s| (*s).to_owned()).collect()
 }
 
-fn param(p: &BTreeMap<String, String>, key: &str) -> Result<String> {
-    let i = CATALOG
+fn param(info: &Info, p: &BTreeMap<String, String>, key: &str) -> Result<String> {
+    let i = info
+        .params
         .iter()
-        .flat_map(|i| i.params)
         .find(|(k, _, _)| *k == key)
         .with_context(|| format!("unknown parameter {key}"))?;
     let v = p.get(key).cloned().unwrap_or_else(|| i.1.to_owned());
@@ -168,8 +168,8 @@ fn param(p: &BTreeMap<String, String>, key: &str) -> Result<String> {
     Ok(v)
 }
 
-fn port(p: &BTreeMap<String, String>) -> Result<u16> {
-    let v = param(p, "port")?;
+fn port(info: &Info, p: &BTreeMap<String, String>) -> Result<u16> {
+    let v = param(info, p, "port")?;
     v.parse::<u16>()
         .ok()
         .filter(|p| *p >= 1)
@@ -220,7 +220,7 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
     };
     match name {
         "dev-database" => {
-            let engine = param(set, "engine")?;
+            let engine = param(info, set, "engine")?;
             let app = match engine.as_str() {
                 "postgres" => crate::kube_apps::App::Postgres,
                 "mysql" => crate::kube_apps::App::Mysql,
@@ -256,8 +256,8 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
                 .push("Needs the local cluster: `fluxctl kube up` once.".into());
         }
         "website" => {
-            let dir = plain(&param(set, "dir")?, "dir")?;
-            let port = port(set)?;
+            let dir = plain(&param(info, set, "dir")?, "dir")?;
+            let port = port(info, set)?;
             plan.steps.push(Step::Run {
                 what: "serve the folder with nginx".into(),
                 argv: argv(&[
@@ -284,15 +284,15 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
             plan.notes.push("Needs a Docker engine: `fluxctl docker up` on a Mac, or Docker on Linux.".into());
         }
         "ci-runner" => {
-            let os = param(set, "os")?;
-            let repo = plain(&param(set, "repo")?, "repo")?;
+            let os = param(info, set, "os")?;
+            let repo = plain(&param(info, set, "repo")?, "repo")?;
             if repo.split('/').count() != 2 {
                 bail!("repo must look like OWNER/REPO");
             }
             let token = format!("{rd}/github.token");
             match os.as_str() {
                 "macos" => {
-                    let template = param(set, "template")?;
+                    let template = param(info, set, "template")?;
                     plan.steps.push(Step::Run {
                         what: "serve GitHub Actions jobs, one fresh macOS VM each (stays running; Ctrl-C to stop)".into(),
                         argv: argv(&["fluxctl", "mac", "runner", "--repo", &repo, "--token-file", &token, "--template", &template, "--label", "fluxvm"]),
@@ -330,7 +330,7 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
             plan.backup_command = "none".into();
         }
         "registry" => {
-            let port = port(set)?;
+            let port = port(info, set)?;
             let auth = format!("{rd}/htpasswd");
             plan.generated.push("password".into());
             plan.steps.push(Step::Run {
@@ -727,6 +727,7 @@ mod tests {
     fn golden(name: &str, got: &str) {
         let path = format!("{}/src/recipes_golden/{name}.txt", env!("CARGO_MANIFEST_DIR"));
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
             std::fs::write(&path, got).unwrap();
         }
         let want = std::fs::read_to_string(&path).unwrap_or_default();
@@ -831,7 +832,7 @@ mod tests {
     fn copy_as_fluxctl_lists_only_commands_without_secrets() {
         let p = render("registry", &set(&[]), Path::new(HOME)).unwrap();
         let c = p.as_commands();
-        assert!(c.contains("fluxvm-registry") && !c.contains("htpasswd"), "{c}");
+        assert!(c.contains("fluxvm-registry") && !c.contains("-Bin") && !c.contains("httpd"), "{c}");
         let p = render("monitoring", &set(&[]), Path::new(HOME)).unwrap();
         assert_eq!(p.as_commands(), "fluxctl kube add grafana");
     }

@@ -1,0 +1,15 @@
+Monitoring
+
+Steps
+  1. start Grafana in the local cluster
+       fluxctl kube add grafana
+
+Open it      http://localhost:3000
+Credentials
+  user: admin
+  password: admin (the development default: change it at first sign-in)
+Backup       weekly, Sunday 03:00
+             export dashboards from Grafana (Share, Export); the volume is kept on `kube remove` without --delete-data
+Uninstall
+  fluxctl kube remove grafana --delete-data
+Note         Fleet metrics to scrape: docs/fleet-metrics.md. Needs the local cluster: `fluxctl kube up` once.

@@ -540,6 +540,7 @@ mod tests {
     fn golden(name: &str, got: &str) {
         let path = format!("{}/src/recipes_golden/passport.{name}", env!("CARGO_MANIFEST_DIR"));
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
             std::fs::write(&path, got).unwrap();
         }
         assert_eq!(got, std::fs::read_to_string(&path).unwrap_or_default(), "golden {path}; UPDATE_GOLDEN=1 to accept");

@@ -128,7 +128,7 @@ pub(super) enum EnrollError {
 }
 
 impl EnrollError {
-    fn into_app(self) -> AppError {
+    pub(super) fn into_app(self) -> AppError {
         match self {
             EnrollError::BadToken => AppError(
                 StatusCode::UNAUTHORIZED,

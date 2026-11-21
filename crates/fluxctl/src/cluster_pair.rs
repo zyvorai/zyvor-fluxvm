@@ -302,6 +302,7 @@ pub fn choose_server(a: &PairArgs, browser: &dyn Browser, io: &mut dyn Io) -> Re
     }
 }
 
+#[derive(Debug)]
 pub struct Paired {
     pub name: String,
     pub node_id: String,
@@ -326,7 +327,7 @@ pub fn pair(t: &dyn Transport, name: &str, dir: &Path, io: &mut dyn Io) -> Resul
         (offer.expires_in + 59) / 60
     ));
     let deadline = io.now() + offer.expires_in;
-    let mut wait = 2;
+    let mut wait;
     loop {
         if io.now() >= deadline {
             bail!("nobody approved the request in time; run `fluxctl cluster pair` again");

@@ -1,0 +1,14 @@
+Website
+
+Steps
+  1. serve the folder with nginx
+       docker run -d --name fluxvm-website --restart unless-stopped -p 8080:80 -v /srv/site:/usr/share/nginx/html:ro nginx:alpine
+
+Open it      http://localhost:8080
+Credentials
+  none
+Backup       the folder is the source of truth; back it up with the rest of your files
+             tar czf "$HOME/site-$(date +%F).tgz" -C "/srv/site" .
+Uninstall
+  docker rm -f fluxvm-website
+Note         Needs a Docker engine: `fluxctl docker up` on a Mac, or Docker on Linux.

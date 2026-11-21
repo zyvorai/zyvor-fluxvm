@@ -253,6 +253,8 @@ mod tests {
         .await;
         assert_eq!(s, StatusCode::OK, "{v}");
 
+        // Claims are rate limited to one a second per request.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         let (s, v) = call(&app, "POST", "/fleet/pair/claim", None, json!({"id": id, "sig": sig})).await;
         assert_eq!(s, StatusCode::OK, "{v}");
         let sealed = unhex_vec(v["sealed"].as_str().unwrap());
@@ -267,6 +269,7 @@ mod tests {
         let (s, _) = call(&app, "GET", "/fleet/pair/pending", Some(&cred), json!({})).await;
         assert_ne!(s, StatusCode::OK);
         // A second collection (replay) yields nothing.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         let (s, _) = call(&app, "POST", "/fleet/pair/claim", None, json!({"id": id, "sig": sig})).await;
         assert_eq!(s, StatusCode::CONFLICT);
         // No join token is left usable.
