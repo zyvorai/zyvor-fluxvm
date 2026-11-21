@@ -459,6 +459,12 @@ pub fn resolve_install(b: &BinaryArgs, default: Option<Install>) -> Result<Insta
 }
 
 pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
+    if let AppleCommand::Platform { command: c } = &command
+        && c.is_offline()
+    {
+        let AppleCommand::Platform { command: c } = command else { unreachable!() };
+        return platform_cmd::run_offline(c);
+    }
     let store = Store::new(default_root()?);
     // The first connection to a guest happens through `RealHost`; reading the key and user fails early and clearly.
     let user = match &command {

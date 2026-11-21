@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn verify_bytes_rejects_a_different_file() {
-        let good = super::model::sha256_hex(b"abc");
+        let good = super::super::model::sha256_hex(b"abc");
         assert!(verify_bytes(b"abc", &good).is_ok());
         assert!(verify_bytes(b"abd", &good).is_err());
         assert!(parse_sha256_override("zz").is_err());

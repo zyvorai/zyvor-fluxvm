@@ -141,6 +141,46 @@ pub enum PlatformCommand {
     Pins,
 }
 
+impl PlatformCommand {
+    /// Commands that only print and need neither a cluster nor ssh keys.
+    pub fn is_offline(&self) -> bool {
+        matches!(self, PlatformCommand::Pins | PlatformCommand::Netpol { apply: false, .. } | PlatformCommand::Metallb { print_pool: true, .. })
+            || matches!(self, PlatformCommand::Apply { dry_run: true, platform, .. } if platform.addons.is_none())
+    }
+}
+
+/// [`PlatformCommand::is_offline`] commands, without a host.
+pub fn run_offline(cmd: PlatformCommand) -> Result<()> {
+    match cmd {
+        PlatformCommand::Pins => json(
+            &pins::ALL
+                .iter()
+                .map(|p| serde_json::json!({"name": p.key, "version": p.version, "url": p.url, "sha256": p.sha256}))
+                .collect::<Vec<_>>(),
+        ),
+        PlatformCommand::Netpol { namespace, no_dns, no_same_namespace, allow_from, allow_egress_cidr, .. } => {
+            print!("{}", netpol::baseline(&NetpolOpts { namespace, no_dns, no_same_namespace, allow_from, allow_egress_cidr })?);
+            Ok(())
+        }
+        PlatformCommand::Metallb { addresses, pool, no_auto_assign, .. } => {
+            print!("{}", recipes::metallb_pool_yaml(&pool, &addresses, !no_auto_assign)?);
+            Ok(())
+        }
+        PlatformCommand::Apply { platform, .. } => {
+            let plan = plan_from_args(&platform)?;
+            json(&dry_run_json(&plan))
+        }
+        _ => bail!("this command needs a cluster"),
+    }
+}
+
+fn dry_run_json(plan: &platform::PlatformPlan) -> serde_json::Value {
+    serde_json::json!({
+        "dropin": plan.dropin, "all_nodes": plan.all_files.iter().map(|f| &f.path).collect::<Vec<_>>(),
+        "servers": plan.server_files.iter().map(|f| &f.path).collect::<Vec<_>>(), "notes": plan.notes,
+    })
+}
+
 fn json<T: serde::Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(v)?);
     Ok(())
@@ -161,17 +201,11 @@ pub fn plan_from_args(a: &PlatformArgs) -> Result<platform::PlatformPlan> {
 
 pub async fn run<H: Host>(h: &H, store: &Store, cmd: PlatformCommand) -> Result<()> {
     match cmd {
-        PlatformCommand::Pins => json(
-            &pins::ALL
-                .iter()
-                .map(|p| serde_json::json!({"name": p.key, "version": p.version, "url": p.url, "sha256": p.sha256}))
-                .collect::<Vec<_>>(),
-        ),
+        PlatformCommand::Pins => run_offline(PlatformCommand::Pins),
         PlatformCommand::Netpol { name, namespace, no_dns, no_same_namespace, allow_from, allow_egress_cidr, apply } => {
             let o = NetpolOpts { namespace, no_dns, no_same_namespace, allow_from, allow_egress_cidr };
             if !apply {
-                print!("{}", netpol::baseline(&o)?);
-                return Ok(());
+                return run_offline(PlatformCommand::Netpol { name, namespace: o.namespace, no_dns: o.no_dns, no_same_namespace: o.no_same_namespace, allow_from: o.allow_from, allow_egress_cidr: o.allow_egress_cidr, apply });
             }
             let st = store.require(&name)?;
             local(&st)?;
@@ -181,8 +215,7 @@ pub async fn run<H: Host>(h: &H, store: &Store, cmd: PlatformCommand) -> Result<
         }
         PlatformCommand::Metallb { name, addresses, pool, no_auto_assign, print_pool, manifest } => {
             if print_pool {
-                print!("{}", recipes::metallb_pool_yaml(&pool, &addresses, !no_auto_assign)?);
-                return Ok(());
+                return run_offline(PlatformCommand::Metallb { name, addresses, pool, no_auto_assign, print_pool, manifest });
             }
             let st = store.require(&name)?;
             local(&st)?;
@@ -236,10 +269,7 @@ pub async fn run<H: Host>(h: &H, store: &Store, cmd: PlatformCommand) -> Result<
             local(&st)?;
             let plan = plan_from_args(&args)?;
             if dry_run {
-                return json(&serde_json::json!({
-                    "dropin": plan.dropin, "all_nodes": plan.all_files.iter().map(|f| &f.path).collect::<Vec<_>>(),
-                    "servers": plan.server_files.iter().map(|f| &f.path).collect::<Vec<_>>(), "notes": plan.notes,
-                }));
+                return json(&dry_run_json(&plan));
             }
             let _lock = store.lock(&name)?;
             json(&platform::apply(&HostRemote { h, st: &st }, &plan, restart).await?)
