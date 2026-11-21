@@ -62,6 +62,22 @@ pub struct RunnerArgs {
     /// Runner group id (organisation runners; a repository's runners use 1).
     #[arg(long, default_value_t = 1)]
     pub runner_group: u64,
+    /// Runner group by name instead of id (organisation runners); looked up through the API at start.
+    #[arg(long, value_name = "NAME", conflicts_with = "runner_group")]
+    pub runner_group_name: Option<String>,
+    /// Never more than N runners (guests) at once, however many jobs are queued: the pool grows with the queue up to N and
+    /// shrinks as runners finish their one job. Lowers the 2-per-Mac ceiling, never raises it.
+    #[arg(long, value_name = "N")]
+    pub ephemeral_pool: Option<usize>,
+    /// With --org: read the queue from this repository (`OWNER/REPO`). Repeatable. GitHub has no organisation-wide queue call.
+    #[arg(long = "queue-repo", value_name = "OWNER/REPO", requires = "org")]
+    pub queue_repo: Vec<String>,
+    /// With --org: also read the queue from the organisation's most recently pushed repositories.
+    #[arg(long, requires = "org")]
+    pub queue_scan: bool,
+    /// With --queue-scan: how many repositories at most.
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub scan_limit: usize,
     /// Spread jobs over the Macs of this inventory (`fleet.yaml`). Without it jobs run on this Mac. The Macs are reached over ssh.
     #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "fleet")]
     pub fleet: Option<PathBuf>,
@@ -502,6 +518,9 @@ pub fn supervise(
             if once {
                 spawn = spawn.min(1usize.saturating_sub(started));
             }
+            if spawn > 0 {
+                (c.log)(&crate::mac_runner_pool::describe(queued, busy, n, warm, cap, spawn));
+            }
             for _ in 0..spawn {
                 started += 1;
                 in_flight.fetch_add(1, Ordering::SeqCst);
@@ -603,7 +622,7 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         ),
     };
     let _ = inv;
-    let cap = job_cap(targets.len(), a.max_jobs);
+    let cap = crate::mac_runner_pool::pool_cap(job_cap(targets.len(), a.max_jobs), a.ephemeral_pool);
     let warm = a.warm.unwrap_or(if matches!(scope, Scope::Org(_)) { 1 } else { 0 });
     eprintln!(
         "runner for {} serving {} Mac(s), up to {cap} guest(s) at once (2 per Mac), template {}, labels {}",
@@ -617,12 +636,32 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         return Ok(());
     }
     let token = read_secret("GitHub token", a.token_file.as_deref(), a.token_stdin)?;
-    let gh = RealGithub::new(&a.api_url, scope, a.runner_group, token)?;
+    let group = match (&a.runner_group_name, &scope) {
+        (Some(n), Scope::Org(o)) => crate::mac_runner_pool::resolve_group(&a.api_url, o, &token, n)?,
+        (Some(_), _) => bail!("--runner-group-name needs --org"),
+        _ => a.runner_group,
+    };
+    let explicit = a
+        .queue_repo
+        .iter()
+        .map(|r| match Scope::parse(Some(r), None)? {
+            Scope::Repo(o, n) => Ok((o, n)),
+            _ => bail!("--queue-repo {r:?} is not OWNER/REPO"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let real = RealGithub::new(&a.api_url, scope.clone(), group, token.clone())?;
+    let pool;
+    let gh: &dyn Github = if matches!(scope, Scope::Org(_)) && (!explicit.is_empty() || a.queue_scan) {
+        pool = crate::mac_runner_pool::OrgPool::new(real, &a.api_url, token, explicit, a.queue_scan.then_some(a.scan_limit));
+        &pool
+    } else {
+        &real
+    };
     let leases = Mutex::new(Leases::default());
     let state = state_path()?;
     let log = |m: &str| eprintln!("{m}");
     let ctx = Ctx {
-        gh: &gh,
+        gh,
         tr: tr.as_ref(),
         targets: &targets,
         place: &a.place,
@@ -644,7 +683,7 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         crate::mac_runner_life::is_live(id) || crate::mac_fleet_lease::claimed(&state, SystemClock.now()).iter().any(|c| c == id)
     };
     if !a.no_sweep {
-        for l in crate::mac_runner_life::sweep(&gh, tr.as_ref(), &targets, &claimed, false) {
+        for l in crate::mac_runner_life::sweep(gh, tr.as_ref(), &targets, &claimed, false) {
             log(&l);
         }
     }
@@ -654,7 +693,7 @@ pub fn run(a: RunnerArgs) -> Result<()> {
             while !done.load(Ordering::SeqCst) {
                 if crate::mac_runner_life::requested() {
                     log("stop requested: deleting guests and unregistering runners");
-                    for l in crate::mac_runner_life::shutdown_cleanup(&gh, tr.as_ref(), &crate::mac_runner_life::live_snapshot()) {
+                    for l in crate::mac_runner_life::shutdown_cleanup(gh, tr.as_ref(), &crate::mac_runner_life::live_snapshot()) {
                         log(&l);
                     }
                     break;
@@ -669,7 +708,7 @@ pub fn run(a: RunnerArgs) -> Result<()> {
     if crate::mac_runner_life::requested() {
         // Anything a thread created after the watcher looked.
         if !a.no_sweep {
-            for l in crate::mac_runner_life::sweep(&gh, tr.as_ref(), &targets, &claimed, false) {
+            for l in crate::mac_runner_life::sweep(gh, tr.as_ref(), &targets, &claimed, false) {
                 log(&l);
             }
         }
