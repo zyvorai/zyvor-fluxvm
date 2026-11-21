@@ -117,6 +117,35 @@ pub struct PullReport {
     pub dir: PathBuf,
     pub config: VmArtifactConfig,
     pub bytes_downloaded: u64,
+    /// Chunks taken from a seed directory instead of the registry (see [`PullOptions::seeds`]).
+    #[serde(default)]
+    pub chunks_reused: usize,
+    /// Raw (uncompressed) bytes of those chunks.
+    #[serde(default)]
+    pub bytes_reused: u64,
+}
+
+/// Extras for [`pull_with`].
+#[derive(Debug, Clone, Default)]
+pub struct PullOptions {
+    /// Directories of an earlier pull (same file names). A chunk whose raw sha256 already matches the bytes at the same
+    /// file and offset in a seed is copied from there and never downloaded. The format is unchanged: this only reads
+    /// the layer annotations a pull already trusts, and the chunk is still checked against its raw digest.
+    pub seeds: Vec<PathBuf>,
+}
+
+/// The raw bytes of a chunk if a seed holds exactly them at the same place.
+fn seed_chunk(seeds: &[PathBuf], file: &str, offset: u64, size: usize, digest: &str) -> Option<Vec<u8>> {
+    for s in seeds {
+        let Ok(f) = fs::File::open(s.join(file)) else {
+            continue;
+        };
+        let mut buf = vec![0u8; size];
+        if f.read_exact_at(&mut buf, offset).is_ok() && sha256_digest(&buf) == digest {
+            return Some(buf);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -644,6 +673,16 @@ fn validate(manifest: &Manifest, config: &VmArtifactConfig) -> Result<()> {
 /// Pulls a VM artifact into `dest`, which must not exist yet (it is created atomically: files land in a sibling
 /// temporary directory that is renamed into place only once every chunk verified).
 pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> Result<PullReport> {
+    pull_with(reference, dest, creds, &PullOptions::default()).await
+}
+
+/// [`pull`] with [`PullOptions`].
+pub async fn pull_with(
+    reference: &str,
+    dest: &Path,
+    creds: Option<Credentials>,
+    opts: &PullOptions,
+) -> Result<PullReport> {
     let r = ImageRef::parse(reference)?;
     ensure!(
         !dest.exists(),
@@ -678,6 +717,7 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
     let tmp = partial_dir(dest)?;
     let result = async {
         let mut handles = BTreeMap::new();
+        let mut reused = (0usize, 0u64);
         for f in &config.files {
             let file = fs::OpenOptions::new()
                 .create_new(true)
@@ -688,6 +728,26 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
         }
         let mut downloaded = 0u64;
         for l in &manifest.layers {
+            if !opts.seeds.is_empty() {
+                let raw_size: usize = l.annotations[ANN_RAW_SIZE].parse()?;
+                let offset: u64 = l.annotations[ANN_OFFSET].parse()?;
+                let name = l.annotations[ANN_FILE].clone();
+                let digest = l.annotations[ANN_RAW_DIGEST].clone();
+                if raw_size <= MAX_CHUNK_SIZE {
+                    let seeds = opts.seeds.clone();
+                    let hit = tokio::task::spawn_blocking(move || {
+                        seed_chunk(&seeds, &name, offset, raw_size, &digest)
+                    })
+                    .await
+                    .context("seed lookup task")?;
+                    if let Some(raw) = hit {
+                        write_sparse(&handles[&l.annotations[ANN_FILE]], offset, &raw)?;
+                        reused.0 += 1;
+                        reused.1 += raw.len() as u64;
+                        continue;
+                    }
+                }
+            }
             let compressed = s.blob(l, MAX_CHUNK_SIZE as u64).await?;
             downloaded += compressed.len() as u64;
             let raw_size: usize = l.annotations[ANN_RAW_SIZE].parse()?;
@@ -711,10 +771,10 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
         for f in handles.values() {
             f.sync_all()?;
         }
-        anyhow::Ok(downloaded)
+        anyhow::Ok((downloaded, reused))
     }
     .await;
-    let downloaded = match result {
+    let (downloaded, reused) = match result {
         Ok(d) => d,
         Err(e) => {
             let _ = fs::remove_dir_all(&tmp);
@@ -729,6 +789,8 @@ pub async fn pull(reference: &str, dest: &Path, creds: Option<Credentials>) -> R
         dir: dest.to_path_buf(),
         config,
         bytes_downloaded: downloaded,
+        chunks_reused: reused.0,
+        bytes_reused: reused.1,
     })
 }
 
@@ -864,6 +926,8 @@ async fn pull_tart(
             annotations,
         },
         bytes_downloaded: downloaded,
+        chunks_reused: 0,
+        bytes_reused: 0,
     })
 }
 
@@ -1070,6 +1134,52 @@ mod tests {
             fs::read(dest2.join("disk.raw")).unwrap(),
             fs::read(src.join("disk.raw")).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_seeded_pull_reuses_matching_chunks_and_fetches_the_rest() {
+        let (host, _) = registry(false).await;
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("tmpl");
+        macos_template(&src);
+        let opts = PushOptions {
+            chunk_size: 1024 * 1024,
+            ..Default::default()
+        };
+        let reference = format!("{host}/vm/macos:27");
+        push(&src, &reference, None, &opts).await.unwrap();
+        let plain = pull(&reference, &d.path().join("plain"), None).await.unwrap();
+        assert_eq!(plain.chunks_reused, 0);
+
+        // A seed that is identical except for one corrupted chunk: only that chunk is downloaded.
+        let seed = d.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        for f in ["disk.raw", "hardware.bin", "auxiliary.bin"] {
+            fs::copy(src.join(f), seed.join(f)).unwrap();
+        }
+        let mut disk = fs::read(seed.join("disk.raw")).unwrap();
+        disk[0] ^= 0xff;
+        fs::write(seed.join("disk.raw"), &disk).unwrap();
+        let dest = d.path().join("seeded");
+        let got = pull_with(
+            &reference,
+            &dest,
+            None,
+            &PullOptions {
+                seeds: vec![seed],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.chunks_reused, 3, "4 chunk layers, one differs");
+        assert!(got.bytes_downloaded < plain.bytes_downloaded);
+        for f in ["disk.raw", "hardware.bin", "auxiliary.bin"] {
+            assert_eq!(
+                fs::read(dest.join(f)).unwrap(),
+                fs::read(src.join(f)).unwrap(),
+                "{f}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+macOS images: signing, licence guard, build cache, chunk reuse, labels, search and contents manifest for `fluxctl mac`. Unit-tested with fakes and mock registries; **not run against a real registry, Mac or macOS template**.
+
+- `mac keys generate|ls|trust|untrust`, `mac push --sign`, `mac sign`, `mac pull --verify`, `mac verify`: Ed25519 signatures (the catalog's `fluxvm_core::signing`) over the manifest digest, attached as an OCI referrer, checked against a local trust store; a verified pull fetches the verified digest. Not cosign.
+- `mac push` refuses well-known public registries unless `--i-have-checked-the-licence` / `FLUXVM_MAC_ALLOW_PUBLIC_REGISTRY=1`; the text calls itself unverified, non-legal advice about Apple's licence terms and stamps an annotation when overridden.
+- `mac build` step cache (key = step hash chained from the parent digest, stored as intermediate templates), `--no-cache`, `mac cache ls|prune`, budget `FLUXVM_MAC_CACHE_MAX`.
+- `fluxvm-image`: `vm_artifact::pull_with` + `PullOptions::seeds` reuse identical chunks from local images (format unchanged; `PullReport` gains `chunks_reused`, `bytes_reused`); `oci_manage::catalog` lists `/v2/_catalog`.
+- `mac images --filter label=|reference=|source=`, `mac label`, `mac push --label`, `mac search REGISTRY [TERM]`, `mac sbom` / `mac image sbom` (file list with sizes and sha256). See [docs/macos-containers.md](docs/macos-containers.md).
+
 Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
 
 - New `fluxctl kube apple create|join|kubeconfig|tunnel|status|list|stop|start|persist|upgrade|backup|restore|recover|delete|logs` (module `kube_apple`, see [docs/apple-k3s.md](docs/apple-k3s.md)).
