@@ -35,8 +35,9 @@ pub enum MacCommand {
     /// Add a template directory (disk.raw, hardware.bin, auxiliary.bin) to the store as `name:tag`; an APFS clone, so it is instant
     /// on the same volume.
     Import { dir: PathBuf, reference: String },
-    /// Read a Macfile (FROM, USER, RUN, COPY, SNAPSHOT) and print the build plan. Running the steps in a build VM is not
-    /// implemented yet, so `--dry-run` is required.
+    /// Build an image from a Macfile (FROM, USER, RUN, COPY): the steps run over SSH in a throwaway instance cloned from the FROM
+    /// template, which is then stopped and stored as `-t name:tag`. `--dry-run` only prints the plan. Needs the daemon unless
+    /// `--dry-run`. SNAPSHOT is not supported.
     Build {
         /// The Macfile (default `Macfile` in CONTEXT).
         #[arg(short = 'f', long)]
@@ -44,9 +45,12 @@ pub enum MacCommand {
         /// Name for the resulting image (`name:tag`).
         #[arg(short = 't', long)]
         tag: String,
-        /// Print the plan and change nothing (the only mode available now).
+        /// Print the plan and change nothing. Without it the build runs in a throwaway instance (needs the daemon).
         #[arg(long)]
         dry_run: bool,
+        /// Seconds to wait for the build instance to answer on SSH.
+        #[arg(long, default_value_t = 900)]
+        wait: u64,
         /// Build context directory: COPY sources are relative to it.
         #[arg(default_value = ".")]
         context: PathBuf,
@@ -95,10 +99,13 @@ pub enum MacCommand {
 impl MacCommand {
     /// Image subcommands never contact the daemon; the instance ones do.
     pub fn is_client_side(&self) -> bool {
-        !matches!(
-            self,
-            Self::Run { .. } | Self::Ps { .. } | Self::Rm { .. } | Self::Exec { .. }
-        )
+        match self {
+            Self::Build { dry_run, .. } => *dry_run,
+            _ => !matches!(
+                self,
+                Self::Run { .. } | Self::Ps { .. } | Self::Rm { .. } | Self::Exec { .. }
+            ),
+        }
     }
 }
 
@@ -358,8 +365,211 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
                 .context("the instance has no address yet: wait for it to boot")?;
             crate::run::ssh_to(ip, &user, 22, true, &cmd).await
         }
+        MacCommand::Build {
+            file,
+            tag,
+            context,
+            wait,
+            ..
+        } => {
+            let src = read_macfile(file, &context)?;
+            let key = mac_store::normalize(&tag)?;
+            let steps = crate::mac_build::plan(&crate::mac_build::parse(&src)?);
+            crate::mac_build_exec::check_supported(&steps)?;
+            let mut host = DaemonHost {
+                r,
+                store: Store::open(mac_store::default_root()?)?,
+                key: key.clone(),
+                context,
+                wait,
+                instance: None,
+            };
+            crate::mac_build_exec::execute(&mut host, &steps).await?;
+            println!("built {key}");
+            Ok(())
+        }
         _ => bail!("not an instance command"),
     }
+}
+
+fn read_macfile(file: Option<PathBuf>, context: &Path) -> Result<String> {
+    let path = file.unwrap_or_else(|| context.join("Macfile"));
+    std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The real [`BuildHost`](crate::mac_build_exec::BuildHost): the daemon makes and stops the instance, `ssh`/`scp` run the steps,
+/// the store keeps the result. Not verified against a real macOS guest.
+struct DaemonHost<'a> {
+    r: &'a crate::remote::Remote,
+    store: Store,
+    /// The normalised `name:tag` of the result.
+    key: String,
+    context: PathBuf,
+    wait: u64,
+    /// `(id, guest address once SSH answers)`.
+    instance: Option<(String, Option<String>)>,
+}
+
+impl DaemonHost<'_> {
+    fn ready(&self) -> Result<(&str, &str)> {
+        match &self.instance {
+            Some((id, Some(ip))) => Ok((id, ip)),
+            _ => bail!("the build instance is not running"),
+        }
+    }
+}
+
+impl crate::mac_build_exec::BuildHost for DaemonHost<'_> {
+    async fn create(&mut self, reference: &str) -> Result<()> {
+        use reqwest::Method;
+        let r = self.r;
+        let disk = self.store.resolve(reference)?.join("disk.raw");
+        let name = format!("build-{}", &short_id()[..6]);
+        let body = build_create_body(&name, &disk, &[])?;
+        let vm = r
+            .call(Method::POST, "/v1/vms", Some(body))
+            .await
+            .map_err(explain_error)?;
+        let id = vm["id"]
+            .as_str()
+            .context("the daemon returned no id")?
+            .to_string();
+        let started = async {
+            r.call(
+                Method::PATCH,
+                &format!("/v1/vms/{id}"),
+                Some(instance_labels(reference)),
+            )
+            .await?;
+            r.call(Method::POST, &format!("/v1/vms/{id}/start"), None)
+                .await
+                .map_err(explain_error)
+        }
+        .await;
+        if let Err(e) = started {
+            delete_instance(r, &id).await.ok();
+            return Err(e);
+        }
+        self.instance = Some((id, None));
+        Ok(())
+    }
+
+    async fn wait_ready(&mut self) -> Result<()> {
+        let Some((id, _)) = self.instance.clone() else {
+            bail!("the build instance was not created");
+        };
+        let ip = wait_for_ssh(self.r, &id, self.wait).await?;
+        self.instance = Some((id, Some(ip)));
+        Ok(())
+    }
+
+    async fn run(&mut self, user: &str, command: &str) -> Result<()> {
+        let (_, ip) = self.ready()?;
+        crate::run::ssh_to(ip, user, 22, true, &[command.to_string()]).await
+    }
+
+    async fn copy(&mut self, user: &str, src: &str, dst: &str) -> Result<()> {
+        let (_, ip) = self.ready()?;
+        scp_to(ip, user, &self.context.join(src), dst).await
+    }
+
+    async fn stop_and_store(&mut self) -> Result<()> {
+        use reqwest::Method;
+        let id = self.ready()?.0.to_string();
+        let r = self.r;
+        r.call(Method::POST, &format!("/v1/vms/{id}/stop"), None)
+            .await?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let vm = loop {
+            let vm = r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?;
+            match vm["status"].as_str() {
+                Some("stopped") => break vm,
+                Some("failed") => bail!("the build instance failed while stopping"),
+                _ => {}
+            }
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "the build instance did not stop within 300s"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        };
+        let disk = PathBuf::from(vm["disk"].as_str().context("the VM record has no disk")?);
+        let ws = PathBuf::from(
+            vm["workspace"]
+                .as_str()
+                .context("the VM record has no workspace")?,
+        );
+        store_instance_files(&self.store, &self.key, &disk, &ws)
+    }
+
+    async fn delete(&mut self) -> Result<()> {
+        match self.instance.take() {
+            Some((id, _)) => delete_instance(self.r, &id).await,
+            None => Ok(()),
+        }
+    }
+}
+
+/// Clone a stopped instance's disk, hardware model and auxiliary storage into the store as a template named `key`.
+fn store_instance_files(store: &Store, key: &str, disk: &Path, workspace: &Path) -> Result<()> {
+    let sources = [
+        ("disk.raw", disk.to_path_buf()),
+        ("hardware.bin", workspace.join("hardware.bin")),
+        ("auxiliary.bin", workspace.join("auxiliary.bin")),
+    ];
+    for (_, p) in &sources {
+        ensure!(p.is_file(), "the build instance has no {}", p.display());
+    }
+    let name = format!("local-{}", short_id());
+    let scratch = store.scratch("build");
+    std::fs::create_dir_all(&scratch)?;
+    for (f, src) in &sources {
+        if let Err(e) = clone_file(src, &scratch.join(f)) {
+            std::fs::remove_dir_all(&scratch).ok();
+            return Err(e);
+        }
+    }
+    store.adopt(&scratch, &name)?;
+    store.add(
+        key,
+        Entry {
+            dir: name,
+            digest: String::new(),
+            source: "build".into(),
+            added_unix: 0,
+        },
+    )?;
+    Ok(())
+}
+
+/// `scp -r LOCAL USER@IP:DST` with the same host-key and identity handling as `mac exec`.
+async fn scp_to(ip: &str, user: &str, local: &Path, dst: &str) -> Result<()> {
+    ensure!(
+        local.exists(),
+        "COPY source {} does not exist",
+        local.display()
+    );
+    let mut c = tokio::process::Command::new("scp");
+    c.args([
+        "-r",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+    ]);
+    if let Some(k) = crate::run::generated_identity() {
+        c.arg("-i").arg(k);
+    }
+    let status = c
+        .arg(local)
+        .arg(format!("{user}@{ip}:{dst}"))
+        .status()
+        .await
+        .context("running scp (is the OpenSSH client installed?)")?;
+    ensure!(status.success(), "scp exited with {status}");
+    Ok(())
 }
 
 pub async fn run(command: MacCommand) -> Result<()> {
@@ -446,16 +656,14 @@ pub async fn run(command: MacCommand) -> Result<()> {
             tag,
             dry_run,
             context,
+            ..
         } => {
-            let path = file.unwrap_or_else(|| context.join("Macfile"));
-            let src = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let text = build_plan_text(&src, &tag)?;
             ensure!(
                 dry_run,
-                "running a build is not implemented yet: use --dry-run to check the Macfile and see the plan"
+                "a real build needs the daemon: pass --server (or select a context)"
             );
-            print!("{text}");
+            let src = read_macfile(file, &context)?;
+            print!("{}", build_plan_text(&src, &tag)?);
         }
         MacCommand::Import { dir, reference } => {
             check_template(&dir)?;

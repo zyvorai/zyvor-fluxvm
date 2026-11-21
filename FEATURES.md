@@ -151,7 +151,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 ### macOS image store (`fluxctl mac`)
 - `fluxctl mac images|pull|push|tag|rmi|import` keeps macOS guest templates in a local store (`~/.fluxvm/mac-images`, or `$FLUXVM_MAC_STORE`) and moves them to and from an OCI registry; names can share files, which are freed with the last name
-- `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build --dry-run` prints a Macfile's plan (running a build is not implemented); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
+- `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build` runs a Macfile (RUN over SSH, COPY over scp) in a throwaway instance and stores the result as a template, `--dry-run` prints the plan (SNAPSHOT and IPSW refused; the step logic is unit-tested with a fake host, live execution not verified); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
 
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 

@@ -10,9 +10,6 @@
 //! line, and `"..."` / `'...'` quote arguments for `FROM`, `USER`, `COPY`
 //! and `SNAPSHOT`. `RUN` keeps its text verbatim for the shell.
 
-// `mac build --dry-run` uses parse/plan/render_dry_run; the Step fields that only a real build would read are unused until then.
-#![allow(dead_code)]
-
 use std::fmt;
 
 /// What a Macfile builds on.

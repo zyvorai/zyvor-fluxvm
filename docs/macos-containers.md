@@ -14,7 +14,7 @@ Status: the commands below are implemented and unit-tested. Nothing has been run
 |---|---|
 | `fluxctl mac images`, `pull`, `push`, `tag`, `rmi`, `import` | Implemented (this page) |
 | `fluxctl mac run [--rm] [--name N] [-p H:G] IMAGE [-- CMD]`, `ps`, `rm`, `exec` | Implemented, needs the daemon (`--server` or a context). **Unit-tested only; never run against a real VM.** An instance is a VZ macOS VM, an APFS clone of the image's disk, labelled `fluxvm.mac=instance`. A 409 means the Mac already runs 2 macOS guests; a 503 means its login session is locked. |
-| `fluxctl mac build -t NAME [-f Macfile] --dry-run [CONTEXT]` | Parses a Macfile and prints the plan, with line-numbered errors. Only `--dry-run` works: running the steps in a build VM is **not implemented**. A `#` comment must be on its own line (a trailing one after a directive is an error). |
+| `fluxctl mac build -t NAME [-f Macfile] [--dry-run] [--wait SECS] [CONTEXT]` | `--dry-run` parses a Macfile and prints the plan, with line-numbered errors (client-side). Without it the build runs: needs the daemon, and is **unit-tested only with a fake host; never run against a real macOS VM**. `SNAPSHOT` and `FROM IPSW latest` are refused (not supported). A `#` comment must be on its own line (a trailing one after a directive is an error). |
 
 The image commands are client-side only: they talk to a registry and the local store, never to the daemon. Until `run` exists, a stored
 image is not started by `fluxctl mac`; to use a template today, follow the clone steps in [macos.md](macos.md#macos-guests).
@@ -65,6 +65,25 @@ else uses them.
 
 Removes a name. Prints whether the files were deleted or kept because another name uses them. An unknown reference is an error.
 
+### `fluxctl mac build -t NAME[:TAG] [-f Macfile] [--dry-run] [--wait SECS] [CONTEXT]`
+
+Builds an image from a Macfile (default `CONTEXT/Macfile`; `CONTEXT` defaults to `.` and is where `COPY` sources are read from).
+`--dry-run` prints the numbered plan and changes nothing. A real build:
+
+1. Refuses a Macfile with `SNAPSHOT` or `FROM IPSW latest` before creating anything (a saved running state cannot move to another Mac;
+   installing from an IPSW is not wired into `build`).
+2. Creates a throwaway instance named `build-<6 hex>` from the `FROM` template (an APFS clone through the daemon, labelled like `run`
+   instances, so it shows in `mac ps`) and waits up to `--wait` seconds (default 900) for SSH. The 2-macOS-VM limit (409) and locked-session
+   (503) errors are the same as for `run`.
+3. Runs each step in order: `RUN` over `ssh` as the `USER` in force (`admin` when there is none), `COPY` with `scp -r` from the context.
+   Output streams to the terminal.
+4. Stops the instance and clones its `disk.raw`, `hardware.bin` and `auxiliary.bin` into the store as `NAME:TAG` (an existing tag is replaced).
+5. Deletes the instance.
+
+On any failure the instance is deleted and the error names the failing step, numbered as in `--dry-run` (`build failed at step 3 (...)`).
+There is no layer cache: every build starts from `FROM`. The build instance runs on the daemon's Mac, so the daemon must be on this machine
+(the template and the result are local paths).
+
 ## Registry credentials
 
 `pull` and `push` read `FLUXVM_REGISTRY_USER` and `FLUXVM_REGISTRY_PASSWORD` (a missing password is sent as empty). With no user set, no
@@ -85,7 +104,7 @@ fluxctl mac rmi macos-xcode:stable
 
 These come from the design and from macOS itself; they apply to the whole workflow.
 
-- **At most 2 macOS VMs at a time** on one host (`MAX_MACOS_GUESTS`). When `run` exists it is meant to refuse at the limit, not queue.
+- **At most 2 macOS VMs at a time** on one host (`MAX_MACOS_GUESTS`). `run` and `build` refuse at the limit, not queue.
 - **No fork or branching.** A saved state is bound to its machine identifier and MAC, so "fast" means cloning a stopped template, not
   many restores of one snapshot.
 - **Restore needs an unlocked login session** on the host. A headless server needs a dedicated auto-login user with the lock off.
