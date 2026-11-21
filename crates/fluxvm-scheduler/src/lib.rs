@@ -2784,6 +2784,19 @@ impl VmManager {
         }
         if req.backend == BackendKind::Vz {
             apple_placement::enforce_macos_guest_limit(&req, &self.store.list().await)?;
+            // Thermal-aware admission: a throttled Mac gets no new VMs until it cools (docs/macos-host.md).
+            let limit = tokio::task::spawn_blocking(fluxvm_apple::host_health::probe_thermal_limit)
+                .await
+                .ok()
+                .flatten();
+            let health = fluxvm_apple::host_health::HostHealth {
+                thermal_limit: limit,
+                ..Default::default()
+            };
+            if let Some(why) = health.admission_blockers().into_iter().next() {
+                audit_event("admission.deny", &[("scope", "thermal"), ("reason", &why)]);
+                bail!("this Mac is {why}; retry when `pmset -g therm` shows no speed limit, or place the VM on another Mac");
+            }
         }
         self.admit_under_pressure(req.memory_mib).await?;
         // Every storage backend except CephRbd points `image` at a real
@@ -6226,6 +6239,19 @@ impl VmManager {
                 me.run_pending_restarts().await;
                 me.ensure_crash_watchers().await;
                 me.run_power_schedules().await;
+                // Opt-in (`FLUXVM_KEEPAWAKE_WHILE_RUNNING=1`): hold a sleep assertion only while a vz VM runs.
+                {
+                    let running = me
+                        .store
+                        .list()
+                        .await
+                        .iter()
+                        .filter(|v| {
+                            v.request.backend == BackendKind::Vz && v.status == VmStatus::Running
+                        })
+                        .count();
+                    fluxvm_apple::keepawake::sync_running(running);
+                }
                 if !me
                     .scheduled_snapshots_busy
                     .swap(true, std::sync::atomic::Ordering::AcqRel)
