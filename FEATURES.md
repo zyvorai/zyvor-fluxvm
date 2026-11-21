@@ -162,6 +162,11 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `fluxctl mac images|pull|push|tag|rmi|import` keeps macOS guest templates in a local store (`~/.fluxvm/mac-images`, or `$FLUXVM_MAC_STORE`) and moves them to and from an OCI registry; names can share files, which are freed with the last name
 - `mac run`, `ps`, `rm`, `exec` manage macOS VMs cloned from an image; `mac build` runs a Macfile (RUN over SSH, COPY over scp) in a throwaway instance and stores the result as a template, `--dry-run` prints the plan (SNAPSHOT and IPSW refused; the step logic is unit-tested with a fake host, live execution not verified); at most 2 macOS VMs, no fork, restore needs an unlocked session, and Apple's licence limits where images may be stored ([docs/macos-containers.md](docs/macos-containers.md)); unit-tested, not run against a real registry or VM
 
+### Mac integrations: MCP, events, metrics
+- MCP tools (`fluxctl mcp serve`): `mac_images`, `mac_ps`, `mac_build_dry_run`, `mac_compose_ps`, `kube_apple_list|status|snapshot_ls|logs` (read-only, always offered) and `mac_run`, `mac_exec` (need `--allow-write`); no secrets in output
+- `mac watch` / `mac events`: lifecycle events (`mac.instance.*`, `mac.slots.full|free`, `kube.apple.node.*`, `kube.apple.cluster.*`) into the daemon's event log, SSE stream and signed webhooks with `--record-to`; Kairon labels carried
+- `mac metrics`: Prometheus text (instances by state, macOS slots n/2, template store bytes, `kube apple` node readiness, snapshot age), stdout or an atomic textfile ([docs/mac-integrations.md](docs/mac-integrations.md)); unit-tested with fakes, not run live
+
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
 - `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere

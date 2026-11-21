@@ -2707,7 +2707,8 @@ pub async fn serve(remote: Remote, allow_write: bool) -> Result<()> {
     let mut server = Server::new("fluxvm", env!("CARGO_PKG_VERSION"), allow_write);
     let remote = Arc::new(remote);
     server.add(tools(remote.clone()));
-    server.add(crate::kube_mcp::tools(remote));
+    server.add(crate::kube_mcp::tools(remote.clone()));
+    server.add(crate::mac_mcp::tools(remote));
     server.serve(tokio::io::stdin(), tokio::io::stdout()).await
 }
 

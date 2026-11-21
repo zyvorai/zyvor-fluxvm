@@ -235,6 +235,53 @@ pub enum MacMore {
         #[command(subcommand)]
         command: crate::mac_compose::ComposeCommand,
     },
+    /// Recorded lifecycle events of instances and `kube apple` nodes (`mac.*`, `kube.apple.*`) from the daemon's event log.
+    /// `mac watch --record-to DIR` produces them. `-f` keeps printing new ones.
+    Events {
+        /// Newest N events.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(short = 'f', long)]
+        follow: bool,
+        /// One JSON object per line (the event log's own shape).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Watch instances (and, with `--kube`, `kube apple` nodes) and print one event per change: created, started, paused,
+    /// resumed, stopped, failed, removed, `mac.slots.full|free`, node and cluster changes. The first poll is the baseline.
+    /// `--record-to DIR` also appends them to DIR/events.jsonl, the daemon's state directory, so `fluxctl events`, the SSE
+    /// stream and `[[event_sinks]]` webhooks (`events = ["mac.", "kube.apple."]`) carry them. See docs/mac-integrations.md.
+    Watch {
+        /// Seconds between polls.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+        /// Stop after N polls (0 = until interrupted).
+        #[arg(long, default_value_t = 0)]
+        polls: u32,
+        /// Also watch the local `kube apple` clusters.
+        #[arg(long)]
+        kube: bool,
+        /// This Mac's name in the fleet, put on every event as `node`.
+        #[arg(long)]
+        node: Option<String>,
+        /// Append events to DIR/events.jsonl (the daemon's state directory; needs write access to it).
+        #[arg(long, value_name = "DIR")]
+        record_to: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prometheus text: instances by state, macOS slots used (of 2), template store size and, with `--kube`, `kube apple`
+    /// node readiness and snapshot age. `--textfile PATH` writes it atomically for node_exporter's textfile collector.
+    Metrics {
+        /// Value of the `node` label (this Mac's name in the fleet).
+        #[arg(long)]
+        node: Option<String>,
+        /// Also read the `kube apple` clusters (connects to each node over ssh).
+        #[arg(long)]
+        kube: bool,
+        #[arg(long, value_name = "PATH")]
+        textfile: Option<PathBuf>,
+    },
 }
 
 impl MacMore {
@@ -567,6 +614,32 @@ fn prune_store(store: &Store, unused: &[String], dry_run: bool, force: bool) -> 
 pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
     use reqwest::Method;
     match cmd {
+        MacMore::Events {
+            limit,
+            follow,
+            json,
+        } => crate::mac_events::run_events(r, limit, follow, json).await?,
+        MacMore::Watch {
+            interval,
+            polls,
+            kube,
+            node,
+            record_to,
+            json,
+        } => {
+            let o = crate::mac_events::WatchOpts {
+                interval: std::time::Duration::from_secs(interval.max(1)),
+                polls: (polls > 0).then_some(polls),
+                node,
+                record_to,
+            };
+            crate::mac_events::run_watch(r, o, json, kube).await?
+        }
+        MacMore::Metrics {
+            node,
+            kube,
+            textfile,
+        } => crate::mac_metrics::run(r, node, kube, textfile.as_deref()).await?,
         MacMore::Inspect { names } => {
             let mut out = Vec::new();
             for n in &names {

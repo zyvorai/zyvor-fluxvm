@@ -7,10 +7,10 @@
 //! journal of what it created (so an interrupted run can be repaired from the VMs' ownership labels), and never prints
 //! or passes the cluster token on a command line. See `docs/apple-k3s.md`.
 
-mod host;
-mod lifecycle;
-mod model;
-mod script;
+pub(crate) mod host;
+pub(crate) mod lifecycle;
+pub(crate) mod model;
+pub(crate) mod script;
 #[cfg(test)]
 mod tests;
 
