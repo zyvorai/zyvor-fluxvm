@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+A scheduler for the Mac fleet and GitHub Actions runners on it. Unit-tested with fake ssh and a fake GitHub only; **not run on a real Mac, a real macOS guest or GitHub**.
+
+- New `fluxctl mac-fleet run`, `drain`, `resume`, `templates ls|distribute` and `fluxctl mac run --fleet`. Each Mac reports its free CPU, memory, disk, power and the templates it holds as `name:tag@digest`; placement is `apple_placement::score` plus a bonus for the exact digest, with labels, disk, AC power, drain and the 2-macOS-guest limit as hard filters that explain themselves. `--queue-timeout` waits for a slot, short in-process leases keep two placements from taking one slot, and the Mac's own daemon creates the guest (`fluxctl mac run --rm` over ssh). `templates distribute` has each Mac pull and then compares its digest with the pinned one.
+- `mac-fleet apply --prune` removes FluxVM from Macs that the previous `apply` of that inventory listed and this one does not (opt-in; a Mac with running VMs is refused; VM data stays).
+- Per-step timeouts: `--step-timeout` (default 1800 s) bounds every ssh call of every `mac-fleet` command; the new commands add `--timeout`, `--probe-timeout`, `--pull-timeout`. A call over its deadline is killed and reported as timed out.
+- New `fluxctl mac runner`: one ephemeral macOS VM per GitHub Actions job using a just-in-time runner. The GitHub token comes from a 0600 file or stdin and the JIT configuration travels on ssh stdin, so neither is ever an argument or in a log; the guest is deleted after the job; never more than 2 guests per Mac. See [docs/mac-fleet-scheduler.md](docs/mac-fleet-scheduler.md) and [docs/mac-runner.md](docs/mac-runner.md). New modules `mac_fleet_sched`, `mac_fleet_run`, `mac_fleet_timed`, `mac_runner`.
+
 Apple-silicon native k3s: `fluxctl kube apple`, a persistent ARM64 Linux VM per node. Unit-tested against a fake host only; **not run against real hardware** (no guest was booted, no real ssh, tunnel, etcd snapshot or multi-Mac join was exercised).
 
 - New `fluxctl kube apple create|join|kubeconfig|tunnel|status|list|stop|start|persist|upgrade|backup|restore|recover|delete|logs` (module `kube_apple`, see [docs/apple-k3s.md](docs/apple-k3s.md)).
