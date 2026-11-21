@@ -3,7 +3,7 @@
 # Design: a Docker-style workflow for macOS guests
 
 Status: **phase 1 (store and registry) is implemented** as `fluxctl mac images|pull|push|tag|rmi|import`; see
-[macos-containers.md](macos-containers.md). Everything else here (run, ps, exec, build, warm start) is still a proposal. It lives in this repository for now; it can move to its own project once the shape
+[macos-containers.md](macos-containers.md). Phase 2 (`run`, `ps`, `rm`, `exec`) is implemented but unit-tested only, never run on a real VM. Phase 3 has only the Macfile parser and `mac build --dry-run`; running a build, and phase 4 (warm start), are still proposals. It lives in this repository for now; it can move to its own project once the shape
 is settled, because it only needs FluxVM's daemon API.
 
 ## Goal
@@ -61,7 +61,8 @@ and `logs` are SSH (or the vsock agent when it is enabled and answering).
 **Build** = a file of provisioning steps run in a throwaway instance, then stopped and stored as a new template:
 
 ```
-FROM macos-base:15            # a template, or: IPSW latest
+# a template, or: IPSW latest
+FROM macos-base:15
 USER builder
 RUN  softwareupdate --install-rosetta --agree-to-license
 COPY ./ci-tools /opt/ci-tools

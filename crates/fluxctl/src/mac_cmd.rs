@@ -35,6 +35,22 @@ pub enum MacCommand {
     /// Add a template directory (disk.raw, hardware.bin, auxiliary.bin) to the store as `name:tag`; an APFS clone, so it is instant
     /// on the same volume.
     Import { dir: PathBuf, reference: String },
+    /// Read a Macfile (FROM, USER, RUN, COPY, SNAPSHOT) and print the build plan. Running the steps in a build VM is not
+    /// implemented yet, so `--dry-run` is required.
+    Build {
+        /// The Macfile (default `Macfile` in CONTEXT).
+        #[arg(short = 'f', long)]
+        file: Option<PathBuf>,
+        /// Name for the resulting image (`name:tag`).
+        #[arg(short = 't', long)]
+        tag: String,
+        /// Print the plan and change nothing (the only mode available now).
+        #[arg(long)]
+        dry_run: bool,
+        /// Build context directory: COPY sources are relative to it.
+        #[arg(default_value = ".")]
+        context: PathBuf,
+    },
     /// Start a macOS VM from a local image (an APFS clone of its disk) and, with CMD, run it over SSH. Needs the daemon
     /// (`--server`/context). At most 2 macOS VMs run at once. Without CMD the instance keeps running: see `mac ps`.
     Run {
@@ -425,6 +441,22 @@ pub async fn run(command: MacCommand) -> Result<()> {
                 }
             );
         }
+        MacCommand::Build {
+            file,
+            tag,
+            dry_run,
+            context,
+        } => {
+            let path = file.unwrap_or_else(|| context.join("Macfile"));
+            let src = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let text = build_plan_text(&src, &tag)?;
+            ensure!(
+                dry_run,
+                "running a build is not implemented yet: use --dry-run to check the Macfile and see the plan"
+            );
+            print!("{text}");
+        }
         MacCommand::Import { dir, reference } => {
             check_template(&dir)?;
             let key = mac_store::normalize(&reference)?;
@@ -455,6 +487,17 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Exec { .. } => unreachable!("rejected above"),
     }
     Ok(())
+}
+
+/// Parse a Macfile and render the plan for `tag`; errors carry the Macfile line.
+fn build_plan_text(src: &str, tag: &str) -> Result<String> {
+    let key = mac_store::normalize(tag)?;
+    let file = crate::mac_build::parse(src)?;
+    let steps = crate::mac_build::plan(&file);
+    Ok(format!(
+        "build {key}\n{}",
+        crate::mac_build::render_dry_run(&steps)
+    ))
 }
 
 fn creds() -> Option<image::oci_registry::Credentials> {
@@ -572,6 +615,18 @@ fn render_images(store: &Store, rows: &[(String, Entry)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_plan_text_shows_steps_and_reports_line_numbers() {
+        let t = build_plan_text("FROM base:15\nUSER bob\nRUN make\n", "out").unwrap();
+        assert!(
+            t.starts_with("build out:latest\n") && t.contains("run as bob"),
+            "{t}"
+        );
+        let e = build_plan_text("RUN x\n", "out").unwrap_err().to_string();
+        assert!(e.contains("line 1"), "{e}");
+        assert!(build_plan_text("FROM a\n", "bad tag").is_err());
+    }
 
     #[test]
     fn registry_hosts_are_told_from_local_names() {
