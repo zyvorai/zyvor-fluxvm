@@ -96,6 +96,16 @@ The `status` table plus, per Mac, what the scheduler and the operator of a headl
 (name and digest) and the **headless checks** of `fluxctl mac host headless-check` (an unlocked console session, sleep, auto-login), each failing one with its fix. Read-only: one probe and one `mac host headless-check --json` per Mac. A Mac whose
 FluxVM is too old to have `mac host` shows `?` for headless. It also prints how many shared leases the placements on this machine hold. `--json` gives `{"hosts": [...], "leases": N}`. Plain `status` is unchanged.
 
+## `mac ps --fleet` and `mac images --fleet`
+
+```bash
+fluxctl mac ps --fleet fleet.yaml [-a] [-f status=running] [--json]
+fluxctl mac images --fleet fleet.yaml [-a] [-f reference=xcode*] [--json]
+```
+
+The same listings from every Mac of the inventory at once over ssh, one table with the Mac in the first column. `--json` prints one document: `{"schema_version": 1, "hosts": [{host, name, ok, error}], "instances"|"images": [...]}`, each row with `host` (the Mac's name) and
+`host_label` added and the daemon's raw `vm` record left out. A Mac that cannot be reached is a row in `hosts` with the reason, and the command exits non-zero. `-a` and `-f` are passed to each Mac; `--format` and `-q` are refused with `--fleet`. ssh uses the defaults (`~/.ssh/config`; no `--identity` flag here, like `mac run --fleet`). Read-only.
+
 ## Timeouts
 
 `--step-timeout SECS` (default 1800, `0` = none) bounds every ssh call of every `mac-fleet` command: each step of `up`/`apply` (install, daemon,
