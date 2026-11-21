@@ -35,6 +35,26 @@ unchanged: read it first with `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm
 | Linux aarch64 | `linux-aarch64` | as above; cross-compiled on x86_64 by the release workflow and still marked experimental, so a failed aarch64 build does not block the x86_64 package or the release (0.4.20 and 0.4.21 each carry an aarch64 tarball) |
 | Intel Macs, Windows, other | none | build from source: `cargo build --release -p fluxctl` (see the [README](https://github.com/zyvorai/zyvor-fluxvm#readme)) |
 
+### Linux distributions
+
+The installer reads `/etc/os-release` (`ID`, then `ID_LIKE`) and uses the matching family. The package itself is the same
+glibc build for all of them; the family decides which command installs its two runtime libraries and how the service is set up.
+
+| Family | Matches | Runtime libraries (as root, or the command is printed) | Service |
+|---|---|---|---|
+| Debian | Debian, Ubuntu, Mint, Pop!_OS, Devuan, Kali, Raspberry Pi OS | `apt-get install -y libhivex0 libsystemd0` | systemd, or OpenRC where the host runs it |
+| RHEL | Fedora, RHEL, CentOS Stream, Rocky, Alma, Oracle, Amazon Linux | `dnf` (or `yum`) `install -y hivex systemd-libs` | systemd |
+| Arch | Arch, Manjaro, EndeavourOS, CachyOS, Artix | `pacman -S --needed --noconfirm hivex systemd-libs` | systemd, or OpenRC where the host runs it |
+| SUSE | openSUSE Leap/Tumbleweed, SLES | `zypper --non-interactive install libhivex0 libsystemd0` | systemd |
+| Alpine (musl) | Alpine, postmarketOS | none: the package is built for glibc and will not run; the installer says so and points at the source build | |
+| Other | anything else | install the hivex and systemd shared libraries with your package manager (no names are guessed) | systemd, OpenRC, or the command to run by hand |
+
+OpenRC hosts (Gentoo, Artix, Devuan) get `share/openrc/fluxvm` and `fluxvm-agent` installed under `/etc/init.d`; those scripts
+are in releases after 0.4.21 and have not been run on a live OpenRC host yet. The glibc floor (2.35) is checked too, so
+RHEL-family 9 hosts get a plain message instead of a loader error. The family detection and the commands above are
+unit-tested against fake `os-release` files; the package names themselves have not been checked by installing them on a real
+host of each family.
+
 The installer checks the platform first and exits with status 2 and the reason if there is no package for it. A release
 that does not carry a package for your platform fails the download with the asset name and the releases URL.
 
@@ -70,7 +90,10 @@ curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --vers
 |---|---|
 | `--version X`, `--version latest` | Install release `X` (a leading `v` is accepted). Default: latest published. |
 | `--prefix DIR` | Install under `DIR` instead of `~/.local` (it needs to be writable by you; for a system-wide prefix run the script as a user that may write there). |
-| `--service` | macOS: run `fluxctl service install` (a LaunchAgent that starts at login) and wait for `/healthz`. Linux: print the systemd commands (root is needed, so they are not run for you). |
+| `--service` | macOS: run `fluxctl service install` (a LaunchAgent that starts at login) and wait for `/healthz`. Linux: set up the daemon under systemd or OpenRC, whichever the host runs. As root it does it; otherwise it prints the exact `sudo` commands and runs none of them. An existing `/etc/fluxvm.toml` is never overwritten. |
+| `--agent` | Linux, with `--service`: also run the fleet node agent (`fluxvm-agent node`) as a service. Needs the four options below; the token is copied to `/etc/fluxvm/agent.token` (mode 0600) and passed to the agent as a file, never on a command line. On a Mac use `fluxctl node-agent install`. |
+| `--central URL`, `--node-name NAME`, `--advertise-url URL`, `--token-file FILE` | The central registry, this node's name (lowercase letters, digits, dashes, dots), the address central reaches this node's daemon on (not a loopback one), and the fleet or join token. All four are checked before anything is downloaded. |
+| `--detect` | Print what the installer found (distro family, package manager, init system, libc) and stop. Useful in a bug report. |
 | `--client NAME` | After installing, run `fluxctl mcp install NAME --allow-write` (`claude-code`, `codex`, `gemini`, `cursor`, `vscode`, ...). |
 | `--no-deps` | Do not try to install the runtime library. |
 | `--brew` | macOS: use Homebrew (`brew install zyvorai/tap/fluxvm`) instead of downloading. |
@@ -78,7 +101,8 @@ curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | bash -s -- --vers
 | `--dry-run` | Print the asset URL and what would run, then stop. Touches nothing, downloads nothing. |
 | `-h`, `--help` | Usage. |
 
-Environment: `FLUXVM_RELEASE_BASE` points the installer at a mirror of the releases layout
+Environment: `FLUXVM_OS_RELEASE`, `FLUXVM_INIT` (`systemd`, `openrc` or `none`) and `FLUXVM_GLIBC_VERSION` override what is detected on
+Linux (containers, tests). `FLUXVM_RELEASE_BASE` points the installer at a mirror of the releases layout
 (`<base>/download/v<ver>/<asset>`), or at `file:///path` for an offline install.
 
 Exit status: `0` success; `1` failed (download, checksum, service); `2` unsupported platform or missing tool;
@@ -178,7 +202,7 @@ starts a throwaway VM. For the API and for agents you want it running:
 | Where | How |
 |---|---|
 | macOS | `curl ... \| bash -s -- --service`, or `fluxctl service install` later. It is a LaunchAgent (starts at login) and needs a logged-in session for snapshots. `fluxctl service status`, `fluxctl service uninstall`. Check: `curl -s http://127.0.0.1:7788/healthz` |
-| Linux | install the unit the package ships: `sudo install -m 0755 ~/.local/share/fluxvm/current/bin/fluxctl /usr/local/bin/`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/config.example.toml /etc/fluxvm.toml`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/systemd/fluxvm.service /etc/systemd/system/`, then `sudo systemctl daemon-reload && sudo systemctl enable --now fluxvm`. The daemon loads its eBPF objects from `/usr/lib/fluxvm/bpf` by default, and the installer does not put them there: `sudo mkdir -p /usr/lib/fluxvm && sudo cp -r ~/.local/share/fluxvm/current/lib/bpf /usr/lib/fluxvm/` ([linux-package.md](linux-package.md#installing)). Host preparation (QEMU, Cloud Hypervisor, a bridge): `scripts/bootstrap-host.sh` |
+| Linux | `curl ... \| sudo bash -s -- --service` (systemd or OpenRC), or by hand: install the unit the package ships: `sudo install -m 0755 ~/.local/share/fluxvm/current/bin/fluxctl /usr/local/bin/`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/config.example.toml /etc/fluxvm.toml`, `sudo install -m 0644 ~/.local/share/fluxvm/current/share/systemd/fluxvm.service /etc/systemd/system/`, then `sudo systemctl daemon-reload && sudo systemctl enable --now fluxvm`. The daemon loads its eBPF objects from `/usr/lib/fluxvm/bpf` by default, and the installer does not put them there: `sudo mkdir -p /usr/lib/fluxvm && sudo cp -r ~/.local/share/fluxvm/current/lib/bpf /usr/lib/fluxvm/` ([linux-package.md](linux-package.md#installing)). Host preparation (QEMU, Cloud Hypervisor, a bridge): `scripts/bootstrap-host.sh` |
 
 If you installed with Homebrew, use `brew services` and not `fluxctl service install`: both register a LaunchAgent for the
 same port ([install-macos.md](install-macos.md#2-start-the-daemon)).

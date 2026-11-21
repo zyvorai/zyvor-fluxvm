@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+# The OpenRC counterpart of packaging/systemd/fluxvm.service, for Linux hosts without systemd (Gentoo, Artix, Devuan, ...).
+# Installed by scripts/install.sh --service as /etc/init.d/fluxvm. Config: /etc/fluxvm.toml. Log: /var/log/fluxvm.log.
+# Not tested on a live OpenRC host yet.
+
+description="Zyvor FluxVM control plane"
+command="/usr/local/bin/fluxctl"
+command_args="--config /etc/fluxvm.toml serve"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/fluxvm.log"
+error_log="/var/log/fluxvm.log"
+# systemd's LimitMEMLOCK=infinity: VM memory is locked.
+rc_ulimit="-l unlimited"
+# Stopping the daemon must not stop the VMs it started: they are reattached on the next start (the unit's KillMode=process).
+# OpenRC signals only the daemon's own pid unless cgroup cleanup is enabled, so keep rc_cgroup_cleanup off for this service.
+rc_cgroup_cleanup="NO"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath --directory --mode 0755 /run/fluxvm
+	checkpath --directory --mode 0700 /var/lib/fluxvm
+	checkpath --directory --mode 0755 /run/netns
+}
