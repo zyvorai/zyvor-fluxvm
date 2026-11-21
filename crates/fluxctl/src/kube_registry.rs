@@ -1,0 +1,487 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+//! `/etc/rancher/k3s/registries.yaml` (mirrors, private registries, credentials, TLS) and airgap image preload.
+//! Rendering and planning are pure; [`apply_airgap`] executes a plan through a [`GuestOps`].
+
+use crate::kube_addons::{GuestOps, sh_quote};
+use anyhow::{Context, Result, bail};
+use serde_yaml::{Mapping, Value};
+use std::{collections::BTreeMap, path::PathBuf};
+
+pub const REGISTRIES_PATH: &str = "/etc/rancher/k3s/registries.yaml";
+pub const AIRGAP_DIR: &str = "/var/lib/rancher/k3s/agent/images";
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegistryAuth {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RegistrySpec {
+    /// registry host (`docker.io`, `*` for all) -> mirror endpoints, tried in order
+    pub mirrors: BTreeMap<String, Vec<String>>,
+    /// registry host -> (regex, replacement) rewrites of the image path
+    pub rewrites: BTreeMap<String, Vec<(String, String)>>,
+    pub auth: BTreeMap<String, RegistryAuth>,
+    pub ca_files: BTreeMap<String, String>,
+    pub insecure: Vec<String>,
+    /// registries served by the embedded mirror (Spegel); `*` for all. They get an empty mirror entry.
+    pub embedded: Vec<String>,
+}
+
+fn check_host(h: &str) -> Result<()> {
+    if h == "*" {
+        return Ok(());
+    }
+    if h.is_empty()
+        || !h
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-.:".contains(c))
+    {
+        bail!("registry {h:?} must be a host name with an optional :port (or *)");
+    }
+    Ok(())
+}
+
+fn check_endpoint(e: &str) -> Result<()> {
+    if !(e.starts_with("https://") || e.starts_with("http://")) || e.contains(char::is_whitespace) {
+        bail!("mirror endpoint {e:?} must be an http:// or https:// URL");
+    }
+    Ok(())
+}
+
+pub fn registries_yaml(s: &RegistrySpec) -> Result<String> {
+    let mut mirrors = Mapping::new();
+    for host in &s.embedded {
+        check_host(host)?;
+        if s.mirrors.contains_key(host) {
+            bail!("{host} has both an embedded mirror and explicit endpoints");
+        }
+        mirrors.insert(host.clone().into(), Value::Mapping(Mapping::new()));
+    }
+    for (host, eps) in &s.mirrors {
+        check_host(host)?;
+        if eps.is_empty() {
+            bail!("mirror for {host} has no endpoint");
+        }
+        let mut m = Mapping::new();
+        for e in eps {
+            check_endpoint(e)?;
+        }
+        m.insert(
+            "endpoint".into(),
+            Value::Sequence(eps.iter().map(|e| Value::String(e.clone())).collect()),
+        );
+        if let Some(rw) = s.rewrites.get(host) {
+            let mut r = Mapping::new();
+            for (re, to) in rw {
+                r.insert(re.clone().into(), to.clone().into());
+            }
+            m.insert("rewrite".into(), Value::Mapping(r));
+        }
+        mirrors.insert(host.clone().into(), Value::Mapping(m));
+    }
+    for host in s.rewrites.keys() {
+        if !s.mirrors.contains_key(host) {
+            bail!("rewrite for {host} needs a mirror for {host}");
+        }
+    }
+    // Per-registry settings are keyed by the endpoint's host:port, the name k3s uses for the connection.
+    let mut configs: BTreeMap<String, Mapping> = BTreeMap::new();
+    for (host, a) in &s.auth {
+        check_host(host)?;
+        if a.username.is_empty() || a.password.is_empty() {
+            bail!("credentials for {host} need a user name and a password");
+        }
+        let mut m = Mapping::new();
+        m.insert("username".into(), a.username.clone().into());
+        m.insert("password".into(), a.password.clone().into());
+        configs
+            .entry(host.clone())
+            .or_default()
+            .insert("auth".into(), Value::Mapping(m));
+    }
+    for (host, ca) in &s.ca_files {
+        check_host(host)?;
+        if !ca.starts_with('/') {
+            bail!("CA file {ca:?} must be an absolute path on the node");
+        }
+        let c = configs.entry(host.clone()).or_default();
+        tls_entry(c).insert("ca_file".into(), ca.clone().into());
+    }
+    for host in &s.insecure {
+        check_host(host)?;
+        let c = configs.entry(host.clone()).or_default();
+        tls_entry(c).insert("insecure_skip_verify".into(), true.into());
+    }
+    let mut root = Mapping::new();
+    if !mirrors.is_empty() {
+        root.insert("mirrors".into(), Value::Mapping(mirrors));
+    }
+    if !configs.is_empty() {
+        let mut c = Mapping::new();
+        for (h, m) in configs {
+            c.insert(h.into(), Value::Mapping(m));
+        }
+        root.insert("configs".into(), Value::Mapping(c));
+    }
+    if root.is_empty() {
+        bail!("nothing to write: give a mirror, credentials or TLS settings");
+    }
+    Ok(format!(
+        "# generated by `fluxctl kube addons registry`; k3s reads this at start-up\n{}",
+        serde_yaml::to_string(&Value::Mapping(root))?
+    ))
+}
+
+fn tls_entry(c: &mut Mapping) -> &mut Mapping {
+    let tls = c
+        .entry("tls".into())
+        .or_insert_with(|| Value::Mapping(Mapping::new()));
+    match tls {
+        Value::Mapping(m) => m,
+        _ => unreachable!("tls is always built as a mapping"),
+    }
+}
+
+// ---------------------------------------------------------------- CLI glue
+
+#[derive(clap::Args, Debug, Default)]
+pub struct RegistryArgs {
+    /// Mirror REGISTRY=URL (REGISTRY `*` means every registry). Repeat for several endpoints.
+    #[arg(long, value_name = "REGISTRY=URL")]
+    pub mirror: Vec<String>,
+    /// Rewrite REGISTRY=REGEX=>REPLACEMENT applied to the image path on that mirror.
+    #[arg(long, value_name = "REGISTRY=REGEX=>REPL")]
+    pub rewrite: Vec<String>,
+    /// Credentials REGISTRY=USER=ENVVAR: the password is read from that environment variable, never from argv.
+    #[arg(long, value_name = "REGISTRY=USER=ENVVAR")]
+    pub auth: Vec<String>,
+    /// CA bundle REGISTRY=/path/on/node.
+    #[arg(long, value_name = "REGISTRY=PATH")]
+    pub ca: Vec<String>,
+    /// Skip TLS verification for this registry (lab use only).
+    #[arg(long, value_name = "REGISTRY")]
+    pub insecure: Vec<String>,
+    /// Let the embedded registry mirror serve this registry (`*` for all); needs `config --embedded-registry` on the
+    /// servers and TCP 5001 and 6443 open between nodes.
+    #[arg(long, value_name = "REGISTRY")]
+    pub embedded_mirror: Vec<String>,
+    /// Write it on this host over ssh instead of printing it (mode 0600; restart k3s afterwards).
+    #[arg(long)]
+    pub ssh: Option<String>,
+}
+
+/// Parses the flags into a spec; `env` looks up a variable (so tests need no real environment).
+pub fn parse_args(a: &RegistryArgs, env: &dyn Fn(&str) -> Option<String>) -> Result<RegistrySpec> {
+    let mut s = RegistrySpec::default();
+    for m in &a.mirror {
+        let (h, u) = m
+            .split_once('=')
+            .with_context(|| format!("--mirror {m:?} must be REGISTRY=URL"))?;
+        s.mirrors.entry(h.into()).or_default().push(u.into());
+    }
+    for r in &a.rewrite {
+        let (h, rest) = r
+            .split_once('=')
+            .with_context(|| format!("--rewrite {r:?} must be REGISTRY=REGEX=>REPL"))?;
+        let (re, to) = rest
+            .split_once("=>")
+            .with_context(|| format!("--rewrite {r:?} must be REGISTRY=REGEX=>REPL"))?;
+        s.rewrites
+            .entry(h.into())
+            .or_default()
+            .push((re.into(), to.into()));
+    }
+    for x in &a.auth {
+        let mut p = x.splitn(3, '=');
+        let (h, u, var) = (p.next(), p.next(), p.next());
+        let (Some(h), Some(u), Some(var)) = (h, u, var) else {
+            bail!("--auth {x:?} must be REGISTRY=USER=ENVVAR");
+        };
+        let password =
+            env(var).with_context(|| format!("environment variable {var} is not set"))?;
+        s.auth.insert(
+            h.into(),
+            RegistryAuth {
+                username: u.into(),
+                password,
+            },
+        );
+    }
+    for c in &a.ca {
+        let (h, p) = c
+            .split_once('=')
+            .with_context(|| format!("--ca {c:?} must be REGISTRY=PATH"))?;
+        s.ca_files.insert(h.into(), p.into());
+    }
+    s.insecure = a.insecure.clone();
+    s.embedded = a.embedded_mirror.clone();
+    Ok(s)
+}
+
+pub fn run(a: &RegistryArgs) -> Result<String> {
+    let yaml = registries_yaml(&parse_args(a, &|k| std::env::var(k).ok())?)?;
+    match &a.ssh {
+        Some(t) => {
+            let g = crate::kube_addons::SshGuest::new(t.clone());
+            g.write(REGISTRIES_PATH, &yaml, "0600")?;
+            Ok(format!(
+                "wrote {REGISTRIES_PATH}; restart k3s (or k3s-agent) to apply\n"
+            ))
+        }
+        None => Ok(yaml),
+    }
+}
+
+// ---------------------------------------------------------------- airgap preload
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    Upload {
+        local: PathBuf,
+        remote: String,
+    },
+    /// Import into containerd now (only for formats `ctr` reads: .tar, .tar.gz, .tgz).
+    Import {
+        remote: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AirgapPlan {
+    pub steps: Vec<Step>,
+    /// Files whose format k3s only picks up at start-up.
+    pub restart_needed: bool,
+}
+
+fn kind(name: &str) -> Option<bool> {
+    // Some(true): ctr can import now; Some(false): k3s reads it at start-up; None: unsupported
+    let n = name.to_ascii_lowercase();
+    if n.ends_with(".tar") || n.ends_with(".tar.gz") || n.ends_with(".tgz") {
+        Some(true)
+    } else if n.ends_with(".tar.zst") || n.ends_with(".tar.lz4") || n.ends_with(".txt") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Where each tarball goes (`/var/lib/rancher/k3s/agent/images/`, which k3s imports at start) and how to load it now.
+pub fn airgap_plan(files: &[PathBuf]) -> Result<AirgapPlan> {
+    if files.is_empty() {
+        bail!(
+            "give one or more image tarballs (.tar, .tar.gz, .tar.zst, .tar.lz4) or .txt image lists"
+        );
+    }
+    let mut steps = vec![];
+    let mut restart_needed = false;
+    for f in files {
+        let name = f
+            .file_name()
+            .and_then(|n| n.to_str())
+            .with_context(|| format!("{} has no file name", f.display()))?;
+        let Some(importable) = kind(name) else {
+            bail!(
+                "{name}: not an image archive k3s reads (.tar, .tar.gz, .tgz, .tar.zst, .tar.lz4, .txt)"
+            );
+        };
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.+".contains(c))
+        {
+            bail!("{name}: file names for the guest may only use letters, digits, - _ . +");
+        }
+        let remote = format!("{AIRGAP_DIR}/{name}");
+        steps.push(Step::Upload {
+            local: f.clone(),
+            remote: remote.clone(),
+        });
+        if importable && !name.ends_with(".txt") {
+            steps.push(Step::Import { remote });
+        } else {
+            restart_needed = true;
+        }
+    }
+    Ok(AirgapPlan {
+        steps,
+        restart_needed,
+    })
+}
+
+pub fn render_plan(p: &AirgapPlan) -> String {
+    let mut s = String::new();
+    for st in &p.steps {
+        match st {
+            Step::Upload { local, remote } => {
+                s.push_str(&format!("copy   {} -> {remote}\n", local.display()))
+            }
+            Step::Import { remote } => {
+                s.push_str(&format!("import sudo k3s ctr images import {remote}\n"))
+            }
+        }
+    }
+    if p.restart_needed {
+        s.push_str("then restart k3s: archives in other formats are imported at start-up\n");
+    }
+    s
+}
+
+pub fn apply_airgap(g: &dyn GuestOps, p: &AirgapPlan) -> Result<Vec<String>> {
+    let mut done = vec![];
+    for st in &p.steps {
+        match st {
+            Step::Upload { local, remote } => {
+                g.upload(local, remote)?;
+                done.push(format!("copied {remote}"));
+            }
+            Step::Import { remote } => {
+                g.run(&format!("sudo k3s ctr images import {}", sh_quote(remote)))?;
+                done.push(format!("imported {remote}"));
+            }
+        }
+    }
+    if p.restart_needed {
+        done.push("restart k3s to load the remaining archives".into());
+    }
+    Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kube_addons::FakeGuest;
+
+    #[test]
+    fn mirror_golden() {
+        let mut s = RegistrySpec::default();
+        s.mirrors
+            .insert("docker.io".into(), vec!["https://mirror.local:5000".into()]);
+        assert_eq!(
+            registries_yaml(&s).unwrap(),
+            "# generated by `fluxctl kube addons registry`; k3s reads this at start-up\n\
+             mirrors:\n  docker.io:\n    endpoint:\n    - https://mirror.local:5000\n"
+        );
+    }
+
+    #[test]
+    fn full_spec_round_trips() {
+        let mut s = RegistrySpec::default();
+        s.mirrors.insert(
+            "*".into(),
+            vec!["https://a:5000".into(), "http://b:5000".into()],
+        );
+        s.rewrites.insert(
+            "*".into(),
+            vec![("^rancher/(.*)".into(), "mirror/$1".into())],
+        );
+        s.auth.insert(
+            "a:5000".into(),
+            RegistryAuth {
+                username: "u".into(),
+                password: "p w".into(),
+            },
+        );
+        s.ca_files.insert("a:5000".into(), "/etc/ssl/ca.pem".into());
+        s.insecure.push("b:5000".into());
+        let v: Value = serde_yaml::from_str(&registries_yaml(&s).unwrap()).unwrap();
+        assert_eq!(v["mirrors"]["*"]["endpoint"][1], "http://b:5000");
+        assert_eq!(v["mirrors"]["*"]["rewrite"]["^rancher/(.*)"], "mirror/$1");
+        assert_eq!(v["configs"]["a:5000"]["auth"]["password"], "p w");
+        assert_eq!(v["configs"]["a:5000"]["tls"]["ca_file"], "/etc/ssl/ca.pem");
+        assert_eq!(v["configs"]["b:5000"]["tls"]["insecure_skip_verify"], true);
+    }
+
+    #[test]
+    fn embedded_mirror_golden() {
+        let s = RegistrySpec {
+            embedded: vec!["*".into()],
+            ..Default::default()
+        };
+        let y = registries_yaml(&s).unwrap();
+        let v: Value = serde_yaml::from_str(&y).unwrap();
+        assert!(v["mirrors"]["*"].as_mapping().unwrap().is_empty(), "{y}");
+        let mut both = s.clone();
+        both.mirrors.insert("*".into(), vec!["https://x".into()]);
+        assert!(registries_yaml(&both).is_err());
+    }
+
+    #[test]
+    fn invalid_specs_are_rejected() {
+        assert!(registries_yaml(&RegistrySpec::default()).is_err());
+        let mut s = RegistrySpec::default();
+        s.mirrors
+            .insert("bad host".into(), vec!["https://x".into()]);
+        assert!(registries_yaml(&s).is_err());
+        let mut s = RegistrySpec::default();
+        s.mirrors.insert("docker.io".into(), vec!["ftp://x".into()]);
+        assert!(registries_yaml(&s).is_err());
+        let mut s = RegistrySpec::default();
+        s.rewrites
+            .insert("docker.io".into(), vec![("a".into(), "b".into())]);
+        assert!(registries_yaml(&s).is_err());
+        let mut s = RegistrySpec::default();
+        s.ca_files.insert("x".into(), "relative".into());
+        assert!(registries_yaml(&s).is_err());
+    }
+
+    #[test]
+    fn args_parse_and_password_comes_from_env() {
+        let a = RegistryArgs {
+            mirror: vec!["docker.io=https://m1".into(), "docker.io=https://m2".into()],
+            rewrite: vec!["docker.io=^lib/(.*)=>x/$1".into()],
+            auth: vec!["m1=bob=REG_PW".into()],
+            ..Default::default()
+        };
+        let env = |k: &str| (k == "REG_PW").then(|| "s3cret".to_string());
+        let s = parse_args(&a, &env).unwrap();
+        assert_eq!(s.mirrors["docker.io"].len(), 2);
+        assert_eq!(s.auth["m1"].password, "s3cret");
+        assert!(parse_args(&a, &|_| None).is_err());
+        let bad = RegistryArgs {
+            mirror: vec!["nourl".into()],
+            ..Default::default()
+        };
+        assert!(parse_args(&bad, &env).is_err());
+    }
+
+    #[test]
+    fn airgap_plan_and_render() {
+        let files: Vec<PathBuf> = vec![
+            "/x/k3s-airgap-images-arm64.tar.zst".into(),
+            "/x/app.tar".into(),
+        ];
+        let p = airgap_plan(&files).unwrap();
+        assert!(p.restart_needed);
+        assert_eq!(p.steps.len(), 3);
+        assert_eq!(
+            render_plan(&p),
+            "copy   /x/k3s-airgap-images-arm64.tar.zst -> /var/lib/rancher/k3s/agent/images/k3s-airgap-images-arm64.tar.zst\n\
+             copy   /x/app.tar -> /var/lib/rancher/k3s/agent/images/app.tar\n\
+             import sudo k3s ctr images import /var/lib/rancher/k3s/agent/images/app.tar\n\
+             then restart k3s: archives in other formats are imported at start-up\n"
+        );
+        assert!(airgap_plan(&[]).is_err());
+        assert!(airgap_plan(&["/x/a.zip".into()]).is_err());
+        assert!(airgap_plan(&["/x/a b.tar".into()]).is_err());
+    }
+
+    #[test]
+    fn airgap_apply_uses_the_guest() {
+        let p = airgap_plan(&["/x/app.tar.gz".into()]).unwrap();
+        assert!(!p.restart_needed);
+        let g = FakeGuest::default();
+        let out = apply_airgap(&g, &p).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            g.calls(),
+            vec![
+                "upload /x/app.tar.gz /var/lib/rancher/k3s/agent/images/app.tar.gz".to_string(),
+                "run sudo k3s ctr images import '/var/lib/rancher/k3s/agent/images/app.tar.gz'"
+                    .to_string(),
+            ]
+        );
+    }
+}

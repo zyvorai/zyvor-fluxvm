@@ -127,6 +127,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 ## Kubernetes & Fleet
 
+- k3s add-ons (`fluxctl kube addons`): generated `config.yaml` (add-on toggles, Cilium, node labels/taints/reservations, Secrets encryption and rotation, CIS profile and `cis-check`, Traefik HelmChartConfig, ServiceLB pools), `registries.yaml` mirrors, embedded registry and airgap preload, kubeconfig merge/rename, host preflight, virtiofs PV and Rosetta recipes; unit-tested, not run on real hardware. See [docs/apple-k3s-addons.md](docs/apple-k3s-addons.md)
+
 ### `DisposableVm` CRD (`fluxvm-kube`)
 
 - Node-local operator, one instance per node, reconciles only CRs whose `spec.node` matches
