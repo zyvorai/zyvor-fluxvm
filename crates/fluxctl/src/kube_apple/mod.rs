@@ -7,10 +7,16 @@
 //! journal of what it created (so an interrupted run can be repaired from the VMs' ownership labels), and never prints
 //! or passes the cluster token on a command line. See `docs/apple-k3s.md`.
 
+mod agent;
+mod doctor;
+mod ha;
+mod ha_model;
 pub(crate) mod host;
 pub(crate) mod lifecycle;
 pub(crate) mod model;
+mod ops;
 pub(crate) mod script;
+mod script_ha;
 #[cfg(test)]
 mod tests;
 
@@ -109,6 +115,54 @@ pub enum SnapshotCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// The scheduled snapshots: set the cron, retention, compression and an S3 target on every server (restarting them one
+    /// at a time), show what they have, or go back to k3s's defaults. S3 keys come from a mode-600 file or the environment,
+    /// never an argument, and travel to the servers on stdin.
+    Schedule {
+        name: String,
+        /// Five cron fields, e.g. "0 */6 * * *".
+        #[arg(long, default_value = "0 */12 * * *")]
+        cron: String,
+        /// Snapshots to keep (k3s prunes the rest, locally and in S3).
+        #[arg(long, default_value_t = 5)]
+        retention: u32,
+        #[arg(long)]
+        compress: bool,
+        /// S3 endpoint HOST[:PORT], without a scheme. Turns S3 uploads on.
+        #[arg(long, value_name = "HOST", requires = "s3_bucket")]
+        s3_endpoint: Option<String>,
+        #[arg(long, value_name = "BUCKET", requires = "s3_endpoint")]
+        s3_bucket: Option<String>,
+        #[arg(long)]
+        s3_region: Option<String>,
+        #[arg(long)]
+        s3_folder: Option<String>,
+        /// A file (mode 600) with `access_key=` and `secret_key=` lines. Without it AWS_ACCESS_KEY_ID and
+        /// AWS_SECRET_ACCESS_KEY are read from the environment.
+        #[arg(long, value_name = "FILE")]
+        s3_credentials_file: Option<PathBuf>,
+        /// Remove the schedule: back to k3s's defaults (every 12 hours, keep 5, local).
+        #[arg(long, conflicts_with_all = ["show", "s3_endpoint"])]
+        reset: bool,
+        /// Show the servers' schedule and the age of their newest snapshot.
+        #[arg(long)]
+        show: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TokenCommand {
+    /// Replace the agent token and/or the server token, servers first, one at a time. The new values are made on this Mac,
+    /// sent on stdin and never printed. Backups made before a server-token rotation need the old token to restore.
+    Rotate {
+        name: String,
+        /// The token agents join with (and every server's copy of it).
+        #[arg(long)]
+        agent: bool,
+        /// The cluster's server token (`k3s token rotate`; not run on real hardware).
+        #[arg(long)]
+        server: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -138,6 +192,31 @@ pub enum AppleCommand {
         /// Where to write the kubeconfig (default: ~/.kube/fluxvm-apple-NAME.yaml).
         #[arg(long)]
         kubeconfig: Option<PathBuf>,
+        /// Control-plane nodes: 1, or an odd number up to 7. More than one needs --embedded-etcd (implied). Each is its own
+        /// VM; the API is reached through a failover forwarder on this Mac. Give --api-port a free range of eight.
+        #[arg(long, default_value_t = 1)]
+        servers: u8,
+        /// The stable registration endpoint of a multi-server cluster: `proxy` (default; a forwarder on this Mac over every
+        /// server's pinned ssh tunnel) or `kube-vip` (also a floating address on the private network; needs --vip).
+        #[arg(long, value_parser = ["proxy", "kube-vip"])]
+        endpoint: Option<String>,
+        /// The kube-vip address on the private network (10.89.x.y); added to the API certificate.
+        #[arg(long, value_name = "ADDR")]
+        vip: Option<String>,
+        /// Flags every server must share, recorded in the journal and put in every server's unit.
+        #[arg(long, value_name = "CIDR[,CIDR]")]
+        cluster_cidr: Option<String>,
+        #[arg(long, value_name = "CIDR[,CIDR]")]
+        service_cidr: Option<String>,
+        #[arg(long, value_name = "IP")]
+        cluster_dns: Option<String>,
+        #[arg(long, value_name = "NAME")]
+        cluster_domain: Option<String>,
+        /// A bundled component to disable besides Traefik: coredns, servicelb, local-storage, metrics-server. Repeatable.
+        #[arg(long, value_name = "NAME")]
+        disable: Vec<String>,
+        #[arg(long)]
+        secrets_encryption: bool,
     },
     /// Add a node, in a VM of its own on the cluster's private network. The token is read on the server and goes to the
     /// new node on stdin; it is never printed or put in an argument.
@@ -179,6 +258,58 @@ pub enum AppleCommand {
         /// Only say whether it is up.
         #[arg(long)]
         status: bool,
+        /// Run in the foreground until stopped (what the LaunchAgent runs); with several servers this is the failover forwarder.
+        #[arg(long, conflicts_with_all = ["stop", "status"])]
+        foreground: bool,
+        /// Install a LaunchAgent that keeps the tunnel up: started at login, restarted whenever it exits.
+        #[arg(long, conflicts_with_all = ["stop", "status", "foreground", "remove_agent"])]
+        install_agent: bool,
+        /// Remove that LaunchAgent.
+        #[arg(long, conflicts_with_all = ["stop", "status", "foreground"])]
+        remove_agent: bool,
+        /// Say whether that LaunchAgent is installed and loaded.
+        #[arg(long, conflicts_with_all = ["stop", "status", "foreground", "install_agent", "remove_agent"])]
+        agent_status: bool,
+    },
+    /// Take a node out of the cluster properly: cordon, drain, stop k3s, delete the node object (k3s then removes an etcd
+    /// member), delete the VM and drop it from the journal. Refuses to break etcd quorum or to remove the only server.
+    Remove {
+        name: String,
+        node: String,
+        /// The node is dead: skip the steps that need it and tolerate their failure.
+        #[arg(long)]
+        force: bool,
+        /// Do not drain (pods are not moved first).
+        #[arg(long)]
+        no_drain: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Replace the agent and/or server token.
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+    /// Checks for a long-lived cluster, each with its fix: servers and etcd quorum, the servers' shared flags, the endpoint
+    /// and tunnel LaunchAgent, snapshot schedule and age, token age. Exits non-zero when something fails.
+    Doctor {
+        name: String,
+        /// JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a new journal for a cluster whose journal was lost, from the VMs' ownership labels and the guests. Without
+    /// `--accept-host-keys` it only says what it would recover. The SSH host keys pinned at creation cannot be recovered:
+    /// this pins whatever each guest presents now. See the docs for the full list of what is lost.
+    Rebuild {
+        name: String,
+        /// Pin the host key each guest presents now (trust on first use) and write the journal.
+        #[arg(long)]
+        accept_host_keys: bool,
+        #[arg(long, default_value_t = DEFAULT_API_PORT)]
+        api_port: u16,
+        #[command(flatten)]
+        vm: VmArgs,
     },
     /// Every VM, ssh, the k3s service, node readiness and version skew, as JSON. Exits non-zero when unhealthy.
     Status { name: String },
@@ -299,23 +430,47 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
     let store = Store::new(default_root()?);
     // The first connection to a guest happens through `RealHost`; reading the key and user fails early and clearly.
     let user = match &command {
-        AppleCommand::Create { vm, .. } | AppleCommand::Join { vm, .. } => vm.user.clone(),
+        AppleCommand::Create { vm, .. }
+        | AppleCommand::Join { vm, .. }
+        | AppleCommand::Rebuild { vm, .. } => vm.user.clone(),
         _ => None,
     };
     let h = host::RealHost::new(api, &store, user)?;
     use host::Host;
     match command {
-        AppleCommand::Create { name, vm, binary, api_port, embedded_etcd, tls_san, kubeconfig } => {
+        AppleCommand::Create {
+            name,
+            vm,
+            binary,
+            api_port,
+            embedded_etcd,
+            tls_san,
+            kubeconfig,
+            servers,
+            endpoint,
+            vip,
+            cluster_cidr,
+            service_cidr,
+            cluster_dns,
+            cluster_domain,
+            disable,
+            secrets_encryption,
+        } => {
             let install = resolve_install(&binary, None)?;
             let req = lifecycle::CreateReq {
                 name,
                 params: vm.params(),
                 api_port,
-                datastore: if embedded_etcd { Datastore::Etcd } else { Datastore::Sqlite },
+                // More than one server only works with embedded etcd, so asking for several implies it.
+                datastore: if embedded_etcd || servers > 1 { Datastore::Etcd } else { Datastore::Sqlite },
                 tls_sans: tls_san,
                 install,
                 kubeconfig,
                 user: h.user(),
+                servers,
+                endpoint: endpoint.as_deref().map(|e| if e == "kube-vip" { EndpointKind::KubeVip } else { EndpointKind::Proxy }),
+                vip,
+                flags: SharedFlags { cluster_cidr, service_cidr, cluster_dns, cluster_domain, disable, secrets_encryption },
             };
             json(&lifecycle::create(&h, &store, &req).await?)
         }
@@ -340,8 +495,21 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
             println!("{}", p.display());
             Ok(())
         }
-        AppleCommand::Tunnel { name, stop, status } => {
+        AppleCommand::Tunnel { name, stop, status, foreground, install_agent, remove_agent, agent_status } => {
             let st = store.require(&name)?;
+            if foreground {
+                return h.serve_tunnel(&st).await;
+            }
+            if install_agent {
+                let plist = h.install_tunnel_agent(&st)?;
+                return json(&serde_json::json!({"installed": plist, "note": "started at login and restarted whenever it exits; if the guests were stopped it retries until they are back"}));
+            }
+            if remove_agent {
+                return json(&serde_json::json!({"removed": h.remove_tunnel_agent(&st)?}));
+            }
+            if agent_status {
+                return json(&h.tunnel_agent_status(&st)?);
+            }
             if status {
                 return json(&serde_json::json!({"up": h.tunnel_up(&st), "port": st.api_port}));
             }
@@ -422,7 +590,52 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
             SnapshotCommand::Restore { name, snapshot, yes } => {
                 lifecycle::snapshot_restore(&h, &store, &name, &snapshot, yes).await
             }
+            SnapshotCommand::Schedule {
+                name, cron, retention, compress, s3_endpoint, s3_bucket, s3_region, s3_folder, s3_credentials_file, reset, show,
+            } => {
+                let action = if reset {
+                    ops::ScheduleAction::Reset
+                } else if show {
+                    ops::ScheduleAction::Show
+                } else {
+                    let s3 = s3_endpoint.zip(s3_bucket).map(|(endpoint, bucket)| S3Target {
+                        endpoint,
+                        bucket,
+                        region: s3_region,
+                        folder: s3_folder,
+                    });
+                    // Credentials are read here, from a private file or the environment, and only when there is a target.
+                    let secret = match &s3 {
+                        Some(_) => Some(S3Secret::load(s3_credentials_file.as_deref(), &|k| std::env::var(k).ok())?),
+                        None => None,
+                    };
+                    ops::ScheduleAction::Set(Box::new(SnapshotPolicy { cron, retention, compress, s3 }), secret)
+                };
+                json(&ops::snapshot_schedule(&h, &store, &name, action).await?)
+            }
         },
+        AppleCommand::Remove { name, node, force, no_drain, yes } => {
+            json(&ops::remove_node(&h, &store, &name, &ops::RemoveReq { node, force, yes, no_drain }).await?)
+        }
+        AppleCommand::Token { command: TokenCommand::Rotate { name, agent, server } } => {
+            json(&ops::token_rotate(&h, &store, &name, &ops::RotateReq { agent, server }).await?)
+        }
+        AppleCommand::Doctor { name, json: as_json } => {
+            let r = doctor::doctor(&h, &store, &name).await?;
+            if as_json {
+                json(&r)?;
+            } else {
+                print!("{}", doctor::render(&r));
+            }
+            if !r.ok {
+                bail!("{name}: doctor found problems that fail the cluster");
+            }
+            Ok(())
+        }
+        AppleCommand::Rebuild { name, accept_host_keys, api_port, vm } => {
+            let req = ops::RebuildReq { user: h.user(), api_port, params: vm.params(), accept_host_keys };
+            json(&ops::rebuild(&h, &store, &name, &req).await?)
+        }
         AppleCommand::Backup { name, output } => json(&lifecycle::backup(&h, &store, &name, output).await?),
         AppleCommand::Restore { name, file, sha256, yes } => {
             json(&lifecycle::restore(&h, &store, &name, &file, sha256.as_deref(), yes).await?)

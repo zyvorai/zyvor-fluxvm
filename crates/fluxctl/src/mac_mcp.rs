@@ -837,6 +837,12 @@ mod tests {
                 boot_id: "b".into(),
                 written_at: "t".into(),
             }),
+            servers_wanted: 1,
+            flags: Default::default(),
+            endpoint: None,
+            snapshots: None,
+            agent_secret_rotated: None,
+            server_secret_rotated: None,
         };
         let v = kube_list_json(&[st]);
         assert_eq!(v[0]["phase"], "ready");

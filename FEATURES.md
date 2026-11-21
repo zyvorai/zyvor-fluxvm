@@ -149,7 +149,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - k3s binary verified by SHA-256 on the Mac and again in the guest; SSH host key pinned before first boot; join token travels on stdin only and is redacted from errors
 - Journal written before each VM exists, ownership labels on every VM, `recover` adopts/relabels/reports orphans and never touches another owner's guests; failed joins and partial deletes clean up and stay retryable
 - `upgrade` is server-first with a backup, skew checks, per-node Ready-at-version wait and rollback; `persist cycle` checks that data survives a stop/start
-- Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware
+- HA control plane (`create --servers 3`: embedded etcd, one-at-a-time joins that resume, shared server flags, a failover forwarder on the Mac or kube-vip, per-server kubeconfig contexts), `token rotate`, `snapshot schedule` (cron, retention, S3 with credentials from a private file or environment), `remove` (cordon, drain, etcd-safe), `tunnel --install-agent` (LaunchAgent), `rebuild` of a lost journal, `doctor`, and `scripts/test-kube-apple.sh` for hardware acceptance
+- Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware. The HA, rotation, S3, kube-vip, LaunchAgent, removal and rebuild paths have never run on a real cluster
 
 ### Kubernetes on Apple VZ (macOS LaunchAgents)
 - `fluxctl kube agent install|uninstall|status` runs `kube supervise` (k3s in a Virtualization.framework VM) as a per-user LaunchAgent; `docker agent` does the same for the Docker engine VM
