@@ -320,7 +320,7 @@ pub struct Finding {
     pub fix: String,
 }
 
-fn fnd(level: Level, id: &'static str, msg: impl Into<String>, fix: impl Into<String>) -> Finding {
+pub(crate) fn fnd(level: Level, id: &'static str, msg: impl Into<String>, fix: impl Into<String>) -> Finding {
     Finding {
         level,
         id,

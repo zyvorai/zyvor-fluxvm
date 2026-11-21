@@ -216,6 +216,7 @@ mod tests {
             macos_slots: "0/2".into(),
             k3s: "-".into(),
             node: "-".into(),
+            session: "-".into(),
             error: None,
         }
     }
