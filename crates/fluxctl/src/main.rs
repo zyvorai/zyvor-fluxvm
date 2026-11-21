@@ -60,6 +60,7 @@ mod kube_harden;
 mod kube_host;
 mod kube_hostsvc;
 mod kube_ingress;
+mod kube_kairon;
 mod kube_kubeconfig;
 mod kube_logs;
 mod kube_mcp;
@@ -467,6 +468,9 @@ enum KubeCommand {
         #[arg(long)]
         delete_data: bool,
     },
+    /// Kairon (Kubernetes-native VM orchestration) on this cluster: `install`, `status`, `upgrade`, `uninstall`, `selftest`. The pinned
+    /// chart and kaironctl are verified; the k3s VM is the control plane and FluxVM hosts are the Kairon nodes.
+    Kairon(kube_kairon::KaironArgs),
     /// A port-forward that stays: give a Service a port on 127.0.0.1 and a `.localhost` name, kept open by `kube
     /// supervise` across pod restarts. `fluxctl kube forward web` (80 -> 8080), `--list`, `--remove`.
     Forward {
@@ -8728,6 +8732,12 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 "{}",
                 kube_apps::remove(api, &cluster.options()?, app, delete_data).await?
             );
+        }
+        KubeCommand::Kairon(a) => {
+            let code = kube_kairon::run(a).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
         KubeCommand::Forward {
             cluster,

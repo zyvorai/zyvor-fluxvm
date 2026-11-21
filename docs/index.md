@@ -112,6 +112,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
 | A real Docker engine on a Mac (`docker build`, Compose, bind mounts) | [docs/docker-engine.md](docker-engine.md) |
 | A Kubernetes (k3s) cluster on a Mac | [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
+| Kairon (Kubernetes-native VM orchestration) on the cluster FluxVM made, with checks | [docs/kairon-on-kube.md](kairon-on-kube.md) |
 | Undo a bad `kubectl apply`, bisect cluster history, reset to a clean state, chaos-test, sleep and wake a cluster | [docs/kubernetes-on-mac.md#time-travel-for-your-cluster](kubernetes-on-mac.md#time-travel-for-your-cluster) |
 | GPUs for sandboxes | [docs/sandbox-gpus.md](sandbox-gpus.md) |
 | Host topology and NUMA binding | [docs/host-topology.md](host-topology.md) |
