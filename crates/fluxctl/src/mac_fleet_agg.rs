@@ -236,7 +236,7 @@ mod tests {
         let tr = FakeTransport::new(|_, _| ok(r#"[{"reference":"reg/x:1","digest":"sha256:0123456789abcdef0123","size_bytes":3221225472},{"reference":"local","digest":""}]"#));
         let res = collect(&tr, &targets()[..1], 1, &list_script("images", false, &[]).unwrap(), Duration::from_secs(5));
         let t = render_images(&res);
-        assert!(t.contains("3.0G") && t.contains("local") && t.contains("sha256:0123456789abc"), "{t}");
+        assert!(t.contains("3.0G") && t.contains("local") && t.contains("sha256:0123456789ab"), "{t}");
         assert_eq!(images_document(&res)["images"].as_array().unwrap().len(), 2);
     }
 

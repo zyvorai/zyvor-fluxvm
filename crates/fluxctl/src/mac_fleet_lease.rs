@@ -47,6 +47,33 @@ struct Shared {
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
 
+/// In unit tests sharing is switched on per thread, so the tests of the placer that run beside the tests of this module
+/// never see a file they did not ask for.
+#[cfg(test)]
+thread_local! {
+    static ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn enabled() -> bool {
+    #[cfg(test)]
+    {
+        ENABLED.with(|e| e.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+/// The lease and lock file of the installed sharing, taken out of the mutex so that nothing waits on a file lock while
+/// holding it (two threads, each holding one of the two, would otherwise wait for each other).
+fn paths() -> Option<(PathBuf, PathBuf)> {
+    if !enabled() {
+        return None;
+    }
+    SHARED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|s| (s.file.clone(), s.lock.clone()))
+}
+
 pub fn files_for(state: &Path) -> (PathBuf, PathBuf) {
     let d = state.parent().map(Path::to_path_buf).unwrap_or_default();
     (d.join("mac-fleet-leases.json"), d.join("mac-fleet-leases.lock"))
@@ -65,11 +92,19 @@ pub fn install(state: &Path) {
 fn install_at(state: &Path) {
     let (file, lock) = files_for(state);
     *SHARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Shared { file, lock, foreign: vec![] });
+    #[cfg(test)]
+    ENABLED.with(|e| e.set(true));
 }
 
 #[cfg(test)]
 pub fn uninstall() {
     *SHARED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    ENABLED.with(|e| e.set(false));
+}
+
+#[cfg(test)]
+fn enable_for_thread() {
+    ENABLED.with(|e| e.set(true));
 }
 
 /// Held while a placement decides; dropping it unlocks.
@@ -132,11 +167,12 @@ fn imported_job(r: &Rec) -> JobSpec {
 
 /// Lock and pull the other processes' live leases into `leases`. `None` when sharing is off.
 pub fn begin(leases: &mut Leases, now: u64) -> Result<Option<Guard>> {
+    let Some((file, lock_path)) = paths() else { return Ok(None) };
+    let lock = lock_file(&lock_path)?;
+    let mut doc = read_doc(&file);
+    doc.leases.retain(|r| r.expires > now && pid_alive(r.pid));
     let mut g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = g.as_mut() else { return Ok(None) };
-    let lock = lock_file(&s.lock)?;
-    let mut doc = read_doc(&s.file);
-    doc.leases.retain(|r| r.expires > now && pid_alive(r.pid));
     for id in s.foreign.drain(..) {
         leases.release(&id);
     }
@@ -151,8 +187,7 @@ pub fn begin(leases: &mut Leases, now: u64) -> Result<Option<Guard>> {
 /// Write this process's new lease (if the decision placed one) and unlock.
 pub fn commit(guard: Option<Guard>, placed: Option<(&str, &str, &JobSpec)>, now: u64) -> Result<()> {
     let Some(mut guard) = guard else { return Ok(()) };
-    let g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(s) = g.as_ref() else { return Ok(()) };
+    let Some((file, _)) = paths() else { return Ok(()) };
     if let Some((id, host, job)) = placed {
         guard.doc.leases.retain(|r| r.id != id);
         guard.doc.leases.push(Rec {
@@ -164,17 +199,16 @@ pub fn commit(guard: Option<Guard>, placed: Option<(&str, &str, &JobSpec)>, now:
             pid: std::process::id(),
         });
     }
-    write_doc(&s.file, &guard.doc)
+    write_doc(&file, &guard.doc)
 }
 
 /// Drop this process's lease `id` from the file.
 pub fn forget(id: &str) {
-    let g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(s) = g.as_ref() else { return };
-    if let Ok(_lock) = lock_file(&s.lock) {
-        let mut doc = read_doc(&s.file);
+    let Some((file, lock_path)) = paths() else { return };
+    if let Ok(_lock) = lock_file(&lock_path) {
+        let mut doc = read_doc(&file);
         doc.leases.retain(|r| r.id != id);
-        let _ = write_doc(&s.file, &doc);
+        let _ = write_doc(&file, &doc);
     }
 }
 
@@ -269,6 +303,7 @@ mod tests {
         std::thread::scope(|s| {
             for i in 0..8 {
                 s.spawn(move || {
+                    enable_for_thread();
                     let mut l = Leases::default();
                     let g = begin(&mut l, 100).unwrap();
                     commit(g, Some((&format!("t{i}"), "lt-m", &job())), 100).unwrap();
