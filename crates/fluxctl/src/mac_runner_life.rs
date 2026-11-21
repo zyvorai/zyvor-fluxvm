@@ -65,7 +65,7 @@ fn install_for(sigs: &[libc::c_int]) {
 
 // ---- what is in flight -----------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Live {
     /// The job id: runner `fluxvm-<id>`, guest `fleet-<id>`.
     pub id: String,
@@ -139,7 +139,7 @@ pub fn shutdown_cleanup(gh: &dyn Github, tr: &dyn Transport, live: &[Live]) -> V
 
 // ---- the startup sweep -----------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuestSeen {
     pub target: Target,
     pub name: String,
@@ -152,7 +152,7 @@ pub struct RunnerSeen {
     pub busy: bool,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct SweepPlan {
     pub guests: Vec<GuestSeen>,
     pub runners: Vec<RunnerSeen>,
