@@ -32,6 +32,8 @@ core  bin  fluxvm-intelligence/fluxvm-guard      bin/fluxvm-guard            075
 core  file config.example.toml                   share/config.example.toml   0644
 core  file packaging/systemd/fluxvm.service      share/systemd/fluxvm.service 0644
 core  file packaging/systemd/fluxvm-agent.service share/systemd/fluxvm-agent.service 0644
+core  file packaging/openrc/fluxvm              share/openrc/fluxvm           0755
+core  file packaging/openrc/fluxvm-agent        share/openrc/fluxvm-agent     0755
 core  file packaging/agent.env.example           share/agent.env.example     0644
 core  file scripts/fluxvm-bootstrap.sh           bin/fluxvm-bootstrap        0755
 core  file packaging/systemd/fluxvm-bootstrap.service share/systemd/fluxvm-bootstrap.service 0644

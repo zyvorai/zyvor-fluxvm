@@ -36,6 +36,19 @@ macOS image store, the first part of a Docker-style workflow for macOS guests. U
   tag. `push` needs a registry reference; credentials come from `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD`. `import` uses APFS clones.
   `mac run [--rm]`, `ps`, `rm` and `exec` start and manage macOS VMs cloned from an image (needs the daemon; a 409 reports the 2-guest limit, a 503 the locked session). `mac build --dry-run` checks a Macfile and prints its plan. `mac build -t NAME[:TAG]` now runs it: a throwaway instance is cloned from the `FROM` template, `RUN` goes over SSH as the `USER` and `COPY` over scp, then the instance is stopped, stored as the new template and deleted; any failure deletes it and names the failing step. `SNAPSHOT` and `FROM IPSW latest` are refused. Step order and failure cleanup are unit-tested with a fake host; **live execution against a macOS guest is not verified**. See [docs/macos-containers.md](docs/macos-containers.md).
 
+Linux installs across distributions. Unit-tested only (fake `os-release`, fake `id`/`uname`); not run on a real host of each family.
+
+- `install.sh` detects the Linux family from `/etc/os-release` (Debian, RHEL, Arch, SUSE; Alpine is recognised as musl and refused with a clear
+  message), prints, or as root runs, the family's command for the two runtime libraries, and warns about glibc older than 2.35 (RHEL 9).
+- `install.sh --service` on Linux now sets up systemd **or OpenRC** (as root; otherwise it prints the exact `sudo` commands and runs none).
+  It never overwrites an existing `/etc/fluxvm.toml`. `--agent --central --node-name --advertise-url --token-file` also install the fleet node
+  agent as a service; the token goes to `/etc/fluxvm/agent.token` (0600) and is passed as a file path. `--detect` prints what was found.
+- New `share/openrc/fluxvm` and `fluxvm-agent` init scripts in the Linux package (untested on a live OpenRC host).
+
+
+- New `scripts/stack-check.sh` (read-only): checks the FluxVM + Kairon + Veyron stack on one Mac layer by layer (daemon, unlocked session,
+  Kubernetes API, Kairon CRDs, this Mac as a Node, kairon-node health, Veyron) and prints a fix for each failure. `scripts/test-stack-check.sh`
+  tests it offline with fake `curl`/`kubectl`/`fluxctl`.
 LaunchAgent hardening for Kubernetes and Docker on a Mac. Unit-tested only; not yet run against a live cluster.
 
 - `fluxctl kube agent install` and `docker agent install` write the Homebrew `opt/` path of `fluxctl` (via `stable_exe`), so a
