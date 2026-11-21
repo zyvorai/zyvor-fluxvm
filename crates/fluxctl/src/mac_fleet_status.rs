@@ -213,7 +213,8 @@ mod tests {
 
     #[test]
     fn detail_shows_drain_templates_and_headless_facts() {
-        let tr = FakeTransport::new(|_, c| if c.contains("headless-check") { ok(HEADLESS) } else { ok(&reply()) });
+        // The shared probe script now also asks the Mac for its headless-check, so tell the two commands apart by the probe marker.
+        let tr = FakeTransport::new(|_, c| if c.contains("daemon_healthy") { ok(&reply()) } else if c.contains("headless-check") { ok(HEADLESS) } else { ok(&reply()) });
         let t = Target::parse("admin@mini-1.local").unwrap();
         let mut st = FleetState::default();
         st.drain("mini-1", 1000);
