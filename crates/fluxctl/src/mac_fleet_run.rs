@@ -362,10 +362,15 @@ impl Placer<'_> {
             let now = self.clock.now();
             let decision = {
                 let mut leases = self.leases.lock().unwrap();
+                // Other processes' leases (runner, `mac-fleet run`) are read under a file lock; see mac_fleet_lease.
+                let guard = crate::mac_fleet_lease::begin(&mut leases, now)?;
                 let d = decide(&views, job, &leases, &state, now);
+                let mut placed = None;
                 if let Decision::Place(c) = &d {
                     leases.acquire(lease_id, &views[c.index].name, job, now);
+                    placed = Some((lease_id, views[c.index].name.as_str(), job));
                 }
+                crate::mac_fleet_lease::commit(guard, placed, now)?;
                 d
             };
             match decision {
@@ -405,6 +410,7 @@ impl Placer<'_> {
 
     pub fn release(&self, lease: &str) {
         self.leases.lock().unwrap().release(lease);
+        crate::mac_fleet_lease::forget(lease);
     }
 }
 
@@ -575,6 +581,7 @@ pub fn run_placed(
     clock: &dyn Clock,
     state_path: &std::path::Path,
 ) -> Result<()> {
+    crate::mac_fleet_lease::install(state_path);
     let leases = Mutex::new(Leases::default());
     let log = |m: &str| eprintln!("{m}");
     let placer = Placer {

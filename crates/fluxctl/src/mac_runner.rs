@@ -638,7 +638,11 @@ pub fn run(a: RunnerArgs) -> Result<()> {
     };
     // SIGINT/SIGTERM/SIGHUP: stop starting runners, delete the guests and unregister the runners in flight, then leave.
     crate::mac_runner_life::install_signals();
-    let claimed = |id: &str| crate::mac_runner_life::is_live(id);
+    crate::mac_fleet_lease::install(&state);
+    // Ids another process holds a live lease for are theirs, not orphans.
+    let claimed = |id: &str| {
+        crate::mac_runner_life::is_live(id) || crate::mac_fleet_lease::claimed(&state, SystemClock.now()).iter().any(|c| c == id)
+    };
     if !a.no_sweep {
         for l in crate::mac_runner_life::sweep(&gh, tr.as_ref(), &targets, &claimed, false) {
             log(&l);

@@ -47,9 +47,13 @@ operator, it fails immediately and says what each Mac needs. Without `--cpus` an
 own defaults apply).
 
 Leases: a placement holds its slot, CPUs and memory in this process for 120 s or until its job ends, so a second placement before the next
-probe cannot take the same slot. They are not persisted: two separate `fluxctl` processes can still race for the last slot, and the
-Mac's daemon then answers 409 (the job fails; run it again). The queue is the polling loop of the command that is waiting; it is not a
-shared queue.
+probe cannot take the same slot. Since this version they are also **shared between the `fluxctl` processes of one machine**: each placement takes
+an advisory `flock` on `mac-fleet-leases.lock` (next to the state file), reads the other processes' live leases from `mac-fleet-leases.json`, decides, writes its own and unlocks. The
+critical section is pure computation (the ssh probes happen before it), so it is short. A lease of a process that died is dropped at once (its pid is gone), or after 120 s at the latest.
+
+Limits: it is a local `flock`, so it coordinates processes on **one machine** on a file system with working locks (not NFS); two supervisors on two machines still race for the last slot,
+and the Mac's daemon then answers 409 (the job fails; run it again). Waiting placements poll the files and the Macs; there is **no first-come-first-served order** between processes, and the queue is still the
+polling loop of the command that is waiting. `FLUXVM_MAC_FLEET_NO_SHARED_LEASES=1` turns the sharing off (leases are then in-process only, as before). A lease that cannot be read or written fails the placement with the reason rather than being ignored.
 
 ## Drain and resume
 
@@ -94,5 +98,5 @@ waiting for the remote command; for a job the guest is then deleted by a separat
 - Everything over a real `ssh`, on a real Mac; the probe lines (`sysctl hw.ncpu`, `hw.memsize`, `pmset -g batt`, `fluxctl mac images --json`) and their parsing against real output.
 - That `fluxctl mac run --rm ... -- CMD` run from an ssh session reaches the Mac's daemon (default endpoint) and boots a guest; that `mac rm` removes a half-started one.
 - A real registry pull, the digest the store records for it (taken from `mac images --json`), and what `mac pull` does with a moved tag.
-- Races between two `fluxctl` processes (see Leases), and a leftover guest after the local process is killed.
+- Races between two `fluxctl` processes: the file lock is unit-tested (threads, a second pid, dead pids, expiry), not with two real `fluxctl` processes placing on real Macs at once.
 - `mac run --fleet` takes the system ssh defaults (no `--identity`/`--known-hosts` flags there; use `~/.ssh/config`), and refuses `-p`, `-e`, `-v`, `-w`, `--label`, `--name`, `--restart` and `-d`.
