@@ -103,6 +103,8 @@ pub enum MacCommand {
         json: bool,
         #[command(flatten)]
         sched: crate::mac_fleet_run::FleetRun,
+        #[command(flatten)]
+        xrun: crate::mac_ops::RunExtra,
         /// A local image (`fluxctl mac images`).
         image: String,
         /// The command to run in the guest, after `--`.
@@ -171,6 +173,8 @@ pub enum MacCommand {
     },
     #[command(flatten)]
     Plus(crate::mac_plus::MacPlus),
+    #[command(flatten)]
+    Ops(crate::mac_ops::MacOps),
 }
 
 impl MacCommand {
@@ -182,6 +186,7 @@ impl MacCommand {
             Self::Run { sched, .. } => sched.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) => true,
+            Self::Ops(o) => o.is_client_side(),
             _ => !matches!(
                 self,
                 Self::Run { .. }
@@ -369,10 +374,14 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             opts,
             queue,
             json,
+            xrun,
             image,
             cmd,
             ..
         } => {
+            xrun.check(rm)?;
+            crate::mac_ops::preflight(&image, &xrun)?;
+            let started = crate::mac_health::now_unix();
             let outcome = crate::mac_queue::run_queued(r, &queue, || {
                 crate::mac_instance::run_outcome(
                     r,
@@ -387,6 +396,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
                 )
             })
             .await?;
+            crate::mac_ops::after_run(r, &outcome.name, started, &xrun).await?;
             if json {
                 println!(
                     "{}",
@@ -418,6 +428,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             cmd,
         } => crate::mac_more::exec(r, name, user, cmd, opts).await,
         MacCommand::More(m) => crate::mac_more::run_daemon(r, m).await,
+        MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
         MacCommand::Build {
             file,
             tag,
@@ -739,6 +750,10 @@ pub async fn run(command: MacCommand) -> Result<()> {
         }
         _ => {}
     }
+    let command = match command {
+        MacCommand::Ops(o) => return crate::mac_ops::run_client(o),
+        c => c,
+    };
     let store = Store::open(mac_store::default_root()?)?;
     match command {
         MacCommand::Images { json, extra } => crate::mac_plus::images(&store, json, &extra)?,

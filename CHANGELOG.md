@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+`fluxctl mac` operations: enforced healthchecks, `supervise`, TTL and reaper, `run --verify`, compose extras, image usage, IPSW planning. Unit-tested with fakes; **never run against a real daemon, a macOS VM or launchd** (see [docs/macos-containers.md](docs/macos-containers.md#operations-health-restart-ttl-verify)).
+
+- `HEALTHCHECK` is now run (over SSH): `mac health NAME`, `mac run --wait-healthy`, compose `depends_on: condition: service_healthy`; state in VM labels and `mac inspect` `state.health`.
+- New `mac supervise` (`--once`, `--dry-run`, `--install|--uninstall|--status` LaunchAgent): enforces `--restart` policies with back-off, runs due healthchecks and reaps expired TTLs.
+- New `mac run --ttl`, `mac reap [--all|--owner]`, `mac ttl`; every run is stamped with owner and creation time labels.
+- New `mac run --verify` (and `FLUXVM_MAC_REQUIRE_SIGNED=1`): pre-flight signature check with the existing trust store.
+- Compose: `build:` (runs `mac build`, `up --build`), `profiles:` with `--profile`/`COMPOSE_PROFILES`, `compose logs|exec|restart`, `-p/--project-name` on every subcommand; the 2-VM refusal counts selected services.
+- `mac images --usage` (allocated and apparent size, last use), `allocated_bytes`/`last_used_unix` in `--json`, `mac image prune --keep-last N`.
+- `FROM IPSW /abs/path.ipsw` parses; new `mac ipsw [latest|PATH]` validates and prints the unattended install order, marking what needs hardware. `mac build` still refuses IPSW bases.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
