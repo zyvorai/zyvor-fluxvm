@@ -243,13 +243,12 @@ mod tests {
                 let v = if up { version_after } else { "0.4.9" };
                 let items: Vec<String> = (0..vms).map(|_| r#"{"status":"running","request":{}}"#.to_owned()).collect();
                 ok(&format!(
-                    "os=Darwin\narch=arm64\nmacos=15.1\nfluxctl_version={v}\ndaemon_healthy=yes\ndaemon_loaded=yes\ndisk_free_gib=300\nvms_json={{\"items\":[{}]}}\n",
+                    "os=Darwin\narch=arm64\nmacos=15.1\nuser=admin\nconsole_user=admin\ndisk_free_gib=300\nfilevault=FileVault is Off.\nautologin=admin\nbrew=yes\nfluxctl_version={v}\nagent_binary=yes\ndaemon_loaded=yes\nagent_loaded=no\nkube_loaded=no\ndaemon_healthy=yes\nenrolled=no\nvms_json={{\"items\":[{}]}}\n",
                     items.join(",")
                 ))
             } else {
-                if c.contains("install") || c.contains("kickstart") || c.contains("launchctl") {
-                    *upgraded.lock().unwrap() = true;
-                }
+                // Any step that is not a probe is the install or the restart.
+                *upgraded.lock().unwrap() = true;
                 ok("")
             }
         }
