@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use fluxvm_core::error_codes::{self, ErrorCode, TABLE};
+use fluxvm_core::health::{self, HealthCode};
 use serde_json::{Value, json};
 
 #[derive(clap::Args, Debug, Clone)]
@@ -44,6 +45,21 @@ pub fn render(args: &ExplainArgs) -> Result<(String, i32)> {
         ));
     };
     let hits = find(query);
+    // The codes `fluxctl cluster status` and `fluxctl fix` print (DAEMON_DOWN, LOW_DISK, ...): not API errors.
+    if hits.is_empty() {
+        let q = query.trim().to_ascii_uppercase().replace('-', "_");
+        let found: Vec<&HealthCode> = match health::code(query) {
+            Some(c) => vec![c],
+            None => health::CODES.iter().filter(|c| c.code.contains(q.as_str())).collect(),
+        };
+        if !found.is_empty() {
+            if args.json {
+                let v = if found.len() == 1 { health_entry(found[0]) } else { Value::Array(found.iter().map(|e| health_entry(e)).collect()) };
+                return Ok((serde_json::to_string_pretty(&v)? + "\n", 0));
+            }
+            return Ok((found.iter().map(|e| health_card(e)).collect::<Vec<_>>().join("\n"), 0));
+        }
+    }
     if hits.is_empty() {
         let mut msg = format!("unknown error code {query:?}");
         if let Some(s) = error_codes::suggest(query) {
@@ -89,6 +105,22 @@ fn entry(e: &ErrorCode) -> Value {
     })
 }
 
+fn health_entry(e: &HealthCode) -> Value {
+    json!({"code": e.code, "status": null, "summary": e.summary, "causes": e.causes, "fixes": e.fixes})
+}
+
+fn health_card(e: &HealthCode) -> String {
+    let mut s = format!("{} (cluster health)\n  {}\n\ncauses:\n", e.code, e.summary);
+    for c in e.causes {
+        s.push_str(&format!("  - {c}\n"));
+    }
+    s.push_str("\nwhat to do:\n");
+    for f in e.fixes {
+        s.push_str(&format!("  - {f}\n"));
+    }
+    s
+}
+
 fn card(e: &ErrorCode) -> String {
     let mut s = format!("{} (HTTP {})\n  {}\n", e.code, e.status, e.summary);
     s.push_str("\ncauses:\n");
@@ -109,6 +141,7 @@ fn list(json: bool) -> Result<String> {
         let v = Value::Array(
             rows.iter()
                 .map(|e| json!({"code": e.code, "status": e.status, "summary": e.summary}))
+                .chain(health::CODES.iter().map(|e| json!({"code": e.code, "status": null, "summary": e.summary})))
                 .collect(),
         );
         return Ok(serde_json::to_string_pretty(&v)? + "\n");
@@ -116,6 +149,9 @@ fn list(json: bool) -> Result<String> {
     let mut out = String::new();
     for e in rows {
         out.push_str(&format!("{:<4} {:<22} {}\n", e.status, e.code, e.summary));
+    }
+    for e in health::CODES {
+        out.push_str(&format!("{:<4} {:<22} {}\n", "-", e.code, e.summary));
     }
     Ok(out)
 }
@@ -182,10 +218,34 @@ mod tests {
         let (out, _) = render(&args(None, true, true)).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         let rows = v.as_array().unwrap();
-        assert_eq!(rows.len(), TABLE.len());
-        let statuses: Vec<u64> = rows.iter().map(|r| r["status"].as_u64().unwrap()).collect();
+        assert_eq!(rows.len(), TABLE.len() + health::CODES.len());
+        let statuses: Vec<u64> = rows.iter().filter_map(|r| r["status"].as_u64()).collect();
         assert!(statuses.windows(2).all(|w| w[0] <= w[1]));
         let (text, _) = render(&args(None, true, false)).unwrap();
-        assert_eq!(text.lines().count(), TABLE.len());
+        assert_eq!(text.lines().count(), TABLE.len() + health::CODES.len());
+    }
+
+    #[test]
+    fn explains_a_cluster_health_code() {
+        let (out, code) = render(&args(Some("daemon-down"), false, false)).unwrap();
+        assert_eq!(code, 0);
+        assert!(out.starts_with("DAEMON_DOWN (cluster health)"), "{out}");
+        assert!(out.contains("what to do:") && out.contains("fluxctl fix"));
+        let (out, _) = render(&args(Some("LOW_DISK"), false, true)).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["code"], "LOW_DISK");
+        // a fragment finds the codes that contain it
+        let (out, code) = render(&args(Some("backup"), false, false)).unwrap();
+        assert_eq!(code, 0);
+        assert!(out.contains("NO_BACKUP") && out.contains("STALE_BACKUP"), "{out}");
+    }
+
+    #[test]
+    fn every_health_code_the_model_can_print_is_explained() {
+        for c in health::CODES {
+            let (out, code) = render(&args(Some(c.code), false, false)).unwrap();
+            assert_eq!(code, 0, "{}", c.code);
+            assert!(out.contains(c.code));
+        }
     }
 }

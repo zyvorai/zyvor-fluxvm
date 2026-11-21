@@ -175,6 +175,12 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 - Image trust and housekeeping: `mac keys|push --sign|sign|pull --verify|verify` (Ed25519 over the manifest digest, OCI referrer, local trust store; not cosign), a licence guard that refuses public registries unless overridden, a `mac build` step cache (`--no-cache`, `mac cache ls|prune`, size budget), chunk reuse on `mac pull` from other local tags (format unchanged), labels and `mac images --filter`, `mac search` over `/v2/_catalog`, `mac sbom` (bundle file list with sha256); unit-tested with fakes, not run against a real registry or macOS template ([docs/macos-containers.md](docs/macos-containers.md))
 
+### Cluster home (`fluxctl cluster status`, `fluxctl fix`, Studio Home)
+- One health model (`fluxvm_core::health`) turns doctor, host, fleet, capacity and backup facts into plain-English items with a cause and a fix that says whether it is safe, needs sudo, a restart or a login, or touches a security setting; versioned JSON (schema 1).
+- `cluster status`: traffic light per machine and for the cluster, room for N more VMs (2 vCPU / 4 GiB), macOS slots n of 2, disk, memory, last backup age, update available, next best action; `-f` adds the Macs of a fleet inventory over read-only ssh.
+- `fix`: only start a stopped LaunchAgent, create a missing directory, pull a missing image; `--sudo` adds `systemctl start`, `modprobe`, `sysctl -w`; security settings never; every change logged. `--dry-run` changes nothing.
+- Studio opens on **Home** (`GET /v1/cluster/health`), with a Copy as fluxctl button per fix; every warning and failure has a `fluxctl explain` code ([docs/cluster-home.md](docs/cluster-home.md)).
+
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure
 - `status` (one table: version, daemon, VMs, macOS slots n/2, k3s, node), `exec HOST|--all -- cmd`, `upgrade` (refuses running VMs without `--force`), `remove --yes`, `doctor` (exact fix per finding), `--dry-run` everywhere

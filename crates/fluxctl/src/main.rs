@@ -29,6 +29,7 @@ use uuid::Uuid;
 mod agent_session;
 mod backup_verify_cmd;
 mod cloud;
+mod cluster_cmd;
 mod compose;
 mod config_check;
 mod contexts;
@@ -1856,6 +1857,16 @@ enum Command {
     /// Explain an API error code (`NOT_FOUND`, `429`, `required`): what it means, what usually causes it and what to do.
     /// Offline; `--list` shows them all.
     Explain(explain::ExplainArgs),
+    /// The cluster in plain English (`cluster status`): a green/yellow/red light per machine, room left, backups, the
+    /// next best action.
+    Cluster {
+        #[command(subcommand)]
+        command: cluster_cmd::ClusterCommand,
+    },
+    /// Repair what is safe to repair by itself (start a stopped service, create a missing folder, pull a missing
+    /// image) and print the exact commands for the rest. Never runs sudo without `--sudo`, never changes a security
+    /// setting, and records what it changed.
+    Fix(cluster_cmd::FixArgs),
     /// Offline checks of a VM spec (`vm-spec check`): unknown keys, values the daemon refuses, settings the chosen
     /// backend ignores, missing paths.
     VmSpec {
@@ -6424,6 +6435,24 @@ async fn main() -> Result<()> {
         std::process::exit(doctor::exit_code(&checks));
     }
 
+    // `cluster status` and `fix` read this machine (and, with an inventory, ssh to Macs): no VmManager, and they work
+    // when the daemon is down, which is when they are most needed.
+    if matches!(cli.command, Command::Cluster { .. } | Command::Fix(_)) {
+        let env = cluster_cmd::Env {
+            listen: cfg.listen.clone(),
+            state_dir: cfg.state_dir.clone(),
+            remote: remote::Remote::new(&cfg.listen, cli.server_token.clone()),
+        };
+        let code = match &cli.command {
+            Command::Cluster {
+                command: cluster_cmd::ClusterCommand::Status(a),
+            } => cluster_cmd::run_status(a, &env).await?,
+            Command::Fix(a) => cluster_cmd::run_fix(a, &env, &cfg.state_dir).await?,
+            _ => unreachable!(),
+        };
+        std::process::exit(code);
+    }
+
     // `status` without an id is the host panel (no write access required).
     // With an id it is machinectl-style VM status and needs the manager.
     if let Command::Status { verbose, id: None } = &cli.command {
@@ -6523,6 +6552,8 @@ async fn main() -> Result<()> {
         | Command::Config { .. }
         | Command::ExecPolicy { .. }
         | Command::Explain(_)
+        | Command::Cluster { .. }
+        | Command::Fix(_)
         | Command::VmSpec { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
@@ -10800,6 +10831,14 @@ mod backlog_tier1_cli_tests {
             cli(&["vm-spec", "check", "vm.json", "--offline", "--strict"]).command,
             Command::VmSpec { .. }
         ));
+        assert!(matches!(
+            cli(&["cluster", "status", "--json", "-f", "fleet.yaml"]).command,
+            Command::Cluster { .. }
+        ));
+        let Command::Fix(f) = cli(&["fix", "--dry-run", "--sudo", "--yes"]).command else {
+            panic!("expected fix");
+        };
+        assert!(f.dry_run && f.sudo && f.yes);
     }
 
     #[test]
