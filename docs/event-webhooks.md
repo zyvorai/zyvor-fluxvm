@@ -59,3 +59,9 @@ anything it should not. `allow_hosts = ["169.254.169.254"]` exempts a host or IP
 Config-file only: there is no `fluxctl` subcommand to add or remove sinks, and changes need a daemon restart. Sinks get the VM
 events the daemon writes (and not the `fluxvm-agent central` activity log). The queue is in memory: events queued when the daemon stops
 are lost, not dead-lettered.
+
+## macOS instance and `kube apple` events
+
+`fluxctl mac watch --record-to <state_dir>` appends `mac.*` and `kube.apple.*` events (instance created, started, stopped, macOS slots
+full, k3s node or cluster changes) to the same log, so a sink with `events = ["mac.", "kube.apple."]` receives them. They carry ids,
+names, images and `kairon.zyvor.dev/*` labels, never tokens. See [mac-integrations.md](mac-integrations.md).

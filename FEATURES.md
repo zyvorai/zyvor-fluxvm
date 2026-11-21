@@ -166,6 +166,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `status` (power, sleep holders, session lock, auto-login, FileVault, displays, free disk, thermal; `--json`), `headless-check` (the unlocked-session requirement with a fix per finding; exit 1 on failure), `rosetta` (runner answer vs runtime file, guest steps)
 - `keepawake install|uninstall|status` manages a `caffeinate` LaunchAgent, no sudo; `tune` prints recommended `pmset` settings and changes only what `--apply --only NAME` names, via `sudo pmset -a`; auto-login, screen lock and FileVault are never changed
 - Parsers tested on captured command output, decisions and apply on a fake host; read-only commands run on one Mac, `keepawake install` and `tune --apply` not run ([docs/macos-host.md](docs/macos-host.md), research and backlog in [docs/apple-host-research.md](docs/apple-host-research.md))
+### Mac integrations: MCP, events, metrics
+- MCP tools (`fluxctl mcp serve`): `mac_images`, `mac_ps`, `mac_build_dry_run`, `mac_compose_ps`, `kube_apple_list|status|snapshot_ls|logs` (read-only, always offered) and `mac_run`, `mac_exec` (need `--allow-write`); no secrets in output
+- `mac watch` / `mac events`: lifecycle events (`mac.instance.*`, `mac.slots.full|free`, `kube.apple.node.*`, `kube.apple.cluster.*`) into the daemon's event log, SSE stream and signed webhooks with `--record-to`; Kairon labels carried
+- `mac metrics`: Prometheus text (instances by state, macOS slots n/2, template store bytes, `kube apple` node readiness, snapshot age), stdout or an atomic textfile ([docs/mac-integrations.md](docs/mac-integrations.md)); unit-tested with fakes, not run live
 
 ### Mac fleet over SSH (`fluxctl mac-fleet`)
 - `up|add user@host...` and `apply inventory.yaml` install a pinned, checksum-verified FluxVM on each Mac, start the daemon and node agent LaunchAgents, enroll with a join token (via ssh stdin, never argv) and optionally prepare a k3s guest (`--k3s`); idempotent, parallel, per-Mac results with partial failure

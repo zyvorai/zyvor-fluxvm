@@ -101,6 +101,25 @@ credentials, or touch another session.
 | `session_screenshot` | The guest display of a vz session as an image (token scope `screen`); coordinates for `session_input` are its pixels | `GET /v1/agents/sessions/{id}/screenshot` |
 | `session_input` | Keyboard and mouse input for a vz session's display; same actions as `vm_input`; typed text is not ledgered | `POST /v1/agents/sessions/{id}/input` |
 | `session_wait_screen` | Block until a vz session's display changes or the timeout (≤ 60 s); returns `changed`, `waited_ms`, size; token scope `screen` | `POST /v1/agents/sessions/{id}/screen/wait` |
+
+### macOS workflow and Apple-native k3s tools
+
+Ten more tools cover `fluxctl mac` and `fluxctl kube apple` ([mac-integrations.md](mac-integrations.md)). The two *write* tools need `--allow-write`; the rest are always offered.
+
+| Tool | Effect | Source |
+|---|---|---|
+| `mac_images` | Images in the local macOS template store: reference, digest, size, source | local store |
+| `mac_ps` | Instances with status, image, address, ports, and the macOS slots held (of 2); `all`, `status`, `name` | `GET /v1/vms?label=fluxvm.mac=instance` |
+| `mac_build_dry_run` | The build plan for Macfile **text** (`macfile`, `tag`, `build_args`); reads no file, builds nothing | none |
+| `mac_compose_ps` | A compose `project`'s instances with their service names | `GET /v1/vms?label=...` |
+| `mac_run` *write* | Start an instance from a local image (`image`, `name`, `publish`, `cpus`, `memory`, `restart`, `labels`); no command, volume or environment; returns name and id | `POST /v1/vms`, `PATCH`, `POST .../start` |
+| `mac_exec` *write* | Run `command` in a running instance (`timeout_seconds` ≤ 600) | `POST /v1/vms/{id}/agent` |
+| `kube_apple_list` | Clusters on this Mac: phase, datastore, API port, version, node roles | local journals |
+| `kube_apple_status` | Node VM state, ssh, service, Ready, version, `/readyz` and problems; connects to nodes over ssh | `kube apple status` |
+| `kube_apple_snapshot_ls` | etcd snapshots (embedded-etcd clusters) with count and age of the newest | `kube apple snapshot ls` |
+| `kube_apple_logs` | Last `lines` (≤ 500) of a node's k3s journal; credential-looking lines are withheld | `kube apple logs` |
+
+`cluster` may be omitted when there is exactly one. The `kube_apple_*` tools run on the Mac that holds the cluster's journal and ssh key, so point the server at a daemon on that Mac.
 | `session_events`, `session_artifacts` | Ledger and VM events; workspace changes | `GET {id}/events\|artifacts` |
 | `session_delete` *write* | Delete the session | `DELETE {id}` |
 
