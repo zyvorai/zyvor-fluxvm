@@ -115,6 +115,11 @@ These come from the design and from macOS itself; they apply to the whole workfl
 - **Apple's licence terms limit where macOS images may be stored.** Pushing a template to a public registry is likely not allowed; use
   a private registry. This is a caution, not a legal reading; check the terms that apply to you.
 
+## See also
+
+[macos-containers-research.md](macos-containers-research.md): a survey of Tart/Orchard, Anka, Orka, Lima, OrbStack, Apple `container` and
+others, a comparison with `fluxctl mac`, and a prioritised backlog.
+
 ## Not verified
 
 Written from the source. The commands are covered by unit tests on a temporary store; none was run against a real registry, and no
