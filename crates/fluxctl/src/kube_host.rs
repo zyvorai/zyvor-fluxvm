@@ -2822,6 +2822,8 @@ mod tests {
     }
 
     #[test]
+    // Apple-only behaviour: workers, Rosetta and the `apple` network card are rejected or absent on Linux (see vm_net).
+    #[cfg(target_os = "macos")]
     fn workers_join_over_a_private_network_with_the_servers_token() {
         let o = KubeOptions {
             name: "dev".into(),
@@ -2933,6 +2935,8 @@ mod tests {
     }
 
     #[test]
+    // Apple-only behaviour: workers, Rosetta and the `apple` network card are rejected or absent on Linux (see vm_net).
+    #[cfg(target_os = "macos")]
     fn workers_offline_and_tokens_are_validated() {
         assert!(
             validate(&KubeOptions {
@@ -3513,6 +3517,8 @@ mod tests {
     }
 
     #[test]
+    // Apple-only behaviour: workers, Rosetta and the `apple` network card are rejected or absent on Linux (see vm_net).
+    #[cfg(target_os = "macos")]
     fn rosetta_adds_the_share_and_a_unit_that_runs_before_k3s() {
         let o = KubeOptions {
             rosetta: true,
