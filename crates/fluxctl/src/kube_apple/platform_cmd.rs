@@ -7,6 +7,7 @@
 //! [`super::gitops`], [`super::recipes`], [`super::netpol`] and [`super::restore_all`].
 
 use super::doctor::{Finding, Level};
+use super::extras;
 use super::gitops::{self, GitopsReq, Tool};
 use super::host::Host;
 use super::model::*;
@@ -143,6 +144,38 @@ pub enum PlatformCommand {
         #[arg(long)]
         apply: bool,
     },
+    /// kube-prometheus-stack as a k3s HelmChart (small footprint; the cluster fetches the pinned chart version itself).
+    PrometheusStack {
+        name: String,
+        /// How long Prometheus keeps data (24h, 7d, ...).
+        #[arg(long, default_value = "24h")]
+        retention: String,
+    },
+    /// A StorageClass over k3s's bundled local-path provisioner. Prints the YAML; --apply sends it to the cluster.
+    StorageLocalPath {
+        name: String,
+        #[arg(long, default_value = "fluxvm-local")]
+        class: String,
+        /// Keep the data when the claim is deleted.
+        #[arg(long)]
+        retain: bool,
+        /// Make it the default StorageClass.
+        #[arg(long)]
+        default: bool,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// What Longhorn needs on these guests (guidance only; nothing is installed).
+    StorageLonghorn,
+    /// Put `kairon.zyvor.dev/KEY=VALUE` labels on the nodes of a running cluster (`kubectl label node --overwrite`).
+    KaironLabel {
+        name: String,
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        labels: Vec<String>,
+        /// Only this node; default every node.
+        #[arg(long)]
+        node: Option<String>,
+    },
     /// The manifests this tool installs: version, URL and the SHA-256 it insists on.
     Pins,
 }
@@ -153,6 +186,8 @@ impl PlatformCommand {
         matches!(
             self,
             PlatformCommand::Pins
+                | PlatformCommand::StorageLonghorn
+                | PlatformCommand::StorageLocalPath { apply: false, .. }
                 | PlatformCommand::Netpol { apply: false, .. }
                 | PlatformCommand::Metallb {
                     print_pool: true,
@@ -173,6 +208,14 @@ pub fn run_offline(cmd: PlatformCommand) -> Result<()> {
         ),
         PlatformCommand::Netpol { namespace, no_dns, no_same_namespace, allow_from, allow_egress_cidr, .. } => {
             print!("{}", netpol::baseline(&NetpolOpts { namespace, no_dns, no_same_namespace, allow_from, allow_egress_cidr })?);
+            Ok(())
+        }
+        PlatformCommand::StorageLonghorn => {
+            print!("{}", extras::LONGHORN_GUIDANCE);
+            Ok(())
+        }
+        PlatformCommand::StorageLocalPath { class, retain, default, .. } => {
+            print!("{}", extras::local_path_class(&class, retain, default)?);
             Ok(())
         }
         PlatformCommand::Metallb { addresses, pool, no_auto_assign, .. } => {
@@ -219,6 +262,46 @@ pub fn plan_from_args(a: &PlatformArgs) -> Result<platform::PlatformPlan> {
 pub async fn run<H: Host>(h: &H, store: &Store, cmd: PlatformCommand) -> Result<()> {
     match cmd {
         PlatformCommand::Pins => run_offline(PlatformCommand::Pins),
+        c @ (PlatformCommand::StorageLonghorn
+        | PlatformCommand::StorageLocalPath { apply: false, .. }) => run_offline(c),
+        PlatformCommand::StorageLocalPath {
+            name,
+            class,
+            retain,
+            default,
+            ..
+        } => {
+            let y = extras::local_path_class(&class, retain, default)?;
+            let st = store.require(&name)?;
+            local(&st)?;
+            let _lock = store.lock(&name)?;
+            println!(
+                "{}",
+                extras::apply_local_path(&HostRemote { h, st: &st }, &y, &st.flags.disable).await?
+            );
+            Ok(())
+        }
+        PlatformCommand::PrometheusStack { name, retention } => {
+            let st = store.require(&name)?;
+            local(&st)?;
+            let _lock = store.lock(&name)?;
+            json(
+                &extras::prometheus_stack(
+                    &HostRemote { h, st: &st },
+                    &retention,
+                    &st.flags.disable,
+                )
+                .await?,
+            )
+        }
+        PlatformCommand::KaironLabel { name, labels, node } => {
+            let st = store.require(&name)?;
+            local(&st)?;
+            let _lock = store.lock(&name)?;
+            let done =
+                extras::label_nodes(&HostRemote { h, st: &st }, &labels, node.as_deref()).await?;
+            json(&serde_json::json!({"labelled": done, "labels": labels}))
+        }
         PlatformCommand::Netpol {
             name,
             namespace,

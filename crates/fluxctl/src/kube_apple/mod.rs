@@ -9,6 +9,7 @@
 
 mod agent;
 mod doctor;
+mod extras;
 mod gitops;
 mod ha;
 mod ha_model;
