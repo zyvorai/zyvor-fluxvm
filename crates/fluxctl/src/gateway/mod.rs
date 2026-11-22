@@ -1,9 +1,11 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
-//! `fluxctl gateway publish | explain | check | inspect | demo`: built-in Gateway API tooling for Envoy Gateway on a FluxVM
+//! `fluxctl gateway expose | unexpose | list | publish | explain | check | inspect | demo`: built-in Gateway API tooling for Envoy Gateway on a FluxVM
 //! k3s cluster, ported from Zyvor Setura 0.1.0 (see docs/gateway.md).
 //!
+//! * `expose SERVICE` is the one-command path (installs Envoy Gateway if you agree, makes a Gateway and HTTPRoute, forwards a free
+//!   local port and prints the URL); `unexpose SERVICE` and `list` only touch objects labelled `managed-by=fluxctl-gateway`.
 //! * `publish GATEWAY --listener NAME` finds the one Envoy Service behind a Gateway listener and runs `kubectl port-forward`
 //!   on `127.0.0.1` (the process becomes kubectl, so Ctrl-C goes to it). `--dry-run` prints the command.
 //! * `explain URL` makes one direct HTTP/1.1 GET and reports dns, tcp, tls, http and backend, each as ok or failed.
@@ -17,6 +19,7 @@
 //! own daemon context and is not used here.)
 
 mod demo;
+mod expose;
 mod kube;
 mod probe;
 
@@ -49,6 +52,45 @@ impl Target {
 
 #[derive(Subcommand, Debug)]
 pub enum GatewayCommand {
+    /// The one-command path: make a Kubernetes Service reachable from this machine. Installs Envoy Gateway if the cluster has
+    /// none (asks first; `--yes` skips the question), creates a Gateway and an HTTPRoute for the Service, waits for them, picks
+    /// a free local port and forwards it until Ctrl-C. Prints the URL (default host SERVICE.localhost).
+    Expose {
+        service: String,
+        #[arg(short = 'n', long, default_value = "default")]
+        namespace: String,
+        /// The Service port to route to (default: the Service's only port).
+        #[arg(long, value_name = "SERVICE_PORT")]
+        port: Option<i64>,
+        /// The host name to route (default: SERVICE.localhost).
+        #[arg(long, value_name = "NAME")]
+        host: Option<String>,
+        /// The local port on 127.0.0.1 (default: the first free one from 8080).
+        #[arg(long, value_name = "N")]
+        local_port: Option<u16>,
+        /// Do not ask before installing Envoy Gateway.
+        #[arg(long)]
+        yes: bool,
+        /// Print the objects and commands and run nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// Remove what `expose` made for a Service (its Gateway, HTTPRoute and EnvoyProxy). Only objects labelled
+    /// `app.kubernetes.io/managed-by=fluxctl-gateway` are ever deleted.
+    Unexpose {
+        service: String,
+        #[arg(short = 'n', long, default_value = "default")]
+        namespace: String,
+        #[command(flatten)]
+        target: Target,
+    },
+    /// List what `expose` made, in every namespace: host, and whether the route is accepted and the gateway ready.
+    List {
+        #[command(flatten)]
+        target: Target,
+    },
     /// Forward one Gateway listener to 127.0.0.1 with kubectl port-forward, so you can open it from this machine. Finds the
     /// single Envoy Service Envoy Gateway made for the listener's port. Runs until Ctrl-C, or until the proxy pod exits.
     Publish {
@@ -61,9 +103,9 @@ pub enum GatewayCommand {
         /// Where Envoy Gateway runs its proxies.
         #[arg(long, default_value = "envoy-gateway-system")]
         proxy_namespace: String,
-        /// The local port on 127.0.0.1.
-        #[arg(long, default_value_t = 8080)]
-        port: i64,
+        /// The local port on 127.0.0.1 (default: the first free one from 8080).
+        #[arg(long)]
+        port: Option<i64>,
         /// Look the Service up and print the kubectl command, but do not run it.
         #[arg(long)]
         dry_run: bool,
@@ -167,7 +209,51 @@ fn cluster_for<'a>(t: &Target, runner: &'a dyn KubeRun) -> Result<Cluster<'a>> {
 
 /// [`run`] with a replaceable kubectl and output, for the tests.
 pub fn execute(cmd: GatewayCommand, runner: &dyn KubeRun, out: &mut dyn Write) -> Result<i32> {
+    execute_with(cmd, runner, &expose::SystemEnv, out)
+}
+
+/// [`execute`] with a replaceable terminal and port-forward process too.
+pub fn execute_with(
+    cmd: GatewayCommand,
+    runner: &dyn KubeRun,
+    env: &dyn expose::ExposeEnv,
+    out: &mut dyn Write,
+) -> Result<i32> {
     match cmd {
+        GatewayCommand::Expose {
+            service,
+            namespace,
+            port,
+            host,
+            local_port,
+            yes,
+            dry_run,
+            target,
+        } => {
+            let c = cluster_for(&target, runner)?;
+            let opts = expose::ExposeOpts {
+                service,
+                namespace,
+                port,
+                host,
+                local_port,
+                yes,
+                dry_run,
+            };
+            expose::expose(&opts, &target.selection(), &c, env, out, &mut std::io::stderr())
+        }
+        GatewayCommand::Unexpose {
+            service,
+            namespace,
+            target,
+        } => {
+            let c = cluster_for(&target, runner)?;
+            expose::unexpose(&service, &namespace, &target.selection(), &c, out)
+        }
+        GatewayCommand::List { target } => {
+            let c = cluster_for(&target, runner)?;
+            expose::list(&target.selection(), &c, out)
+        }
         GatewayCommand::Publish {
             gateway,
             listener,
@@ -178,14 +264,33 @@ pub fn execute(cmd: GatewayCommand, runner: &dyn KubeRun, out: &mut dyn Write) -
             target,
         } => {
             let c = cluster_for(&target, runner)?;
-            let command = c.publication(&namespace, &gateway, &listener, &proxy_namespace, port)?;
+            // No --port: the first free local port (a real bind), instead of failing on a busy 8080.
+            let local = match port {
+                Some(p) => p,
+                None => i64::from(expose::choose_port(None)?),
+            };
+            if let Some(p) = port
+                && !dry_run
+                && (!(1..=65535).contains(&p) || !expose::port_is_free(p as u16))
+            {
+                bail!(
+                    "local port {p} is already in use (or not a valid port). Leave out --port to let fluxctl pick a free one, or choose another with --port N"
+                );
+            }
+            let command = c.publication(&namespace, &gateway, &listener, &proxy_namespace, local)?;
             if dry_run {
                 writeln!(out, "{}", shell_join(&command))?;
                 return Ok(0);
             }
+            writeln!(
+                out,
+                "Forwarding http://127.0.0.1:{local}/ to {gateway}/{listener} until Ctrl-C."
+            )?;
             out.flush()?;
-            // Only returns when kubectl could not be started.
-            Err(kube::exec_forward(&command))
+            let mut find = || {
+                c.publication(&namespace, &gateway, &listener, &proxy_namespace, local)
+            };
+            expose::forward_loop(command, &mut find, env, &mut std::io::stderr())
         }
         GatewayCommand::Inspect {
             route,
@@ -375,7 +480,7 @@ mod tests {
             } => {
                 assert_eq!(
                     (namespace.as_str(), proxy_namespace.as_str(), port, dry_run),
-                    ("default", "envoy-gateway-system", 8080, true)
+                    ("default", "envoy-gateway-system", None, true)
                 );
             }
             _ => panic!(),
@@ -423,6 +528,38 @@ mod tests {
         );
         // only reads: two gets, no port-forward
         assert!(f.argvs().iter().all(|a| a.contains(" get ")));
+    }
+
+    #[test]
+    fn publish_without_a_port_picks_a_free_one_and_a_taken_port_is_refused() {
+        let taken = TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = taken.local_addr().unwrap().port();
+        let gw = serde_json::json!({"spec": {"listeners": [{"name": "web", "protocol": "HTTP", "port": 8080}]}});
+        let svc = serde_json::json!({"items": [{"metadata": {"name": "envoy-x"}, "spec": {"ports": [{"port": 8080}]}}]});
+        let f = FakeKubectl::default().json(gw.clone()).json(svc.clone());
+        let (code, out) = run_ok(parse(&["publish", "dev", "--listener", "web", "--dry-run"]).unwrap(), &f);
+        assert_eq!(code, 0);
+        let local: u16 = out.trim().rsplit(' ').next().unwrap().split(':').next().unwrap().parse().unwrap();
+        assert!(expose::port_is_free(local), "{out}");
+        let f = FakeKubectl::default().json(gw).json(svc);
+        let cmd = parse(&["publish", "dev", "--listener", "web", "--port", &busy.to_string()]).unwrap();
+        let e = execute(cmd, &f, &mut Vec::<u8>::new()).unwrap_err().to_string();
+        assert!(e.contains("already in use") && e.contains("--port"), "{e}");
+        assert!(f.calls.borrow().is_empty(), "refused before any kubectl call");
+    }
+
+    #[test]
+    fn expose_unexpose_and_list_parse() {
+        match parse(&["expose", "web", "-n", "shop", "--port", "8000", "--host", "w.localhost", "--local-port", "9001", "--yes", "--dry-run", "--cluster", "dev"]).unwrap() {
+            GatewayCommand::Expose { service, namespace, port, host, local_port, yes, dry_run, target } => {
+                assert_eq!((service.as_str(), namespace.as_str(), port, local_port, yes, dry_run), ("web", "shop", Some(8000), Some(9001), true, true));
+                assert_eq!(host.as_deref(), Some("w.localhost"));
+                assert_eq!(target.cluster.as_deref(), Some("dev"));
+            }
+            _ => panic!(),
+        }
+        assert!(parse(&["unexpose", "web"]).is_ok() && parse(&["list"]).is_ok());
+        assert!(parse(&["expose"]).is_err(), "SERVICE is required");
     }
 
     #[test]

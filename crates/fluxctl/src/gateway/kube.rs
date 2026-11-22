@@ -392,16 +392,6 @@ impl<'a> Cluster<'a> {
     }
 }
 
-/// Replaces this process with the command, so signals (Ctrl-C) go straight to kubectl. Only returns on failure.
-pub fn exec_forward(command: &[String]) -> anyhow::Error {
-    use std::os::unix::process::CommandExt;
-    let Some((program, args)) = command.split_first() else {
-        return anyhow!("empty command");
-    };
-    let err = Command::new(program).args(args).exec();
-    anyhow!("could not run {program}: {err}")
-}
-
 #[cfg(test)]
 pub mod fake {
     use super::*;
