@@ -87,13 +87,24 @@ pub fn files_for(state: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Turn sharing on for this process (the state file's directory holds the lease files). A no-op when
-/// `FLUXVM_MAC_FLEET_NO_SHARED_LEASES` is set.
+/// `FLUXVM_MAC_FLEET_NO_SHARED_LEASES` is set or `FLUXVM_MAC_FLEET_LEASES=off`.
 pub fn install(state: &Path) {
     // Unit tests of the placer must not share a file with each other; the tests here call `install_at`.
-    if cfg!(test) || std::env::var_os("FLUXVM_MAC_FLEET_NO_SHARED_LEASES").is_some() {
+    if cfg!(test) || std::env::var_os("FLUXVM_MAC_FLEET_NO_SHARED_LEASES").is_some() || leases_off()
+    {
         return;
     }
     install_at(state);
+}
+
+/// `FLUXVM_MAC_FLEET_LEASES=off` (or `0`, `false`, `no`) is the same switch, spelled as a value.
+fn leases_off() -> bool {
+    std::env::var("FLUXVM_MAC_FLEET_LEASES").is_ok_and(|v| {
+        matches!(
+            v.to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    })
 }
 
 fn install_at(state: &Path) {

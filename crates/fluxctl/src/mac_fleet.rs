@@ -49,6 +49,15 @@ pub enum MacFleetCommand {
         #[command(subcommand)]
         command: crate::mac_fleet_run::TemplatesCommand,
     },
+    /// A guest console log, from whichever Mac has it: `logs --name fleet-<id> -f fleet.yaml`.
+    Logs(crate::mac_fleet_view::LogsArgs),
+    /// The recorded `mac.*` / `kube.apple.*` events of every Mac, merged by time.
+    Events(crate::mac_fleet_view::EventsArgs),
+    /// Make or extend an inventory file: `inventory import --ssh-config`, `--hosts-file`, `--bonjour`.
+    Inventory {
+        #[command(subcommand)]
+        command: crate::mac_fleet_import::InventoryCommand,
+    },
 }
 
 /// How to reach the Macs and how to run.
@@ -1173,6 +1182,13 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
         MacFleetCommand::Drain(a) => crate::mac_fleet_run::drain_cmd(a, true),
         MacFleetCommand::Resume(a) => crate::mac_fleet_run::drain_cmd(a, false),
         MacFleetCommand::Templates { command } => crate::mac_fleet_run::templates_cmd(command),
+        MacFleetCommand::Logs(a) => crate::mac_fleet_view::logs_cmd(a),
+        MacFleetCommand::Events(a) => crate::mac_fleet_view::events_cmd(a),
+        MacFleetCommand::Inventory { command } => match command {
+            crate::mac_fleet_import::InventoryCommand::Import(a) => {
+                crate::mac_fleet_import::import_cmd(a)
+            }
+        },
         MacFleetCommand::Doctor(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
             let tr = transport(&a.conn, inv.as_ref());

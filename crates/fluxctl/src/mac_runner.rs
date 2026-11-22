@@ -102,6 +102,10 @@ pub struct RunnerArgs {
     /// Do not look, at start, for `fleet-*` guests and `fluxvm-*` runners left behind by a run that was killed.
     #[arg(long)]
     pub no_sweep: bool,
+    /// At start, also remove every `fleet-*` guest on the Macs and every idle `fluxvm-*` runner of this scope, whoever owns
+    /// it, including ones another runner or `mac-fleet run` holds a live lease for. Only when none is active on those Macs.
+    #[arg(long, conflicts_with = "no_sweep")]
+    pub sweep_all: bool,
     #[command(flatten)]
     pub place: PlaceFlags,
     /// Seconds the guest may take to answer on SSH.
@@ -745,7 +749,10 @@ pub fn run(a: RunnerArgs) -> Result<()> {
                 .any(|c| c == id)
     };
     if !a.no_sweep {
-        for l in crate::mac_runner_life::sweep(gh, tr.as_ref(), &targets, &claimed, false) {
+        // --sweep-all: nothing is claimed, so every orphan-looking guest and idle runner goes.
+        let keep_none = |_: &str| false;
+        let keep: &dyn Fn(&str) -> bool = if a.sweep_all { &keep_none } else { &claimed };
+        for l in crate::mac_runner_life::sweep(gh, tr.as_ref(), &targets, keep, false) {
             log(&l);
         }
     }
