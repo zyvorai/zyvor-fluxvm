@@ -184,13 +184,17 @@ pub async fn run(store: &Store, cmd: MacPlus) -> Result<()> {
             tags,
             limit,
         } => {
-            let repos = image::oci_manage::catalog(&registry, creds(), None).await?;
+            let repos = image::oci_manage::catalog(&registry, creds(&registry), None).await?;
             for r in filter_repos(&repos, term.as_deref(), limit) {
                 if tags {
-                    let t = image::oci_manage::list_tags(&format!("{registry}/{r}"), creds(), None)
-                        .await
-                        .map(|t| t.join(","))
-                        .unwrap_or_else(|e| format!("(tags unavailable: {e})"));
+                    let t = image::oci_manage::list_tags(
+                        &format!("{registry}/{r}"),
+                        creds(&registry),
+                        None,
+                    )
+                    .await
+                    .map(|t| t.join(","))
+                    .unwrap_or_else(|e| format!("(tags unavailable: {e})"));
                     println!("{registry}/{r}  {t}");
                 } else {
                     println!("{registry}/{r}");
@@ -208,9 +212,14 @@ pub async fn run(store: &Store, cmd: MacPlus) -> Result<()> {
         MacPlus::Verify { reference, json } => {
             let t = trust()?;
             let out = if names_a_registry(&reference) {
-                let v =
-                    mac_trust::verify_remote(&RegistrySource { creds: creds() }, &reference, &t)
-                        .await;
+                let v = mac_trust::verify_remote(
+                    &RegistrySource {
+                        creds: creds(&reference),
+                    },
+                    &reference,
+                    &t,
+                )
+                .await;
                 v.map(|v| (v.digest, v.signer))
             } else {
                 verify_local(store, &t, &reference)
@@ -279,7 +288,7 @@ fn keys(t: &TrustStore, c: KeysCommand) -> Result<()> {
 /// Sign what `reference` points at in its registry and attach the signature as a referrer.
 pub async fn sign_remote(t: &TrustStore, reference: &str) -> Result<mac_trust::SigRecord> {
     let r = image::oci_registry::ImageRef::parse(reference)?;
-    let mut reg = image::oci_manage::Registry::new(creds())?;
+    let mut reg = image::oci_manage::Registry::new(creds(reference))?;
     let digest = reg.get_manifest(&r, &r.reference).await?.digest;
     let rec = t.sign_digest(&digest)?;
     attach_signature(&r, &digest, &rec).await?;
@@ -308,7 +317,7 @@ async fn attach_signature(
             layer_media_type: None,
             annotations: mac_trust::record_annotations(rec),
         },
-        creds(),
+        creds(&r.registry),
     )
     .await
     .context("attaching the signature (does the registry accept OCI artifacts with a subject?)")?;
@@ -422,7 +431,7 @@ pub async fn push(store: &Store, reference: &str, target: &str, extra: &PushExtr
         name: Some(reference.to_string()),
         annotations,
     };
-    let out = image::vm_artifact::push(&dir, target, creds(), &opts)
+    let out = image::vm_artifact::push(&dir, target, creds(target), &opts)
         .await
         .with_context(|| format!("pushing {} to {target}", dir.display()))?;
     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -480,7 +489,8 @@ pub async fn pull(store: &Store, reference: &str, extra: &PullExtra) -> Result<(
     let mut target = key.clone();
     let mut verified = None;
     if require {
-        let v = mac_trust::verify_remote(&RegistrySource { creds: creds() }, &key, &trust).await?;
+        let v =
+            mac_trust::verify_remote(&RegistrySource { creds: creds(&key) }, &key, &trust).await?;
         // Pull exactly the digest that was verified: the tag may move between the check and the download.
         let r = image::oci_registry::ImageRef::parse(&key)?;
         target = image::oci_registry::ImageRef {
@@ -500,7 +510,7 @@ pub async fn pull(store: &Store, reference: &str, extra: &PullExtra) -> Result<(
     let report = image::vm_artifact::pull_with(
         &target,
         &scratch,
-        creds(),
+        creds(&target),
         &image::vm_artifact::PullOptions { seeds },
     )
     .await
@@ -761,7 +771,7 @@ async fn sbom_cmd(
                 layer_media_type: None,
                 annotations: Default::default(),
             },
-            creds(),
+            creds(target),
         )
         .await?;
         eprintln!(

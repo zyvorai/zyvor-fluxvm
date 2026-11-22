@@ -178,6 +178,9 @@ pub enum MacCommand {
     Ux(crate::mac_ux::MacUx),
     #[command(flatten)]
     Ops(crate::mac_ops::MacOps),
+    /// Registry login (`login`, `logout`, `logins`) and `fork`.
+    #[command(flatten)]
+    Dp(crate::mac_dp::MacDp),
 }
 
 impl MacCommand {
@@ -191,6 +194,7 @@ impl MacCommand {
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) | Self::Ux(_) => true,
             Self::Ops(o) => o.is_client_side(),
+            Self::Dp(d) => d.is_client_side(),
             _ => !matches!(
                 self,
                 Self::Run { .. }
@@ -432,6 +436,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             cmd,
         } => crate::mac_more::exec(r, name, user, cmd, opts).await,
         MacCommand::More(m) => crate::mac_more::run_daemon(r, m).await,
+        MacCommand::Dp(d) => crate::mac_dp::run_daemon(r, d).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
         MacCommand::Build {
             file,
@@ -770,6 +775,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
     }
     let command = match command {
         MacCommand::Ops(o) => return crate::mac_ops::run_client(o),
+        MacCommand::Dp(d) => return crate::mac_dp::run_client(d).await,
         c => c,
     };
     let store = Store::open(mac_store::default_root()?)?;
@@ -853,6 +859,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Exec { .. }
         | MacCommand::Host { .. }
         | MacCommand::WaitReady { .. }
+        | MacCommand::Dp(_)
         | MacCommand::Ops(_) => unreachable!("rejected above"),
     }
     Ok(())
@@ -890,7 +897,12 @@ fn build_plan_text_with(
     ))
 }
 
-pub(crate) fn creds() -> Option<image::oci_registry::Credentials> {
+/// Credentials for the registry that `reference` names: the environment, else the login saved by `mac login`.
+pub(crate) fn creds(reference: &str) -> Option<image::oci_registry::Credentials> {
+    crate::mac_login::credentials_for(reference)
+}
+
+pub(crate) fn env_creds() -> Option<image::oci_registry::Credentials> {
     let username = std::env::var("FLUXVM_REGISTRY_USER").ok()?;
     let password = std::env::var("FLUXVM_REGISTRY_PASSWORD").unwrap_or_default();
     Some(image::oci_registry::Credentials { username, password })

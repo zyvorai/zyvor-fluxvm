@@ -254,6 +254,49 @@ fluxctl mac images
 fluxctl mac rmi macos-xcode:stable
 ```
 
+### Saved logins: `mac login`, `mac logout`, `mac logins`
+
+```
+fluxctl mac login ghcr.io -u alice                       # asks for the token without echo
+printf %s "$TOKEN" | fluxctl mac login ghcr.io -u alice --password-stdin
+fluxctl mac logins                                       # registries and user names, never passwords
+fluxctl mac logout ghcr.io                               # or: fluxctl mac logout --all
+```
+
+`mac pull`, `push`, `verify`, `sign` and `search` use the saved login of the registry they talk to, with no flags. The environment
+variables above still win when `FLUXVM_REGISTRY_USER` is set. A login is only ever sent to the registry it was saved for.
+
+- The password comes from stdin (`--password-stdin`, first line) or a prompt with echo off. There is no password argument, so it never
+  lands in shell history or `ps`. It is not printed in any message, `--json` output or error; the tests grep those paths for it.
+- Stored in `~/.config/fluxvm/mac-registry-auth.json` (override: `FLUXVM_MAC_REGISTRY_AUTH`), mode 0600, in clear text like
+  `~/.docker/config.json` without a credential helper. fluxctl refuses to read or write the file while a group or other permission bit
+  is set (`chmod 600` it); until then pulls and pushes go out anonymously, with a warning. Use an access token, not an account password.
+- `login` makes one `GET /v2/` (following a Bearer challenge to the token endpoint). A refusal saves nothing and exits 1
+  (`MAC_REGISTRY_LOGIN_FAILED`). If the registry cannot be reached the login is saved anyway and the output lists, under
+  `NOT verified:`, that it was not checked. Even a verified login does not prove it may pull or push a given repository.
+- `logout` does not revoke the token at the registry; do that in the registry's settings if it leaked.
+- `mac-fleet` runs still forward only `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD` to the remote Mac, not the saved file.
+- Studio has no page for Mac instances or registry credentials, so there is no UI for this yet.
+
+### `fluxctl mac fork NAME -n N [--name-prefix P] [--start] [--json]`
+
+Creates N instances from a **stopped** instance's disk. Like `mac commit`, the instance's disk, hardware model and auxiliary storage are
+cloned (APFS copy-on-write, instant on the same volume, almost no space until the copies diverge) into one hidden store image
+`forked-NAME-XXXXXX:latest`; like `mac run`, each fork is then created from that image through the daemon, so it has its own VM record
+and name (`PREFIX-1` ... `PREFIX-N`, default prefix `NAME-fork`) and the labels `fluxvm.mac=instance` and `fluxvm.mac.forked-from=NAME`. The
+fork gets the source's vCPU count and memory when the daemon recorded them.
+
+- **A fork is a cold boot of the cloned disk.** A saved running state cannot be restored on macOS, so no memory or running process is
+  carried over. Things inside the guest (hostname, ssh host keys, accounts) are the source's; change them if forks must differ.
+- Forks are created **stopped**. `--start` boots them and needs a free macOS slot for each (2 per Mac); if there are not enough it stops
+  before creating anything with `MAC_FORK_SLOTS` (stop one, start forks one at a time, or use the fleet). Slots held by VMs that are
+  not `mac` instances are not counted by this check; the daemon's own 409 is explained if it comes.
+- A running (or paused, starting) source is refused with `MAC_FORK_SOURCE_RUNNING`: `fluxctl mac stop NAME` first.
+- The hidden image stays while forks use it (their `mac ps` IMAGE column shows it). `fluxctl mac rmi` it after the forks are gone, or
+  let `mac image prune --all` remove it once no instance uses it.
+- Needs the daemon on the Mac that owns the source instance (it reads the instance's disk path), like `mac commit`.
+- Whether the daemon gives each fork a fresh MAC address and machine identity was not verified; it is created through the same API as `mac run`.
+
 ## Preflight: `fluxctl mac doctor [--json]`
 
 Read-only checks of the limits listed under "Hard limits", so they fail early with a fix instead of late with a 409, a 503 or a
@@ -500,3 +543,7 @@ virtiofs share names inside a macOS guest, the generated `export ...; cd ... &&`
 guest, the `/logs`, `/stats`, `/pause`, `/resume`, `/restart` routes' exact output for macOS VMs, `tar` on a multi-GiB sparse disk,
 and everything in `compose`. Also unverified: signing and verification against a real registry's referrers API, `--sign` attach, `mac search` against a real catalog, the build cache on a real guest (stop, clone, reboot per step), chunk reuse on a real 20+ GB template, and `mac sbom --attach`. `build --dry-run`, `compose up --dry-run` and the image tools on a store are the parts you can try
 without a VM.
+
+`mac login` / `logout` / `logins` and `mac fork`: unit-tested against a loopback fake registry and a loopback fake daemon only. Not run
+against a real registry (GHCR, Docker Hub, a private one), not run against a real daemon, and no fork was booted. The no-echo
+prompt was not exercised in a terminal in tests; `--password-stdin` is the tested path.
