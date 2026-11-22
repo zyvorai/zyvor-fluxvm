@@ -11,6 +11,10 @@
 //! `depends_on` (list, or map with a `condition`: `service_healthy` waits for the dependency's image HEALTHCHECK, other values mean "started"), `labels`, `restart`, `cpus`, `mem_limit`,
 //! `user`. Anything else (`networks`, `deploy`, ...) is an error, not silently ignored.
 //!
+//! More keys: `secrets` and `configs` (file-based only, shared read-only), `extends`, top-level `include`, `x-` extension keys and
+//! `${VAR}` interpolation with a `.env` file; see mac_compose_cfg. Commands: up, down, ps, logs, exec, restart, config, stop, start,
+//! images, pull, push, ls, run, top, cp.
+//!
 //! `depends_on` means "started after, once SSH answers"; with `condition: service_healthy` it also waits (up to 10 minutes) for the
 //! dependency's image HEALTHCHECK to pass, probed over SSH (see mac_health). A dependency whose image has no HEALTHCHECK is an error.
 //! A service's `command` runs in the background in the guest (like `mac run -d`).
@@ -18,6 +22,7 @@
 //! Not verified against a real macOS VM: parsing, ordering and the request bodies are unit tested; `up`, `down` and `ps` were
 //! never run against a daemon.
 
+use crate::mac_compose_cfg as cfg;
 use crate::mac_config;
 use crate::mac_inspect::{PROJECT_LABEL, SERVICE_LABEL};
 use crate::mac_instance::{LaunchSpec, Restart, parse_label, parse_mount};
@@ -37,6 +42,9 @@ Example mac-compose.yaml:\n  name: ci\n  services:\n    db:\n      image: macos-
 )]
 pub enum ComposeCommand {
     /// Start the services in depends_on order (each as a macOS VM; at most 2 in total).
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose up\n  fluxctl mac compose up --wait            # also wait for HEALTHCHECKs, like docker compose up --wait\n  fluxctl mac compose up --dry-run         # print the order, change nothing\n  fluxctl mac compose up --profile debug --build"
+    )]
     Up {
         /// The compose file (default: mac-compose.yaml, .yml or .json in this directory).
         #[arg(short = 'f', long)]
@@ -44,9 +52,10 @@ pub enum ComposeCommand {
         /// Project name (default: `name:` in the file, else the directory name).
         #[arg(short = 'p', long = "project-name")]
         project: Option<String>,
-        /// Seconds to wait for each guest to answer on SSH.
-        #[arg(long, default_value_t = 900)]
-        wait: u64,
+        /// Like `docker compose up --wait`: after everything started, wait until every service whose image has a HEALTHCHECK is
+        /// healthy (same as --wait-healthy). An optional SECS is how long each guest may take to answer on SSH (default 900).
+        #[arg(long, num_args = 0..=1, default_missing_value = "900", value_name = "SECS")]
+        wait: Option<u64>,
         /// Print the order and what would be created, and change nothing.
         #[arg(long)]
         dry_run: bool,
@@ -61,7 +70,12 @@ pub enum ComposeCommand {
         #[arg(long)]
         wait_healthy: bool,
         /// Seconds to wait for a `condition: service_healthy` dependency or for `--wait-healthy` (0 = forever).
-        #[arg(long, default_value_t = 600, value_name = "SECS")]
+        #[arg(
+            long,
+            default_value_t = 600,
+            value_name = "SECS",
+            visible_alias = "wait-timeout"
+        )]
         health_timeout: u64,
         /// Also start services with this profile (repeatable; also `COMPOSE_PROFILES=a,b`).
         #[arg(long = "profile", value_name = "NAME")]
@@ -110,6 +124,156 @@ pub enum ComposeCommand {
         #[arg(short = 'a', long)]
         all: bool,
     },
+    /// Print the compose file as it will be used: `${VAR}` filled in (and `.env` read), `include` and `extends` merged, `env_file`
+    /// read into `environment`, only the selected profiles. `--quiet` only checks it. Needs no daemon.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose config\n  fluxctl mac compose config --quiet && echo valid\n  fluxctl mac compose config --format json --profile debug\n  fluxctl mac compose config --services"
+    )]
+    Config {
+        #[command(flatten)]
+        t: Target,
+        /// Also include services with this profile (repeatable; also `COMPOSE_PROFILES=a,b`).
+        #[arg(long = "profile", value_name = "NAME")]
+        profile: Vec<String>,
+        /// Print nothing; the exit status says whether the file is valid.
+        #[arg(short = 'q', long)]
+        quiet: bool,
+        /// `yaml` (default) or `json`.
+        #[arg(long, default_value = "yaml", value_parser = ["yaml", "json"])]
+        format: String,
+        /// Print only the service names, in start order.
+        #[arg(long)]
+        services: bool,
+    },
+    /// Stop the project's running instances (all, or the named services), dependents first. The disks are kept; `compose start`
+    /// boots them again.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose stop\n  fluxctl mac compose stop tests"
+    )]
+    Stop {
+        services: Vec<String>,
+        #[command(flatten)]
+        t: Target,
+    },
+    /// Start the project's stopped instances (all, or the named services), dependencies first. Needs free macOS slots (a Mac
+    /// runs at most 2 macOS VMs).
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose start\n  fluxctl mac compose start db"
+    )]
+    Start {
+        services: Vec<String>,
+        #[command(flatten)]
+        t: Target,
+    },
+    /// The images the services use: service, image, id and size in the local store. Needs no daemon.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose images\n  fluxctl mac compose images -q"
+    )]
+    Images {
+        #[command(flatten)]
+        t: Target,
+        /// Print only the image names.
+        #[arg(short = 'q', long)]
+        quiet: bool,
+    },
+    /// Pull the services' images (all, or the named services) into the local store. A service that only has `build:` is built
+    /// locally, so it is skipped. Needs no daemon.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose pull\n  fluxctl mac compose pull db\n(credentials: FLUXVM_REGISTRY_USER / FLUXVM_REGISTRY_PASSWORD)"
+    )]
+    Pull {
+        services: Vec<String>,
+        #[command(flatten)]
+        t: Target,
+        /// Refuse an image without a signature from a trusted key (see `mac pull --verify`).
+        #[arg(long)]
+        verify: bool,
+    },
+    /// Push the services' images to their registry (all, or the named services). Each `image:` must name a registry
+    /// (`ghcr.io/acme/app:1`). Apple's licence limits where macOS images may be stored: use a private registry.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose push\n  fluxctl mac compose push tests --sign"
+    )]
+    Push {
+        services: Vec<String>,
+        #[command(flatten)]
+        t: Target,
+        /// Sign the pushed manifest with your key (`mac keys generate`).
+        #[arg(long)]
+        sign: bool,
+        /// Push to a well-known public registry anyway (see `mac push --help`).
+        #[arg(long = "i-have-checked-the-licence")]
+        licence_override: bool,
+    },
+    /// List the compose projects on this Mac (running ones; `-a` also those that are all stopped).
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose ls\n  fluxctl mac compose ls -a --json\n  fluxctl mac compose ls -q"
+    )]
+    Ls {
+        /// Include projects whose instances are all stopped.
+        #[arg(short = 'a', long)]
+        all: bool,
+        /// Print only the project names.
+        #[arg(short = 'q', long)]
+        quiet: bool,
+        #[arg(long, conflicts_with = "quiet")]
+        json: bool,
+    },
+    /// Run a command once in a NEW VM made from a service's image (not in the running one; use `compose exec` for that).
+    /// It takes a macOS slot, so it is refused when 2 macOS VMs already run. Ports are not published and dependencies are not
+    /// started: `compose up` first. Without a command the service's `command:` runs.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose run --rm tests -- xcodebuild -version\n  fluxctl mac compose run --rm -e MODE=fast -w /src -u admin tests -- ./check.sh\n\nA Mac runs at most 2 macOS VMs: with both slots in use (for example after `compose up` of 2 services) run `compose stop SERVICE` first."
+    )]
+    Run {
+        service: String,
+        #[command(flatten)]
+        t: Target,
+        /// Delete the one-off VM when the command ends.
+        #[arg(long)]
+        rm: bool,
+        /// Set an environment variable for the command: `NAME=value`, or `NAME` to copy it from this shell. Repeatable.
+        #[arg(short = 'e', long = "env", value_name = "NAME[=VALUE]")]
+        env: Vec<String>,
+        /// Directory to run the command in.
+        #[arg(short = 'w', long)]
+        workdir: Option<String>,
+        /// SSH user in the guest (default: the service's `user:`, the image's USER, else admin).
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+        /// Seconds to wait for the guest to answer on SSH.
+        #[arg(long, default_value_t = 900, value_name = "SECS")]
+        ssh_timeout: u64,
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+    /// The processes in the services' instances (`ps` over SSH): all services, or the named ones. Extra words after `--` go to
+    /// `ps`.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose top\n  fluxctl mac compose top db -- aux"
+    )]
+    Top {
+        services: Vec<String>,
+        #[command(flatten)]
+        t: Target,
+        #[arg(long, default_value = "admin")]
+        user: String,
+        #[arg(last = true)]
+        ps_args: Vec<String>,
+    },
+    /// Copy between this Mac and a service's instance: `SERVICE:/path` is the guest side, as in `docker compose cp`.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose cp ./site web:/Users/admin/site\n  fluxctl mac compose cp db:/var/log/system.log ./system.log"
+    )]
+    Cp {
+        src: String,
+        dst: String,
+        #[command(flatten)]
+        t: Target,
+        /// SSH user in the guest.
+        #[arg(long, default_value = "admin")]
+        user: String,
+    },
 }
 
 /// Which compose file and project a command is about.
@@ -126,7 +290,14 @@ pub struct Target {
 impl ComposeCommand {
     /// `up --dry-run` only reads the file and the store.
     pub fn is_client_side(&self) -> bool {
-        matches!(self, ComposeCommand::Up { dry_run: true, .. })
+        matches!(
+            self,
+            ComposeCommand::Up { dry_run: true, .. }
+                | ComposeCommand::Config { .. }
+                | ComposeCommand::Images { .. }
+                | ComposeCommand::Pull { .. }
+                | ComposeCommand::Push { .. }
+        )
     }
 }
 
@@ -136,6 +307,12 @@ pub struct ComposeFile {
     #[serde(default)]
     name: Option<String>,
     services: BTreeMap<String, Service>,
+    /// Top-level `secrets:`: only `file:` sources work.
+    #[serde(default)]
+    secrets: BTreeMap<String, cfg::FileSource>,
+    /// Top-level `configs:`: only `file:` sources work.
+    #[serde(default)]
+    configs: BTreeMap<String, cfg::FileSource>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -155,7 +332,13 @@ struct Service {
     #[serde(default)]
     environment: Option<MapOrList>,
     #[serde(default)]
-    env_file: Option<StrOrList>,
+    env_file: Option<EnvFiles>,
+    /// Files from the top-level `secrets:` (read-only, default `/private/var/run/secrets/NAME` in the guest).
+    #[serde(default)]
+    secrets: Vec<cfg::FileRef>,
+    /// Files from the top-level `configs:` (read-only, default `/private/var/run/configs/NAME` in the guest).
+    #[serde(default)]
+    configs: Vec<cfg::FileRef>,
     #[serde(default)]
     ports: Vec<Scalar>,
     #[serde(default)]
@@ -223,6 +406,56 @@ enum StrOrList {
     Many(Vec<String>),
 }
 
+/// `env_file: a.env`, or a list of paths and `{path, required}` entries.
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum EnvFiles {
+    One(String),
+    Many(Vec<EnvFileEntry>),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum EnvFileEntry {
+    Path(String),
+    Full(EnvFileFull),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+struct EnvFileFull {
+    path: String,
+    #[serde(default)]
+    required: Option<bool>,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+impl EnvFiles {
+    /// `(path, required)` for each file.
+    fn entries(&self) -> Result<Vec<(String, bool)>> {
+        let list = match self {
+            EnvFiles::One(f) => return Ok(vec![(f.clone(), true)]),
+            EnvFiles::Many(l) => l,
+        };
+        list.iter()
+            .map(|e| match e {
+                EnvFileEntry::Path(p) => Ok((p.clone(), true)),
+                EnvFileEntry::Full(f) => {
+                    if let Some(fmt) = &f.format {
+                        ensure!(
+                            fmt == "raw",
+                            "env_file {:?}: `format: {fmt}` is not supported; only plain KEY=value files (remove `format`)",
+                            f.path
+                        );
+                    }
+                    Ok((f.path.clone(), f.required.unwrap_or(true)))
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum MapOrList {
@@ -267,6 +500,8 @@ pub struct ServicePlan {
     pub healthy_deps: Vec<String>,
     pub has_dependents: bool,
     pub build: Option<BuildPlan>,
+    /// Secrets and configs: files from this Mac shared read-only into the guest.
+    pub files: Vec<cfg::FileMount>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,9 +511,34 @@ pub struct Resolved {
     pub services: Vec<ServicePlan>,
 }
 
+#[cfg(test)]
 pub fn parse(text: &str) -> Result<ComposeFile> {
     // JSON is YAML, so one parser reads both; the error names the line and the offending key.
-    serde_yaml::from_str(text).context("reading the compose file")
+    let mut v: serde_yaml::Value =
+        serde_yaml::from_str(text).context("reading the compose file")?;
+    v.apply_merge()
+        .context("a YAML merge key (`<<`) is wrong")?;
+    if let serde_yaml::Value::Mapping(m) = &mut v {
+        cfg::strip_extensions(m);
+    }
+    from_value(v)
+}
+
+/// The typed file from a merged YAML tree. A key this tool does not implement is named, with what to do about it.
+fn from_value(v: serde_yaml::Value) -> Result<ComposeFile> {
+    serde_yaml::from_value(v).map_err(|e| {
+        let msg = e.to_string();
+        let hint = if let Some(m) = cfg::unsupported_key(&e) {
+            m
+        } else if msg.contains("missing field `services`") {
+            "the file has no `services:` key; add `services:` with at least one service (see docs/macos-containers.md#compose)".to_string()
+        } else if msg.contains("untagged enum") {
+            "a key has a value of the wrong shape (for example an env_file, build or depends_on entry); check it against docs/macos-containers.md#compose".to_string()
+        } else {
+            "the compose file has a value this tool cannot read; fix it as the message says".to_string()
+        };
+        anyhow::Error::new(e).context(hint)
+    })
 }
 
 fn valid_name(n: &str) -> bool {
@@ -450,19 +710,36 @@ pub fn resolve_with(
         }
         let mut env_pairs: Vec<(String, String)> = Vec::new();
         if let Some(ef) = &svc.env_file {
-            let files = match ef {
-                StrOrList::One(f) => vec![f.clone()],
-                StrOrList::Many(l) => l.clone(),
-            };
-            for f in files {
-                let p = base.join(f);
-                let text = std::fs::read_to_string(&p)
-                    .with_context(|| ctx(&format!("reading env_file {}", p.display())))?;
+            for (f, required) in ef.entries().with_context(|| ctx("env_file"))? {
+                let p = base.join(&f);
+                let text = match std::fs::read_to_string(&p) {
+                    Ok(t) => t,
+                    Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => bail!(
+                        "{}: env_file {} cannot be read ({e}). Create it, or make it optional with `env_file: [{{path: {f}, required: false}}]`",
+                        ctx(""),
+                        p.display()
+                    ),
+                };
                 env_pairs.extend(
                     mac_config::parse_env_file(&text, lookup).with_context(|| ctx("env_file"))?,
                 );
             }
         }
+        let mut files = cfg::resolve_files(
+            &name,
+            cfg::FileKind::Secret,
+            &svc.secrets,
+            &file.secrets,
+            base,
+        )?;
+        files.extend(cfg::resolve_files(
+            &name,
+            cfg::FileKind::Config,
+            &svc.configs,
+            &file.configs,
+            base,
+        )?);
         if let Some(e) = &svc.environment {
             for p in e.pairs() {
                 env_pairs.extend(
@@ -526,6 +803,7 @@ pub fn resolve_with(
             healthy_deps: healthy_deps(svc),
             build,
             has_dependents: depended.contains(&name),
+            files,
         });
     }
     Ok(Resolved { project, services })
@@ -683,21 +961,17 @@ fn load_with(
     profiles: &[String],
 ) -> Result<Resolved> {
     let path = find_file(file)?;
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let parsed = parse(&text).with_context(|| path.display().to_string())?;
     let abs = std::fs::canonicalize(&path).unwrap_or(path.clone());
     let base = abs.parent().unwrap_or(Path::new("."));
+    // Variables: the environment, then `.env` next to the file.
+    let lookup = cfg::lookup_with_dotenv(base, |k| std::env::var(k).ok());
+    let lk: &dyn Fn(&str) -> Option<String> = &*lookup;
+    let top = cfg::load_tree(&path, lk, &mut vec![])?;
+    let parsed =
+        from_value(serde_yaml::Value::Mapping(top)).with_context(|| path.display().to_string())?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    resolve_with(
-        &parsed,
-        project,
-        base,
-        home.as_deref(),
-        |k| std::env::var(k).ok(),
-        profiles,
-    )
-    .with_context(|| path.display().to_string())
+    resolve_with(&parsed, project, base, home.as_deref(), lk, profiles)
+        .with_context(|| path.display().to_string())
 }
 
 /// `compose up --dry-run`: no daemon.
@@ -746,8 +1020,490 @@ pub fn run_client(cmd: ComposeCommand) -> Result<()> {
             print!("{}", render_plan(&r));
             Ok(())
         }
+        ComposeCommand::Config {
+            t,
+            profile,
+            quiet,
+            format,
+            services,
+        } => {
+            let r = load_with(t.file, t.project.as_deref(), &profiles_from_env(&profile))?;
+            if quiet {
+                return Ok(());
+            }
+            if services {
+                for s in &r.services {
+                    println!("{}", s.service);
+                }
+                return Ok(());
+            }
+            print!("{}", render_config(&r, format == "json")?);
+            Ok(())
+        }
+        ComposeCommand::Images { t, quiet } => {
+            let r = load_with(t.file, t.project.as_deref(), &["*".to_string()])?;
+            let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+            let rows = image_rows(&r, &store.list()?, store.root());
+            if quiet {
+                for row in &rows {
+                    println!("{}", row.image);
+                }
+            } else {
+                print!("{}", render_images(&rows));
+            }
+            Ok(())
+        }
+        ComposeCommand::Pull {
+            services,
+            t,
+            verify,
+        } => {
+            let r = load_with(t.file, t.project.as_deref(), &["*".to_string()])?;
+            let targets = image_targets(&r, &services, false)?;
+            let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+            let extra = crate::mac_plus::PullExtra {
+                verify,
+                no_reuse: false,
+            };
+            let mut failed = Vec::new();
+            for (svc, image, buildable) in &targets {
+                eprintln!("pulling {image} (service {svc}) ...");
+                if let Err(e) = block_on(crate::mac_plus::pull(&store, image, &extra)) {
+                    if *buildable {
+                        eprintln!(
+                            "{svc}: could not pull {image} ({e:#}); it has `build:`, so `compose up` builds it"
+                        );
+                    } else {
+                        eprintln!("{svc}: {e:#}");
+                        failed.push(svc.as_str());
+                    }
+                }
+            }
+            ensure!(
+                failed.is_empty(),
+                "could not pull the image of: {}. Check the name and tag (`fluxctl mac compose images`) and, for a private registry, FLUXVM_REGISTRY_USER and FLUXVM_REGISTRY_PASSWORD",
+                failed.join(", ")
+            );
+            Ok(())
+        }
+        ComposeCommand::Push {
+            services,
+            t,
+            sign,
+            licence_override,
+        } => {
+            let r = load_with(t.file, t.project.as_deref(), &["*".to_string()])?;
+            let targets = image_targets(&r, &services, true)?;
+            for (svc, image, _) in &targets {
+                ensure!(
+                    crate::mac_cmd::names_a_registry(image),
+                    "service {svc:?}: the image {image:?} names no registry, so there is nowhere to push it. Set `image:` to a registry reference such as ghcr.io/acme/{image} in the compose file"
+                );
+            }
+            let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+            let extra = crate::mac_plus::PushExtra {
+                sign,
+                licence_override,
+                label: vec![],
+            };
+            for (svc, image, _) in &targets {
+                eprintln!("pushing {image} (service {svc}) ...");
+                let target = crate::mac_cmd::remote_reference(image, None)?;
+                block_on(crate::mac_plus::push(&store, image, &target, &extra))
+                    .with_context(|| format!("service {svc:?}: push {image}"))?;
+            }
+            Ok(())
+        }
         _ => bail!("not a client-side compose command"),
     }
+}
+
+/// Run a future from the synchronous client-side commands (the CLI runs on a multi-threaded runtime).
+fn block_on<T>(f: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+}
+
+/// A service whose image exists only because `build:` makes it (no `image:` was written).
+fn built_only(project: &str, s: &ServicePlan) -> bool {
+    s.build.is_some() && s.spec.image == format!("{project}-{}:latest", s.service)
+}
+
+/// `(service, image, has build:)` for pull and push: the named services (all when none), each image once. A built-only service
+/// is skipped for pull (`with_built` false) and included for push.
+fn image_targets(
+    r: &Resolved,
+    only: &[String],
+    with_built: bool,
+) -> Result<Vec<(String, String, bool)>> {
+    for o in only {
+        ensure!(
+            r.services.iter().any(|s| &s.service == o),
+            "no service {o:?} in the compose file (services: {})",
+            r.services
+                .iter()
+                .map(|s| s.service.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let mut out: Vec<(String, String, bool)> = Vec::new();
+    for s in &r.services {
+        if !only.is_empty() && !only.contains(&s.service) {
+            continue;
+        }
+        if !with_built && built_only(&r.project, s) {
+            eprintln!(
+                "{}: built locally from `build:`, nothing to pull (`compose up` builds it)",
+                s.service
+            );
+            continue;
+        }
+        if out.iter().any(|(_, i, _)| i == &s.spec.image) {
+            continue;
+        }
+        out.push((s.service.clone(), s.spec.image.clone(), s.build.is_some()));
+    }
+    ensure!(
+        !out.is_empty(),
+        "no image to work on: every selected service is built locally from `build:`"
+    );
+    Ok(out)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ImageRow {
+    service: String,
+    image: String,
+    id: String,
+    size: String,
+}
+
+/// One row per service: the store's digest and size, or `-` when the image is not in the store (yet).
+fn image_rows(
+    r: &Resolved,
+    store: &[(String, crate::mac_store::Entry)],
+    root: &Path,
+) -> Vec<ImageRow> {
+    r.services
+        .iter()
+        .map(|s| {
+            let key = crate::mac_store::normalize(&s.spec.image).unwrap_or_default();
+            let found = store.iter().find(|(k, _)| *k == key);
+            let (id, size) = match found {
+                Some((_, e)) => (
+                    if e.digest.is_empty() {
+                        e.dir.chars().take(12).collect()
+                    } else {
+                        e.digest
+                            .trim_start_matches("sha256:")
+                            .chars()
+                            .take(12)
+                            .collect()
+                    },
+                    crate::mac_cmd::human(crate::mac_cmd::dir_size(&root.join(&e.dir))),
+                ),
+                None => ("-".into(), "-".into()),
+            };
+            ImageRow {
+                service: s.service.clone(),
+                image: s.spec.image.clone(),
+                id,
+                size,
+            }
+        })
+        .collect()
+}
+
+fn render_images(rows: &[ImageRow]) -> String {
+    let mut out = format!("{:<14}  {:<34}  {:<12}  SIZE\n", "SERVICE", "IMAGE", "ID");
+    for r in rows {
+        out.push_str(&format!(
+            "{:<14}  {:<34}  {:<12}  {}\n",
+            r.service, r.image, r.id, r.size
+        ));
+    }
+    if rows.iter().any(|r| r.id == "-") {
+        out.push_str("(`-` = not in the local store: `fluxctl mac compose pull`, or `compose up` builds a `build:` service)\n");
+    }
+    out
+}
+
+/// The resolved file, for `compose config`.
+pub fn render_config(r: &Resolved, json: bool) -> Result<String> {
+    use serde_json::{Map, Value, json};
+    let mut services = Map::new();
+    for s in &r.services {
+        let mut o = Map::new();
+        o.insert("image".into(), json!(s.spec.image));
+        if let Some(b) = &s.build {
+            let mut bm = Map::new();
+            bm.insert("context".into(), json!(b.context));
+            if let Some(f) = &b.file {
+                bm.insert("dockerfile".into(), json!(f));
+            }
+            if !b.args.is_empty() {
+                bm.insert("args".into(), json!(b.args));
+            }
+            o.insert("build".into(), Value::Object(bm));
+        }
+        if !s.command.is_empty() {
+            o.insert("command".into(), json!(s.command));
+        }
+        if !s.env.is_empty() {
+            let mut env = Map::new();
+            for (k, v) in &s.env {
+                env.insert(k.clone(), json!(v));
+            }
+            o.insert("environment".into(), Value::Object(env));
+        }
+        if !s.spec.publish.is_empty() {
+            o.insert("ports".into(), json!(s.spec.publish));
+        }
+        let vols: Vec<String> = s
+            .spec
+            .mounts
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}:{}{}",
+                    m.host.display(),
+                    m.guest,
+                    if m.read_only { ":ro" } else { "" }
+                )
+            })
+            .collect();
+        if !vols.is_empty() {
+            o.insert("volumes".into(), json!(vols));
+        }
+        for (kind, key) in [
+            (cfg::FileKind::Secret, "secrets"),
+            (cfg::FileKind::Config, "configs"),
+        ] {
+            let list: Vec<Value> = s
+                .files
+                .iter()
+                .filter(|f| f.kind == kind)
+                .map(|f| json!({"source": f.name, "file": f.source, "target": f.target}))
+                .collect();
+            if !list.is_empty() {
+                o.insert(key.into(), Value::Array(list));
+            }
+        }
+        if let Some(w) = &s.workdir {
+            o.insert("working_dir".into(), json!(w));
+        }
+        if !s.depends_on.is_empty() {
+            let mut d = Map::new();
+            for dep in &s.depends_on {
+                let cond = if s.healthy_deps.contains(dep) {
+                    "service_healthy"
+                } else {
+                    "service_started"
+                };
+                d.insert(dep.clone(), json!({"condition": cond}));
+            }
+            o.insert("depends_on".into(), Value::Object(d));
+        }
+        if !s.spec.labels.is_empty() {
+            let mut l = Map::new();
+            for (k, v) in &s.spec.labels {
+                l.insert(k.clone(), json!(v));
+            }
+            o.insert("labels".into(), Value::Object(l));
+        }
+        if let Some(rs) = s.spec.restart {
+            o.insert("restart".into(), json!(rs.as_str()));
+        }
+        if let Some(c) = s.spec.cpus {
+            o.insert("cpus".into(), json!(c));
+        }
+        if let Some(m) = s.spec.memory_mib {
+            o.insert("mem_limit".into(), json!(format!("{m}m")));
+        }
+        if let Some(u) = &s.user {
+            o.insert("user".into(), json!(u));
+        }
+        services.insert(s.service.clone(), Value::Object(o));
+    }
+    let doc = json!({"name": r.project, "services": services});
+    Ok(if json {
+        format!("{}\n", serde_json::to_string_pretty(&doc)?)
+    } else {
+        serde_yaml::to_string(&doc)?
+    })
+}
+
+/// The instance names for stop/start/top: the named services (all when none), in start order (reversed with `reverse`), keeping
+/// the ones whose status `keep` accepts. A named service with no instance is an error that says how to create it.
+fn pick_instances(
+    vms: &[serde_json::Value],
+    project: &str,
+    services: &[String],
+    order: &[String],
+    reverse: bool,
+    keep: impl Fn(&str) -> bool,
+) -> Result<Vec<String>> {
+    let svc_of = |v: &serde_json::Value| v["labels"][SERVICE_LABEL].as_str().map(str::to_string);
+    for s in services {
+        ensure!(
+            vms.iter().any(|v| svc_of(v).as_deref() == Some(s)),
+            "service {s:?} has no instance in project {project:?} (known: {}); `fluxctl mac compose up` creates them",
+            vms.iter().filter_map(svc_of).collect::<Vec<_>>().join(", ")
+        );
+    }
+    let mut picked: Vec<(usize, String)> = vms
+        .iter()
+        .filter(|v| services.is_empty() || svc_of(v).is_some_and(|s| services.contains(&s)))
+        .filter(|v| keep(crate::mac_inspect::status(v)))
+        .filter_map(|v| {
+            let name = v["name"].as_str()?.to_string();
+            let pos = svc_of(v)
+                .and_then(|s| order.iter().position(|o| *o == s))
+                .unwrap_or(usize::MAX);
+            Some((pos, name))
+        })
+        .collect();
+    picked.sort();
+    if reverse {
+        picked.reverse();
+    }
+    Ok(picked.into_iter().map(|(_, n)| n).collect())
+}
+
+/// The 2-VM limit as it applies right now: `adding` more macOS VMs on top of those that hold a slot (running or paused).
+fn check_slots(all: &[serde_json::Value], adding: usize, what: &str) -> Result<()> {
+    let used = all
+        .iter()
+        .filter(|v| crate::mac_inspect::visible_by_default(v))
+        .count();
+    ensure!(
+        used + adding <= MAX_SERVICES,
+        "cannot {what}: it needs {adding} macOS VM slot(s) but {used} of {MAX_SERVICES} are in use (a Mac runs at most {MAX_SERVICES} macOS guests at once: Apple's licence). Free one with `fluxctl mac compose stop SERVICE` or `fluxctl mac stop NAME` (see `fluxctl mac ps -a`), then retry"
+    );
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProjectRow {
+    name: String,
+    running: usize,
+    stopped: usize,
+    services: Vec<String>,
+}
+
+impl ProjectRow {
+    /// `running(2)`, `exited(1)` or both, as Docker prints it.
+    fn status(&self) -> String {
+        let mut p = Vec::new();
+        if self.running > 0 {
+            p.push(format!("running({})", self.running));
+        }
+        if self.stopped > 0 {
+            p.push(format!("exited({})", self.stopped));
+        }
+        p.join(", ")
+    }
+}
+
+/// Group instances by project. Without `all`, a project whose instances are all stopped is left out.
+fn project_rows(vms: &[serde_json::Value], all: bool) -> Vec<ProjectRow> {
+    let mut m: BTreeMap<String, ProjectRow> = BTreeMap::new();
+    for v in vms {
+        let Some(p) = v["labels"][PROJECT_LABEL].as_str() else {
+            continue;
+        };
+        let row = m.entry(p.to_string()).or_insert_with(|| ProjectRow {
+            name: p.to_string(),
+            running: 0,
+            stopped: 0,
+            services: vec![],
+        });
+        if crate::mac_inspect::visible_by_default(v) {
+            row.running += 1;
+        } else {
+            row.stopped += 1;
+        }
+        if let Some(s) = v["labels"][SERVICE_LABEL].as_str() {
+            row.services.push(s.to_string());
+        }
+    }
+    m.into_values()
+        .filter(|r| all || r.running > 0)
+        .map(|mut r| {
+            r.services.sort();
+            r
+        })
+        .collect()
+}
+
+fn render_projects(rows: &[ProjectRow]) -> String {
+    let mut out = format!("{:<24}  {:<24}  SERVICES\n", "NAME", "STATUS");
+    for r in rows {
+        out.push_str(&format!(
+            "{:<24}  {:<24}  {}\n",
+            r.name,
+            r.status(),
+            r.services.join(", ")
+        ));
+    }
+    out
+}
+
+/// The `compose cp` argument with the service name replaced by its instance name; a local path stays as it is.
+fn cp_argument(arg: &str, instances: &BTreeMap<String, String>, project: &str) -> Result<String> {
+    match crate::mac_cp::parse_endpoint(arg)? {
+        crate::mac_cp::Endpoint::Local(_) => Ok(arg.to_string()),
+        crate::mac_cp::Endpoint::Guest { name, path } => {
+            let inst = instances.get(&name).with_context(|| {
+                format!(
+                    "service {name:?} has no instance in project {project:?} (known: {}); `fluxctl mac compose up` creates them",
+                    instances.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            })?;
+            Ok(format!("{inst}:{path}"))
+        }
+    }
+}
+
+/// `command` with the link commands for custom secret and config targets in front of it.
+fn with_links(command: Option<String>, links: &[(String, String)]) -> Option<String> {
+    let pre = cfg::link_prefix(links);
+    match (command, pre.is_empty()) {
+        (c, true) => c,
+        (Some(c), false) => Some(format!("{pre}{c}")),
+        (None, false) => Some(pre.trim_end_matches("; ").to_string()),
+    }
+}
+
+/// The one-off VM `compose run` makes: the service's spec without published ports or restart policy. It is labelled as part of
+/// the project (service `SERVICE-run-SUFFIX`), so `compose ps -a` shows it and `compose down` removes it.
+fn oneoff_spec(project: &str, s: &ServicePlan, suffix: &str) -> LaunchSpec {
+    let mut spec = s.spec.clone();
+    spec.name = format!("{project}-{}-run-{suffix}", s.service);
+    spec.publish = vec![];
+    spec.restart = None;
+    spec.project = Some((project.to_string(), format!("{}-run-{suffix}", s.service)));
+    spec
+}
+
+/// `compose run` does not start dependencies (that would break the 2-VM limit): each must already run.
+fn check_deps_running(
+    existing: &[serde_json::Value],
+    s: &ServicePlan,
+    project: &str,
+) -> Result<()> {
+    for d in &s.depends_on {
+        let up = existing.iter().any(|v| {
+            v["labels"][SERVICE_LABEL].as_str() == Some(d)
+                && crate::mac_inspect::status(v) == "running"
+        });
+        ensure!(
+            up,
+            "service {:?} depends_on {d:?}, which is not running in project {project:?}. `compose run` does not start dependencies (that would break the two-VM limit): run `fluxctl mac compose up` or `compose start {d}` first",
+            s.service
+        );
+    }
+    Ok(())
 }
 
 async fn project_instances(
@@ -802,6 +1558,9 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             health_timeout,
             profile,
         } => {
+            // `--wait` is docker's spelling of `--wait-healthy`; its optional value is the SSH wait.
+            let wait_healthy = wait_healthy || wait.is_some();
+            let wait = wait.unwrap_or(900);
             let plan = load_with(file, project.as_deref(), &profiles_from_env(&profile))?;
             ensure!(!dry_run, "internal: dry-run is client side");
             let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
@@ -850,9 +1609,20 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 }
                 eprintln!("starting {} ...", s.spec.name);
                 let cfg = mac_config::load(&store.resolve(&s.spec.image)?)?;
-                let command =
-                    mac_config::effective_command(&cfg, &s.command, &s.env, s.workdir.as_deref());
-                let id = match launch(r, &store, &s.spec).await {
+                let mut spec = s.spec.clone();
+                let staged = cfg::stage_files(
+                    &cfg::stage_root(),
+                    &plan.project,
+                    &s.service,
+                    &s.files,
+                    spec.mounts.len(),
+                )?;
+                spec.mounts.extend(staged.mounts);
+                let command = with_links(
+                    mac_config::effective_command(&cfg, &s.command, &s.env, s.workdir.as_deref()),
+                    &staged.links,
+                );
+                let id = match launch(r, &store, &spec).await {
                     Ok(id) => id,
                     Err(e) => {
                         if !started.is_empty() {
@@ -878,7 +1648,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 )
                 .await
                 .with_context(|| format!("could not record the owner of {}", s.spec.name))?;
-                if command.is_some() || s.has_dependents || !s.spec.mounts.is_empty() {
+                if command.is_some() || s.has_dependents || !spec.mounts.is_empty() {
                     let job = GuestJob {
                         user: s
                             .user
@@ -887,7 +1657,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                             .unwrap_or_else(|| crate::mac_build_exec::DEFAULT_USER.into()),
                         wait,
                         command,
-                        mounts: s.spec.mounts.clone(),
+                        mounts: spec.mounts.clone(),
                         detach: true,
                     };
                     run_in_guest(r, &id, &job)
@@ -919,7 +1689,12 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             let (project, mut order) = load_existing(file.clone(), project.as_deref())?;
             order.reverse();
             let mut vms = project_instances(r, &project).await?;
-            ensure!(!vms.is_empty(), "no instances for project {project:?}");
+            // Staged secrets and configs go with the project.
+            std::fs::remove_dir_all(cfg::stage_root().join(&project)).ok();
+            ensure!(
+                !vms.is_empty(),
+                "no instances for project {project:?}; see the projects on this Mac with `fluxctl mac compose ls -a`"
+            );
             vms.sort_by_key(|v| {
                 order
                     .iter()
@@ -975,6 +1750,201 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             );
             crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Restart { names }).await
         }
+        ComposeCommand::Stop { services, t } => {
+            let (project, order) = load_existing(t.file, t.project.as_deref())?;
+            let vms = project_instances(r, &project).await?;
+            let names = pick_instances(&vms, &project, &services, &order, true, |st| {
+                matches!(st, "running" | "paused")
+            })?;
+            if names.is_empty() {
+                println!("nothing to stop: no instance of project {project:?} is running");
+                return Ok(());
+            }
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Stop { names }).await
+        }
+        ComposeCommand::Start { services, t } => {
+            let (project, order) = load_existing(t.file, t.project.as_deref())?;
+            let vms = project_instances(r, &project).await?;
+            let names = pick_instances(&vms, &project, &services, &order, false, |st| {
+                matches!(st, "stopped" | "failed")
+            })?;
+            if names.is_empty() {
+                println!("nothing to start: no instance of project {project:?} is stopped");
+                return Ok(());
+            }
+            let all = r.list_vms(Some(crate::mac_cmd::INSTANCE_SELECTOR)).await?;
+            check_slots(&all, names.len(), "start the stopped instances")?;
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Start { names }).await
+        }
+        ComposeCommand::Ls { all, quiet, json } => {
+            let vms = r.list_vms(Some(crate::mac_cmd::INSTANCE_SELECTOR)).await?;
+            let rows = project_rows(&vms, all);
+            if json {
+                let doc: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|p| serde_json::json!({"name": p.name, "status": p.status(), "services": p.services}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&doc)?);
+            } else if quiet {
+                for p in &rows {
+                    println!("{}", p.name);
+                }
+            } else if rows.is_empty() {
+                println!(
+                    "no compose projects are running on this Mac (`-a` includes stopped ones; `fluxctl mac compose up` starts one)"
+                );
+            } else {
+                print!("{}", render_projects(&rows));
+            }
+            Ok(())
+        }
+        ComposeCommand::Top {
+            services,
+            t,
+            user,
+            ps_args,
+        } => {
+            let (project, order) = load_existing(t.file, t.project.as_deref())?;
+            let vms = project_instances(r, &project).await?;
+            let names = pick_instances(&vms, &project, &services, &order, false, |st| {
+                st == "running"
+            })?;
+            ensure!(
+                !names.is_empty(),
+                "no instance of project {project:?} is running; `fluxctl mac compose start` or `compose up`"
+            );
+            for n in names {
+                println!("{n}");
+                crate::mac_more::run_daemon(
+                    r,
+                    crate::mac_more::MacMore::Top {
+                        name: n,
+                        user: user.clone(),
+                        ps_args: ps_args.clone(),
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        ComposeCommand::Cp { src, dst, t, user } => {
+            let (project, _) = load_existing(t.file, t.project.as_deref())?;
+            let vms = project_instances(r, &project).await?;
+            let by_service: BTreeMap<String, String> = vms
+                .iter()
+                .filter_map(|v| {
+                    Some((
+                        v["labels"][SERVICE_LABEL].as_str()?.to_string(),
+                        v["name"].as_str()?.to_string(),
+                    ))
+                })
+                .collect();
+            let (src, dst) = (
+                cp_argument(&src, &by_service, &project)?,
+                cp_argument(&dst, &by_service, &project)?,
+            );
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Cp { src, dst, user }).await
+        }
+        ComposeCommand::Run {
+            service,
+            t,
+            rm,
+            env,
+            workdir,
+            user,
+            ssh_timeout,
+            cmd,
+        } => {
+            let plan = load_with(t.file, t.project.as_deref(), &["*".to_string()])?;
+            let s = plan
+                .services
+                .iter()
+                .find(|s| s.service == service)
+                .with_context(|| {
+                    format!(
+                        "no service {service:?} in the compose file (services: {})",
+                        plan.services
+                            .iter()
+                            .map(|s| s.service.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+            let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+            let cfg_img = mac_config::load(&store.resolve(&s.spec.image).with_context(|| {
+                format!(
+                    "service {service:?}: image {} is not in the store; `fluxctl mac compose pull`, or `compose up` builds a `build:` service",
+                    s.spec.image
+                )
+            })?)?;
+            let all = r.list_vms(Some(crate::mac_cmd::INSTANCE_SELECTOR)).await?;
+            check_slots(
+                &all,
+                1,
+                &format!("run a one-off VM for service {service:?}"),
+            )?;
+            check_deps_running(
+                &project_instances(r, &plan.project).await?,
+                s,
+                &plan.project,
+            )?;
+            let suffix = format!("{:x}", crate::mac_health::now_unix() % 0xfffff);
+            let mut spec = oneoff_spec(&plan.project, s, &suffix);
+            let staged = cfg::stage_files(
+                &cfg::stage_root(),
+                &plan.project,
+                &format!("{service}-run-{suffix}"),
+                &s.files,
+                spec.mounts.len(),
+            )?;
+            spec.mounts.extend(staged.mounts);
+            let mut envs = s.env.clone();
+            envs.extend(crate::mac_instance::collect_env(&env, &[], |k| {
+                std::env::var(k).ok()
+            })?);
+            let args = if cmd.is_empty() {
+                s.command.clone()
+            } else {
+                cmd
+            };
+            let command = mac_config::effective_command(
+                &cfg_img,
+                &args,
+                &envs,
+                workdir.as_deref().or(s.workdir.as_deref()),
+            );
+            ensure!(
+                command.is_some(),
+                "service {service:?} has no `command:` and the image has no CMD: say what to run, `fluxctl mac compose run {service} -- CMD`"
+            );
+            let command = with_links(command, &staged.links);
+            eprintln!("starting one-off {} ...", spec.name);
+            let id = launch(r, &store, &spec).await?;
+            let job = GuestJob {
+                user: user
+                    .or(s.user.clone())
+                    .or(cfg_img.user.clone())
+                    .unwrap_or_else(|| crate::mac_build_exec::DEFAULT_USER.into()),
+                wait: ssh_timeout,
+                command,
+                mounts: spec.mounts.clone(),
+                detach: false,
+            };
+            let result = run_in_guest(r, &id, &job).await;
+            if rm {
+                crate::mac_cmd::delete_instance(r, &id).await.ok();
+            } else {
+                eprintln!(
+                    "the one-off VM {} is still running (`fluxctl mac rm {}`, or `compose down` removes it)",
+                    spec.name, spec.name
+                );
+            }
+            result.map(|_| ())
+        }
+        ComposeCommand::Config { .. }
+        | ComposeCommand::Images { .. }
+        | ComposeCommand::Pull { .. }
+        | ComposeCommand::Push { .. } => run_client(cmd),
         ComposeCommand::Ps { file, project, all } => {
             let (project, _) = load_existing(file, project.as_deref())?;
             let vms = project_instances(r, &project).await?;
@@ -1303,7 +2273,7 @@ mod tests {
         let up = |dry_run| ComposeCommand::Up {
             file: None,
             project: None,
-            wait: 1,
+            wait: Some(1),
             dry_run,
             build: false,
             no_build: false,
@@ -1320,5 +2290,506 @@ mod tests {
             }
             .is_client_side()
         );
+    }
+
+    // ---- the Docker Compose parity commands and file features ---------------------------------------------------------
+
+    fn parse_cmd(a: &[&str]) -> std::result::Result<ComposeCommand, clap::Error> {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            c: ComposeCommand,
+        }
+        T::try_parse_from(std::iter::once("t").chain(a.iter().copied())).map(|t| t.c)
+    }
+
+    #[test]
+    fn wait_is_dockers_spelling_of_wait_healthy_and_keeps_its_ssh_seconds() {
+        let ComposeCommand::Up { wait, .. } = parse_cmd(&["up", "--wait"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(wait, Some(900), "bare --wait");
+        let ComposeCommand::Up { wait, .. } = parse_cmd(&["up", "--wait", "30"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(wait, Some(30), "the old `--wait SECS` still parses");
+        let ComposeCommand::Up {
+            wait,
+            health_timeout,
+            ..
+        } = parse_cmd(&["up", "--wait-timeout", "7"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((wait, health_timeout), (None, 7));
+        let ComposeCommand::Up { wait, .. } = parse_cmd(&["up"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(wait, None);
+    }
+
+    #[test]
+    fn the_parity_commands_parse() {
+        use ComposeCommand as C;
+        assert!(matches!(
+            parse_cmd(&["config", "--quiet", "--format", "json", "--profile", "x"]).unwrap(),
+            C::Config { quiet: true, ref format, .. } if format == "json"
+        ));
+        assert!(parse_cmd(&["config", "--format", "toml"]).is_err());
+        assert!(
+            matches!(parse_cmd(&["stop", "a", "b"]).unwrap(), C::Stop { services, .. } if services == ["a", "b"])
+        );
+        assert!(matches!(parse_cmd(&["start"]).unwrap(), C::Start { .. }));
+        assert!(matches!(
+            parse_cmd(&["images", "-q"]).unwrap(),
+            C::Images { quiet: true, .. }
+        ));
+        assert!(matches!(
+            parse_cmd(&["pull", "db", "--verify"]).unwrap(),
+            C::Pull { verify: true, .. }
+        ));
+        assert!(matches!(
+            parse_cmd(&["push", "--sign", "--i-have-checked-the-licence"]).unwrap(),
+            C::Push {
+                sign: true,
+                licence_override: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_cmd(&["ls", "-a", "--json"]).unwrap(),
+            C::Ls {
+                all: true,
+                json: true,
+                ..
+            }
+        ));
+        assert!(parse_cmd(&["ls", "-q", "--json"]).is_err());
+        let C::Run {
+            service,
+            rm,
+            env,
+            workdir,
+            user,
+            cmd,
+            ..
+        } = parse_cmd(&[
+            "run", "--rm", "-e", "A=1", "-e", "B", "-w", "/src", "-u", "me", "tests", "--", "make",
+            "test",
+        ])
+        .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((service.as_str(), rm), ("tests", true));
+        assert_eq!(env, ["A=1", "B"]);
+        assert_eq!(
+            (workdir.as_deref(), user.as_deref()),
+            (Some("/src"), Some("me"))
+        );
+        assert_eq!(cmd, ["make", "test"]);
+        assert!(
+            matches!(parse_cmd(&["top", "db", "--", "aux"]).unwrap(), C::Top { ps_args, .. } if ps_args == ["aux"])
+        );
+        assert!(matches!(
+            parse_cmd(&["cp", "./a", "db:/b", "-p", "ci"]).unwrap(),
+            C::Cp { .. }
+        ));
+        assert!(parse_cmd(&["cp", "only-one"]).is_err());
+        assert!(parse_cmd(&["run"]).is_err());
+    }
+
+    #[test]
+    fn config_pull_push_and_images_are_client_side_and_the_rest_need_the_daemon() {
+        for (a, client) in [
+            (vec!["config"], true),
+            (vec!["images"], true),
+            (vec!["pull"], true),
+            (vec!["push"], true),
+            (vec!["stop"], false),
+            (vec!["start"], false),
+            (vec!["ls"], false),
+            (vec!["run", "x"], false),
+            (vec!["top"], false),
+            (vec!["cp", "a", "b:/c"], false),
+        ] {
+            assert_eq!(parse_cmd(&a).unwrap().is_client_side(), client, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn every_parity_command_help_has_an_example() {
+        use clap::CommandFactory;
+        #[derive(clap::Parser)]
+        struct T {
+            #[command(subcommand)]
+            c: ComposeCommand,
+        }
+        let mut cmd = T::command();
+        for sub in [
+            "up", "config", "stop", "start", "images", "pull", "push", "ls", "run", "top", "cp",
+        ] {
+            let help = cmd
+                .find_subcommand_mut(sub)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains("Example") && help.contains("fluxctl mac compose"),
+                "{sub}: {help}"
+            );
+        }
+    }
+
+    fn vm(name: &str, status: &str, project: &str, service: &str) -> serde_json::Value {
+        serde_json::json!({"name": name, "status": status, "labels": {PROJECT_LABEL: project, SERVICE_LABEL: service}})
+    }
+
+    #[test]
+    fn stop_and_start_pick_instances_in_dependency_order() {
+        let vms = [
+            vm("ci-db", "running", "ci", "db"),
+            vm("ci-tests", "running", "ci", "tests"),
+        ];
+        let order = ["db".to_string(), "tests".to_string()];
+        let running = |st: &str| st == "running";
+        assert_eq!(
+            pick_instances(&vms, "ci", &[], &order, true, running).unwrap(),
+            ["ci-tests", "ci-db"]
+        );
+        assert_eq!(
+            pick_instances(&vms, "ci", &[], &order, false, running).unwrap(),
+            ["ci-db", "ci-tests"]
+        );
+        assert_eq!(
+            pick_instances(&vms, "ci", &["db".into()], &order, true, running).unwrap(),
+            ["ci-db"]
+        );
+        let stopped = [vm("ci-db", "stopped", "ci", "db")];
+        assert!(
+            pick_instances(&stopped, "ci", &[], &order, true, running)
+                .unwrap()
+                .is_empty()
+        );
+        let e = pick_instances(&vms, "ci", &["nope".into()], &order, true, running)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("\"nope\"") && e.contains("db") && e.contains("compose up"),
+            "{e}"
+        );
+        assert_eq!(
+            crate::mac_errors::hint_for(&e).map(|c| c.code),
+            Some("MAC_COMPOSE_NOT_UP")
+        );
+    }
+
+    #[test]
+    fn the_two_vm_limit_is_checked_before_run_and_start_and_maps_to_the_slot_code() {
+        let two = [vm("a", "running", "p", "a"), vm("b", "paused", "p", "b")];
+        let e = check_slots(&two, 1, "run a one-off VM")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("2 of 2 are in use") && e.contains("compose stop"),
+            "{e}"
+        );
+        assert_eq!(
+            crate::mac_errors::hint_for(&e).map(|c| c.code),
+            Some("MAC_SLOT_LIMIT")
+        );
+        let one = [vm("a", "running", "p", "a"), vm("b", "stopped", "p", "b")];
+        assert!(check_slots(&one, 1, "x").is_ok());
+        assert!(check_slots(&one, 2, "x").is_err());
+    }
+
+    #[test]
+    fn ls_groups_instances_by_project_and_hides_stopped_projects_by_default() {
+        let vms = [
+            vm("ci-db", "running", "ci", "db"),
+            vm("ci-tests", "stopped", "ci", "tests"),
+            vm("old-a", "stopped", "old", "a"),
+            serde_json::json!({"name": "loose", "status": "running", "labels": {}}),
+        ];
+        let rows = project_rows(&vms, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status(), "running(1), exited(1)");
+        assert_eq!(rows[0].services, ["db", "tests"]);
+        let all = project_rows(&vms, true);
+        assert_eq!(
+            all.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["ci", "old"]
+        );
+        assert_eq!(all[1].status(), "exited(1)");
+        let t = render_projects(&all);
+        assert!(
+            t.starts_with("NAME") && t.contains("running(1), exited(1)"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn cp_rewrites_the_service_to_its_instance_and_leaves_local_paths() {
+        let m = BTreeMap::from([("web".to_string(), "ci-web".to_string())]);
+        assert_eq!(
+            cp_argument("web:/etc/x", &m, "ci").unwrap(),
+            "ci-web:/etc/x"
+        );
+        assert_eq!(cp_argument("./local", &m, "ci").unwrap(), "./local");
+        assert_eq!(cp_argument("/abs/file", &m, "ci").unwrap(), "/abs/file");
+        let e = cp_argument("db:/x", &m, "ci").unwrap_err().to_string();
+        assert!(
+            e.contains("\"db\"") && e.contains("known: web") && e.contains("compose up"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_one_off_run_is_unpublished_unrestarted_labelled_into_the_project_and_needs_its_dependencies_running()
+     {
+        let r = res("name: ci\nservices:\n  db:\n    image: pg:16\n  tests:\n    image: x:1\n    ports: ['8080:80']\n    restart: always\n    depends_on: [db]\n").unwrap();
+        let tests = r.services.iter().find(|s| s.service == "tests").unwrap();
+        let spec = oneoff_spec("ci", tests, "ab12");
+        assert_eq!(spec.name, "ci-tests-run-ab12");
+        assert!(spec.publish.is_empty() && spec.restart.is_none());
+        assert_eq!(spec.project, Some(("ci".into(), "tests-run-ab12".into())));
+        assert_eq!(
+            tests.spec.publish,
+            ["8080:80"],
+            "the service itself is untouched"
+        );
+        let e = check_deps_running(&[], tests, "ci")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("\"db\"")
+                && e.contains("does not start dependencies")
+                && e.contains("compose up"),
+            "{e}"
+        );
+        assert_eq!(
+            crate::mac_errors::hint_for(&e).map(|c| c.code),
+            Some("MAC_COMPOSE_NOT_UP")
+        );
+        assert!(check_deps_running(&[vm("ci-db", "running", "ci", "db")], tests, "ci").is_ok());
+        assert!(check_deps_running(&[vm("ci-db", "stopped", "ci", "db")], tests, "ci").is_err());
+    }
+
+    #[test]
+    fn link_prefix_goes_in_front_of_the_command_or_stands_alone() {
+        let l = [(
+            "/Volumes/My Shared Files/fs1/app".to_string(),
+            "/etc/app".to_string(),
+        )];
+        let c = with_links(Some("./run".into()), &l).unwrap();
+        assert!(c.contains("ln -sfn") && c.ends_with("; ./run"), "{c}");
+        let alone = with_links(None, &l).unwrap();
+        assert!(alone.ends_with("}") && !alone.ends_with("; "), "{alone}");
+        assert_eq!(with_links(Some("x".into()), &[]).as_deref(), Some("x"));
+        assert_eq!(with_links(None, &[]), None);
+    }
+
+    #[test]
+    fn pull_and_push_targets_skip_or_include_built_only_services() {
+        let r = res(
+            "name: ci\nservices:\n  app:\n    build: ./app\n  db:\n    image: ghcr.io/acme/pg:16\n",
+        )
+        .unwrap();
+        let pull = image_targets(&r, &[], false).unwrap();
+        assert_eq!(
+            pull,
+            [("db".to_string(), "ghcr.io/acme/pg:16".to_string(), false)]
+        );
+        let push = image_targets(&r, &[], true).unwrap();
+        assert_eq!(push.len(), 2);
+        assert!(
+            push.iter()
+                .any(|(s, i, b)| s == "app" && i == "ci-app:latest" && *b)
+        );
+        let e = image_targets(&r, &["zzz".into()], false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("\"zzz\"") && e.contains("app, db"), "{e}");
+        let e = image_targets(&r, &["app".into()], false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("built locally"), "{e}");
+    }
+
+    #[test]
+    fn images_lists_the_store_digest_and_marks_missing_images() {
+        let r = res(
+            "services:\n  db:\n    image: ghcr.io/acme/pg:16\n  web:\n    image: macos-web:1\n",
+        )
+        .unwrap();
+        let store = vec![(
+            crate::mac_store::normalize("ghcr.io/acme/pg:16").unwrap(),
+            crate::mac_store::Entry {
+                dir: "abc".into(),
+                digest: "sha256:0123456789abcdef0123".into(),
+                source: "x".into(),
+                added_unix: 0,
+            },
+        )];
+        let rows = image_rows(&r, &store, Path::new("/nonexistent"));
+        assert_eq!(rows[0].id, "0123456789ab");
+        assert_eq!(rows[1].id, "-");
+        let t = render_images(&rows);
+        assert!(
+            t.starts_with("SERVICE") && t.contains("not in the local store"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn config_prints_the_resolved_file_as_yaml_and_json() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.env"), "A=1\n").unwrap();
+        std::fs::write(d.path().join("tok"), "t").unwrap();
+        let y = "name: ci\nsecrets:\n  tok: {file: ./tok}\nservices:\n  db:\n    image: pg:16\n  tests:\n    image: x:1\n    env_file: a.env\n    environment: {B: '2'}\n    depends_on:\n      db: {condition: service_healthy}\n    mem_limit: 2g\n    secrets: [tok]\n";
+        let r = resolve(&parse(y).unwrap(), None, d.path(), None, |_| None).unwrap();
+        let json = render_config(&r, true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "ci");
+        let t = &v["services"]["tests"];
+        assert_eq!(
+            t["environment"],
+            serde_json::json!({"A": "1", "B": "2"}),
+            "env_file is merged in"
+        );
+        assert_eq!(t["depends_on"]["db"]["condition"], "service_healthy");
+        assert_eq!(t["mem_limit"], "2048m");
+        assert_eq!(t["secrets"][0]["target"], "/private/var/run/secrets/tok");
+        let yaml = render_config(&r, false).unwrap();
+        assert!(
+            yaml.contains("services:") && yaml.contains("service_healthy"),
+            "{yaml}"
+        );
+        assert!(serde_yaml::from_str::<serde_yaml::Value>(&yaml).is_ok());
+    }
+
+    #[test]
+    fn env_file_list_and_required_false_forms() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.env"), "A=1\n").unwrap();
+        let go = |y: &str| resolve(&parse(y).unwrap(), None, d.path(), None, |_| None);
+        let r = go("services:\n  a:\n    image: x\n    env_file:\n      - a.env\n      - path: nope.env\n        required: false\n").unwrap();
+        assert_eq!(r.services[0].env, [("A".to_string(), "1".to_string())]);
+        let e = format!(
+            "{:#}",
+            go("services:\n  a:\n    image: x\n    env_file:\n      - path: nope.env\n")
+                .unwrap_err()
+        );
+        assert!(
+            e.contains("nope.env") && e.contains("required: false"),
+            "{e}"
+        );
+        assert_eq!(
+            crate::mac_errors::hint_for(&e).map(|c| c.code),
+            Some("MAC_COMPOSE_FILE_MISSING")
+        );
+        let e = format!("{:#}", go("services:\n  a:\n    image: x\n    env_file:\n      - path: a.env\n        format: json\n").unwrap_err());
+        assert!(e.contains("format") && e.contains("not supported"), "{e}");
+    }
+
+    #[test]
+    fn secrets_and_configs_become_file_mounts_and_bad_ones_are_refused() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("tok"), "t").unwrap();
+        std::fs::write(d.path().join("app.conf"), "c").unwrap();
+        let go = |y: &str| resolve(&parse(y).unwrap(), None, d.path(), None, |_| None);
+        let r = go("secrets:\n  tok: {file: tok}\nconfigs:\n  app: {file: app.conf}\nservices:\n  a:\n    image: x\n    secrets: [tok]\n    configs:\n      - source: app\n        target: /etc/app.conf\n").unwrap();
+        let f = &r.services[0].files;
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].kind, cfg::FileKind::Secret);
+        assert_eq!(f[1].target, "/etc/app.conf");
+        for (y, needle) in [
+            (
+                "secrets:\n  t: {external: true}\nservices:\n  a: {image: x, secrets: [t]}\n",
+                "external",
+            ),
+            (
+                "secrets:\n  t: {environment: X}\nservices:\n  a: {image: x, secrets: [t]}\n",
+                "environment",
+            ),
+            (
+                "services:\n  a: {image: x, secrets: [ghost]}\n",
+                "does not define",
+            ),
+            (
+                "secrets:\n  t: {file: missing}\nservices:\n  a: {image: x, secrets: [t]}\n",
+                "does not exist",
+            ),
+            (
+                "secrets:\n  t: {file: tok}\nservices:\n  a:\n    image: x\n    secrets:\n      - source: t\n        mode: 0400\n",
+                "mode",
+            ),
+        ] {
+            let e = format!("{:#}", go(y).unwrap_err());
+            assert!(e.contains(needle), "{needle}: {e}");
+            assert!(
+                crate::mac_errors::hint_for(&e).is_some(),
+                "no explain code for: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsupported_key_is_named_with_what_to_do_and_maps_to_its_code() {
+        let e = format!(
+            "{:#}",
+            res("services:\n  a:\n    image: x\n    networks: [n]\n").unwrap_err()
+        );
+        assert!(e.contains("`networks`") && e.contains("remove it"), "{e}");
+        assert_eq!(
+            crate::mac_errors::hint_for(&e).map(|c| c.code),
+            Some("MAC_COMPOSE_KEY_UNSUPPORTED")
+        );
+        let e = format!("{:#}", res("name: x\n").unwrap_err());
+        assert!(e.contains("services:"), "{e}");
+    }
+
+    #[test]
+    fn extension_keys_version_and_merge_keys_are_accepted() {
+        let r = res("version: '3.9'\nx-base: &b\n  image: x:1\nservices:\n  a:\n    <<: *b\n    x-note: hi\n").unwrap();
+        assert_eq!(r.services[0].spec.image, "x:1");
+    }
+
+    #[test]
+    fn a_whole_project_with_include_extends_dotenv_and_interpolation_resolves() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |n: &str, t: &str| {
+            let p = d.path().join(n);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, t).unwrap();
+        };
+        w(".env", "TAG=16\n");
+        w(
+            "db/db.yaml",
+            "services:\n  db:\n    image: pg:${TAG}\n    volumes: ['./data:/var/db']\n",
+        );
+        w("base.yaml", "services:\n  base:\n    image: x:${VER:-1}\n");
+        w(
+            "main.yaml",
+            "name: ci\ninclude: [db/db.yaml]\nservices:\n  tests:\n    extends:\n      service: base\n      file: base.yaml\n    command: ['go']\n    depends_on: [db]\n",
+        );
+        std::fs::create_dir_all(d.path().join("db/data")).unwrap();
+        let lookup = cfg::lookup_with_dotenv(d.path(), |_| None);
+        let lk: &dyn Fn(&str) -> Option<String> = &*lookup;
+        let top = cfg::load_tree(&d.path().join("main.yaml"), lk, &mut vec![]).unwrap();
+        let f = from_value(serde_yaml::Value::Mapping(top)).unwrap();
+        let r = resolve_with(&f, None, d.path(), None, lk, &[]).unwrap();
+        let names: Vec<&str> = r.services.iter().map(|s| s.service.as_str()).collect();
+        assert_eq!(
+            names,
+            ["db", "tests"],
+            "extended base is not a service of its own"
+        );
+        assert_eq!(r.services[0].spec.image, "pg:16");
+        assert_eq!(r.services[0].spec.mounts[0].host, d.path().join("db/data"));
+        assert_eq!(r.services[1].spec.image, "x:1");
+        assert_eq!(r.services[1].command, ["go"]);
+        assert_eq!(r.services[1].depends_on, ["db"]);
     }
 }
