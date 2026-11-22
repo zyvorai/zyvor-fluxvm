@@ -59,6 +59,7 @@ mod kube_actions;
 mod kube_flows;
 mod kube_metrics;
 mod kube_pod;
+mod kube_gateways;
 mod kube_workloads;
 mod cluster_health;
 mod macos_pool_api;
@@ -976,6 +977,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(kube_workloads::get_workloads),
         )
         .route("/v1/kube/{name}/events", get(kube_workloads::get_events))
+        .route("/v1/kube/{name}/gateways", get(kube_gateways::get_gateways))
         .route(
             "/v1/kube/{name}/pods/{ns}/{pod}/log",
             get(kube_pod::pod_log),
