@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Studio's fleet VM tools against a real vz guest behind a real central: the screen, snapshots (take, restore, delete), a clone from a
 // snapshot, and a command in the guest. Each step is confirmed through the node's own API, not from a toast. Run through

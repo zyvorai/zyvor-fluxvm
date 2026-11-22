@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Image configuration for `fluxctl mac`: what a Macfile's `ENV`, `WORKDIR`, `LABEL`, `EXPOSE`, `CMD`, `ENTRYPOINT` and
 //! `HEALTHCHECK` record, stored as `config.json` next to the template's three files. Pure helpers (shell quoting, `$VAR`

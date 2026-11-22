@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Real-hardware regression test for BackendKind::Auto resolution
 # (fluxvm_scheduler::resolve_backend). Boots actual VMs — it does not just
 # assert on the pure function, which is already covered by unit tests in

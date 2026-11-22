@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # What does one agent sandbox cost on this Mac? For each profile and count, create that many sandboxes on a running
 # daemon, let them idle, and read what the host really holds for them: the runner plus Virtualization XPC service RSS per VM

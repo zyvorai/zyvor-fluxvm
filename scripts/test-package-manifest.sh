@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Tests the manifest checker of scripts/package-linux.sh (`--check-manifest`) with good and bad manifests.
 # Runs on any OS: it never builds anything.
 set -uo pipefail

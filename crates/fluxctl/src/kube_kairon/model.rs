@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Pure functions for `kube kairon`: the pinned release, the `helm` and `kubectl` argument lists, node labels and the Secret
 //! manifests. No I/O here, so every output is pinned by a golden test.

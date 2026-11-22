@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube ps`: one screen that says what the cluster is doing, the way `docker ps` does for containers: its state,
 //! the pods that are failing, the apps and forwards on this Mac, the names that work, and the checkpoints. The gathering is

@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # The Terraform provider for the Mac cloud (terraform-provider-fluxvm), built on the Go fleet client in go/fleet.
 # Its tests drive the provider over the plugin protocol against an in-memory fake central: no Terraform, no Macs.

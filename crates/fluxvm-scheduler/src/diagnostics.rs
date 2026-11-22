@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Incident bundles: one job collects a VM's runtime state (QMP, cgroup and
 //! PSI, console log, network and eBPF state, an optional packet capture) into

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: the per-guest eBPF network routes (`GET /v1/vms/{id}/network/{stats,flows,drops,status}`, `POST .../network/edge`) and backups
 # (`POST /v1/vms/{id}/backup`, `GET /v1/backups`, `DELETE /v1/backups/{name}`, `GET /v1/backups/{name}/root`) on a vz guest. The eBPF datapath is Linux-only,
 # so the stats/flows maps are reported as not pinned (400) while drops and status answer, with `attached:false`; a backup needs QEMU's qcow2 tooling,

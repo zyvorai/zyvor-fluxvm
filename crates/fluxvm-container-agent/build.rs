@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //
 // Sentinel Set 8S/9S: compiles bpf/fluxvm_guest_cgroup.bpf.c and
 // bpf/fluxvm_guest_lsm.bpf.c at `cargo build` time so main.rs can embed the

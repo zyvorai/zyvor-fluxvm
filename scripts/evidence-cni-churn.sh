@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Calico/flannel-shaped CNI churn. Creates and deletes a bridge+veth
 # (Calico workload shape) and a flannel.1 stand-in, ROUNDS times, without

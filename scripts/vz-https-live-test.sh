@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test of HTTPS interception and credential grants for a vz agent session (guest agent, `agent-micro`).
 # TLS is judged per request by the daemon's egress proxy (`egress_tls_intercept`, guest trusts its CA); a session grant injects a header.
 #   scripts/vz-https-live-test.sh /path/to/agent-micro-arm64.raw

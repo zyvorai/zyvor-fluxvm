@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Node-local GuestImage: if `spec.source` is an existing host file, mark
 //! Ready. HTTP sources stay Pending until that file is staged by GuestKit

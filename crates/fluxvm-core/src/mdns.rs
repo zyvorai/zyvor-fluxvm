@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! A small mDNS / DNS-SD announcer and browser, just enough for a machine to find the fleet it should ask to join
 //! (`_fluxvm-pair._tcp.local`). No new dependency: the repo had no mDNS crate, and this needs one service type.

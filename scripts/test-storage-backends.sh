@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Real-hardware regression test for the pluggable storage-provisioning
 # abstraction (fluxvm_core::model::StorageBackend,
 # fluxvm_image::storage). Boots real VMs against two of its three new

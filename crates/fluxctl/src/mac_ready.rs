@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac wait-ready NAME [--timeout S] [--check CMD]`: block until an instance is up, so a caller does not poll SSH
 //! itself. "Up" means the VM is `running`, has an address, and answers on TCP port 22; with `--check CMD`, `CMD` must also

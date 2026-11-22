@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Reading Cirrus Labs' Tart VM images, so `fluxctl vm-image pull` can take the macOS and Linux images people already
 //! publish for Tart (for example `ghcr.io/cirruslabs/macos-…`) and turn them into a FluxVM bundle.

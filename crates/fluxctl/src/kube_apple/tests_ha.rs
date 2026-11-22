@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Tests for the HA control plane, the snapshot schedule, token rotation, node removal, rebuild and doctor, against the same
 //! fake host as the rest of the lifecycle.

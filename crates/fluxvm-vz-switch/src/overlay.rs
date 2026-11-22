@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! One private network across several Macs: the switches of the same network on different hosts form a full mesh and
 //! carry each other's Ethernet frames over UDP, sealed with AES-256-GCM under the network's key.

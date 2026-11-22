@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Build bpf/fluxvm_guest_cgroup.bpf.o (Set 8S) and bpf/fluxvm_guest_lsm.bpf.o
 # (Set 9S) for embedding into fluxvm-container-agent (crates/fluxvm-
 # container-agent/build.rs calls this). No map-tier variants -- guest

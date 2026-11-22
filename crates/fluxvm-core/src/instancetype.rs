@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Instancetypes and preferences, after KubeVirt's `VirtualMachineInstancetype` and
 //! `VirtualMachinePreference`: a named, versioned size class (vCPUs, memory, hugepages, CPU model,

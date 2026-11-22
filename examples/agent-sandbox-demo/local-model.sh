@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # A sandbox with NO network card that still reaches a model server on the Mac: the guest's only way out is one vsock
 # port relayed to 127.0.0.1:PORT on the host (`apple.vsock_services`, `tcp`). The script creates such a sandbox, starts

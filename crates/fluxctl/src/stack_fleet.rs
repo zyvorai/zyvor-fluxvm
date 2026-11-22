@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl up|down|ps --fleet URL`: run a stack on one node of a `fluxvm-agent central` fleet. The whole stack goes
 //! to one node, because its services reach each other through that Mac's NAT gateway. A stack that already has VMs on

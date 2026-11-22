@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac cp`: copy files between this Mac and a running instance, both directions, with `scp -r` over the same SSH
 //! identity handling as `mac exec`. `NAME:/path` is the guest side, as in `docker cp`.

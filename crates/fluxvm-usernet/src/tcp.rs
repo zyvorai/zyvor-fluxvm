@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The guest-facing half of one proxied TCP connection. We terminate the guest's TCP: from the guest's view we are
 //! the remote host (or, for a host->guest forward, the client). Payload is relayed to a host-side stream by the

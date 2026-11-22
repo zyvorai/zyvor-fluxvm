@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! End-to-end tests for the egress proxy's TLS interception: a real local TLS
 //! upstream (with its own test CA), the proxy in interception mode, and a raw

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Checks enrollment invariants against a real central process and sim-fleet (docs/fleet-enroll.md):
 #   - a join token with max_uses=100 and 150 concurrent enrolls yields exactly 100 credentials

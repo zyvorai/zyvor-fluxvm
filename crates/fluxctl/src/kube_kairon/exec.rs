@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The one door to the outside world for `kube kairon`: every `helm`, `kubectl`, `kaironctl`, `curl` and `tar` call goes through
 //! [`Runner`], so the flows can be tested against a fake that records the calls. Secrets go on stdin, never into arguments.

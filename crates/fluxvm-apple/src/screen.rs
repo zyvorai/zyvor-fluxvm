@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Agent control of a VM's display: screenshots of the guest console and synthesized keyboard and mouse input. The
 //! runner renders the display into an offscreen view and feeds events to it, so this works without a console window and

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Native qcow2 (v2/v3) to raw conversion for standalone images: no backing file, encryption, external data file
 //! or extended L2 entries. Clusters may be deflate- or zstd-compressed. All header fields are big-endian. Anything

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Install Firecracker (+ jailer) from upstream GitHub releases, verified against a SHA-256 digest: the one GitHub
 # records for the release asset, or one you pin.
 #

@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Zyvor AI Labs · https://zyvor.dev -->
-<!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0 -->
+<!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0 -->
 # Design: a Docker-style workflow for macOS guests
 
 Status: **phase 1 (store and registry) is implemented** as `fluxctl mac images|pull|push|tag|rmi|import`; see

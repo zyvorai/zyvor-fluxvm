@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useState } from 'react';
 import { Button, Card, EmptyState, Field, Hero, Meter, Pill, Sheet, Skeleton, api, fmtMiB, left, usePoll } from '@fluxvm/ui-core';

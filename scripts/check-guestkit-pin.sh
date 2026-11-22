@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # fluxvm depends on the sibling repo zyvorai/guestkit through a relative path. Release builds check
 # guestkit out at the tag recorded in packaging/guestkit.ref instead of its default branch, so a guestkit

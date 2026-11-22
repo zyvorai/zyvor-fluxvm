@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Zyvor AI Labs · https://zyvor.dev -->
-<!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0 -->
+<!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0 -->
 # macOS images: `fluxctl mac`
 
 `fluxctl mac` manages a local store of **macOS guest templates** and moves them to and from an OCI registry. It is the image half of the

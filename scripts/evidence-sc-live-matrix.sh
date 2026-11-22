@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Run the remaining live Secure Containers honesty gates and archive evidence.
 # Prefer: sudo -E env FLUXVM_SECURE_CONTAINERS_E2E=1 ... ./scripts/evidence-sc-live-matrix.sh

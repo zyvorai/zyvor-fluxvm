@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //!
 //! Host GPU inventory and explicit VFIO bind/release for QEMU passthrough.
 //! Fabric (or an operator) calls these APIs; FluxVM never rebinds a device

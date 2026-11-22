@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Minimal "guest" for scripts/test-direct-datapath.sh: attaches to an existing
 # tap and answers ARP requests and ICMP echo for one IPv4 address, standing in

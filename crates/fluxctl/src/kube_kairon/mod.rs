@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube kairon`: put Kairon (Kubernetes declares, Kairon orchestrates, FluxVM executes) on the cluster FluxVM made, and
 //! check that it works. Kubernetes (the k3s VM) is the control plane; VMs run on FluxVM hosts that are Kairon nodes.

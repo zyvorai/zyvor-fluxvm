@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxvm-usernet --fd N [--config cfg.json]`: serve the userspace gateway on an inherited `SOCK_DGRAM` socket
 //! (the end of the NIC socketpair the VM does not hold). Flow events are written to stdout as JSON lines.

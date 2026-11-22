@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Opt-in KVM check that an allowlisted hostPath is a virtiofs export.
 # Unit coverage lives in fluxvm-core (symlink escape) and the shim.
 # Set FLUXVM_SECURE_CONTAINERS_E2E=1 on a node with containerd to run it.

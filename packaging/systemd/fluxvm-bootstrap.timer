@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Disabled by default: `systemctl enable --now fluxvm-bootstrap.timer`. The delays spread a fleet over time; the
 # script adds its own stable per-node jitter before it contacts the mirror.

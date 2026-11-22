@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test of an ENCRYPTED `fluxvm-blockd` overlay and its `branch` against a `vz` guest: the guest writes a
 # marker to an encrypted overlay, the overlay is branched (offline, with the key), and the encrypted child serves the
 # parent's data plus its own writes. Neither overlay file may hold the marker in clear; the base stays unchanged;

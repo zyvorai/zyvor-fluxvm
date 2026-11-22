@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `FROM IPSW latest|PATH`: validation and the unattended-provisioning plan. `mac build` does NOT run an IPSW install yet; this module
 //! checks the source, prints what the install would do in order, and says which parts the daemon already supports (`apple.install`,

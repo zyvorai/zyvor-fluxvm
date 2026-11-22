@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Pluggable disk-provisioning backends — see `fluxvm_core::model::StorageBackend`
 //! for what each variant means and its known limitations. `StorageBackend::Default`

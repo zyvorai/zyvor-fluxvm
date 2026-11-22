@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube logs`: the logs of every pod behind a workload in one stream, each line tagged with its pod. Plain
 //! `kubectl logs deploy/web` shows one pod only; this follows them all, including pods that start while you watch.

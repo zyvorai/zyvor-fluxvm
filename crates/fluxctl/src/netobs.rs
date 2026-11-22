@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl netobs ...`: guest-network observability over the daemon's `/v1/netobs/*` routes. The observer lives in
 //! the daemon process, so these commands always talk REST (to `--server`/the current context, or to the local

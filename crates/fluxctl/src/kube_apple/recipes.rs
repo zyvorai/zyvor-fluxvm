@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Recipes for common cluster add-ons, each installed from a pinned, checksum-verified manifest ([`super::pins`]): a MetalLB
 //! address pool (replacing ServiceLB), cert-manager, and a stock metrics-server for clusters that turned the bundled one off.

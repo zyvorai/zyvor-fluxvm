@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>

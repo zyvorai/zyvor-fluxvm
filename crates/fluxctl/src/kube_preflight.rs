@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube addons preflight`: will this machine run k3s? Resources, clock, listening ports, cgroup version and
 //! controllers, and the limits Apple's Virtualization framework puts on the VM. It reads facts from the guest through a

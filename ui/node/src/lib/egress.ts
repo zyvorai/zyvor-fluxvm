@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Egress policy helpers for user-mode (slirp) guests. Mirrors the daemon's rules (IPv4 CIDRs, tcp/udp/any,
 // optional port, at most 256 rules) so the UI can refuse bad input before the API does.

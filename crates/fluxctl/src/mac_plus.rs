@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Image trust and housekeeping commands for `fluxctl mac` (docs/macos-containers.md, "Signing, cache, search and contents"):
 //! `verify`, `sign`, `keys`, `cache`, `search`, `label`, `sbom`, plus the signing, licence-guard and chunk-reuse logic that

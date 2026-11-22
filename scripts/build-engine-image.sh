@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Build the pre-baked Docker engine image: the Debian 13 cloud image with Docker installed and cloud-init finished, so the
 # first boot of a Docker VM (`fluxctl docker up`) does not run apt. Publish the three files it writes (the image, .sha256 and,

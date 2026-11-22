@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube addons ...`: complementary k3s configuration that is *generated*, not performed. Everything that
 //! decides what goes into `/etc/rancher/k3s/config.yaml` (add-on toggles, Cilium, node labels/taints/reservations,

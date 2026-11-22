@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl cluster pair | pending | approve | deny`: add a machine with a short code instead of a URL and a token.
 //! The protocol, the code and the server's rules are `fluxvm_core::pairing`; discovery is `fluxvm_core::mdns` behind the

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The switch exporting observed frames to a `fluxvm-netobs` bridge server in another "process": once through the
 //! library (`connect_bridge`) and once through the real `fluxvm-vz-switch --netobs-socket` binary.

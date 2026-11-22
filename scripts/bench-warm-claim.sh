@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Time POST /v1/pools/{name}/claim separately from a cold POST /v1/vms.
 # Requires a running fluxctl serve and a pool that already has a ready member.
 # Linux + KVM. Exits 0 on other hosts so a baseline recorder can keep going.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Complete Secure Containers code-side phases automatically.
 # Portable legs always run. Live legs run when FLUXVM_SECURE_CONTAINERS_E2E=1

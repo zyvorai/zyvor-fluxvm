@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The flow table: one record per bidirectional 5-tuple per guest NIC, with packet/byte accounting for both
 //! directions, aging, a hard memory bound, and the verdict the datapath gave the traffic.

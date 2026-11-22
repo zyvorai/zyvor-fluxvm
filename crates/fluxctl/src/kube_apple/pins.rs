@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Pinned upstream manifests for the platform commands. Every manifest is identified by a version, the URL it is published
 //! at, and the SHA-256 of the bytes at that URL when the pin was made. The guest downloads it (or receives a copy from the

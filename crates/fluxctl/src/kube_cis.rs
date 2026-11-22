@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `kube doctor --cis` and `kube apple doctor --cis`: the read-only CIS profile audit of `kube addons cis-check`
 //! ([`crate::kube_harden::cis_audit`]) folded into the doctor reports. One script reads a server's settings; the parser and

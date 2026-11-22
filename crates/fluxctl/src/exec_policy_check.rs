@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl exec-policy check`: preflight of a per-exec confinement policy (the JSON of `fluxctl exec --policy`).
 //! Shows what a guest with a given Landlock ABI would enforce or refuse, and the mistakes that stop the command

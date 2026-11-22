@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `GET /v1/cluster/health`: this node's health in plain English, from the same model as `fluxctl cluster status`
 //! (`fluxvm_core::health`). Read-only. The Studio Home page shows it. It covers what the daemon can see itself (VMs,

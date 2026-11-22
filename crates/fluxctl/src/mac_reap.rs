@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Instance TTL, ownership labels and the reaper. `mac run --ttl 2h` stamps `fluxvm.mac.expires` (unix seconds) on the instance;
 //! every instance also gets `fluxvm.mac.owner` (the user who ran it) and `fluxvm.mac.created`. `mac reap` deletes the instances whose

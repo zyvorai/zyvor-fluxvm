@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Friendly explanations for the failures people hit most on `fluxctl mac`, `mac-fleet` and `kube` on a Mac. `fluxctl explain`
 //! looks here after the API and cluster-health tables. [`hint_for`] maps the text of a failure to the code that explains it.

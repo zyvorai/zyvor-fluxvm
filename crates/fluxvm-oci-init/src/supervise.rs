@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Keeping the container's process running: the restart policy and the health check, as pure decisions that `main.rs`
 //! acts on, plus the console markers they leave for the host (`FLUXVM-RESTART`, `FLUXVM-HEALTH`).

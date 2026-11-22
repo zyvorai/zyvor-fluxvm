@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Measures how `fluxvm-agent central` copes with N simulated nodes heartbeating it (docs/fleet-scale.md).
 # For each scenario it starts a fresh central on a loopback port with an empty state directory, runs

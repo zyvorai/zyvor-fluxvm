@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Where FluxVM's disk space goes (`GET /v1/host/storage`): the volume's free space and, per VM, per branch and for the
 //! image cache, what is *allocated* (the blocks a file really occupies, so a sparse 3 GiB disk that holds 700 MiB counts

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: a macOS guest cloned from a template that has the guest agent installed WITHOUT a token gets its token from the
 # host through the read-only `firstboot` share (`fluxvm-guest-agent --token-seed`), with nothing provisioned by hand.
 #   1. install macOS from an IPSW with the unattended provision_* options (about 10 minutes, about 30 GB);

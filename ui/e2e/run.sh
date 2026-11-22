@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Smoke-test the built UI against its mock API: ./run.sh node|fleet [--widths 390,1280]
 # ./run.sh vmtools drives a fleet VM's screen, snapshots and commands against the same mock.

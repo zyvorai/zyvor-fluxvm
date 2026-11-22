@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Image-side commands for `fluxctl mac` beyond pull/push/tag: `image inspect`, `history`, `save` / `load`, `commit`,
 //! `image prune`, `system df` / `system prune`. Works on the local store (`mac_store`) and on instance records from the daemon.

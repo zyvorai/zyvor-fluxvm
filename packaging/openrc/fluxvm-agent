@@ -1,6 +1,6 @@
 #!/sbin/openrc-run
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # The OpenRC counterpart of packaging/systemd/fluxvm-agent.service: the per-node fleet heartbeat (`fluxvm-agent node`).
 # Installed by scripts/install.sh --service --agent as /etc/init.d/fluxvm-agent. Reads /etc/fluxvm/agent.env (CENTRAL_URL,

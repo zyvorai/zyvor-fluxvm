@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube menubar`: the cluster's state as a menu-bar item, in the text format SwiftBar and xbar read (the first line
 //! is the title, `---` starts the menu, `|` adds attributes). There is no daemon or app to install: the plugin is a

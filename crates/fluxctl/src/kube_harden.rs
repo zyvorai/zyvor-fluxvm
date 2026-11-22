@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Hardening profiles for k3s, rendered as `config.yaml` keys plus the files they point at: Secrets encryption at
 //! rest, and the CIS profile from the k3s hardening guide (Pod Security Admission defaults, an audit policy, kernel

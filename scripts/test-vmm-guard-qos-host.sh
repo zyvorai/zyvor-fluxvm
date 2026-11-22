@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Privileged smoke test. It creates a disposable cgroup and proves that an
 # enforce-mode deny-exec policy returns EPERM to a process in that cgroup.
 set -euo pipefail

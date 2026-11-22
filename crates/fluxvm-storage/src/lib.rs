@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Every `fluxctl create`/`stop`/`pause`/... invocation is a fresh, one-shot
 //! CLI process (not just concurrent tasks inside one `serve` daemon), so an

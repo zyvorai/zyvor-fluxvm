@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Fleet metrics: a collector that samples every healthy node's `GET /v1/stats`, a bounded in-memory history per VM
 //! and per node, the graphs' API and a Prometheus endpoint.

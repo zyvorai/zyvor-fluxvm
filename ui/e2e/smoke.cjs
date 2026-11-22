@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // UI smoke: every page of an app, at phone and desktop width, in both themes, against its mock API.
 // Fails on console errors, page errors, failed requests, horizontal overflow, controls without an accessible name,

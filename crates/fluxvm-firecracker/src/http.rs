@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Minimal HTTP/1.1-over-Unix-socket client for Firecracker's API. Firecracker
 //! has no crate-friendly UDS transport (`reqwest` doesn't speak Unix

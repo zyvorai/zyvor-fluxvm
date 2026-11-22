@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Host-to-guest limits for the Kairon VM edge. The eBPF program only sees
 //! guest egress, so ingress bandwidth is a root `tbf` qdisc and ingress packet

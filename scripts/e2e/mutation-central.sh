@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Do the central API and tunnel suites notice when a guard is removed? Copies the tree, breaks one guard at a time in the copy
 # (the tenant route allow-list, the read-only key check, VM ownership, the audit write, the payment gate, the tunnel port policy

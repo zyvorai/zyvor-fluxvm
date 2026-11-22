@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac`: the Docker-style workflow for macOS guests (docs/macos-containers-design.md).
 //! Phase 1 (images: pull, push, tag, rmi, import) is client-side only: a registry and the local store, never the daemon.

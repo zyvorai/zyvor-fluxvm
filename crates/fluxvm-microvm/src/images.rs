@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Resolve `spec.image`: host path / URL stays as-is; any other name is a
 //! GuestImage in the same namespace. HTTP pull is *not* done here — GuestKit

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Gated Windows smoke for Tiny11/Tiny10 (or any Kryton golden) on FluxVM QEMU.
 # Skips unless WINDOWS_IMAGE or KRYTON_WINDOWS_IMAGE is set.

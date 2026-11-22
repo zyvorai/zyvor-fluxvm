@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Conversion from fluxvm-network's per-VM policy model (`dataplane::VmNetworkPolicy`, enforced by nftables/eBPF
 //! on Linux) to the userspace gateway's [`EgressPolicy`]. See `docs/egress-policy.md` for the mapping table.

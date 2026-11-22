@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # S10 — real multi-host fleet canary/wave/rollback evidence.
 #
 # Requires ≥2 SSH-reachable hosts with host-key trust (no ssh shim).

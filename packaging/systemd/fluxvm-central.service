@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # The fleet registry (`fluxvm-agent central`): the "server" of a FluxVM cluster. Installed by
 # `scripts/install.sh --server` (or `fluxctl cluster init`). It takes no token on its command line: with no --token

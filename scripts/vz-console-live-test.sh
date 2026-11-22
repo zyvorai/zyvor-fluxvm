@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: the interactive console of a vz guest (`GET /v1/vms/{id}/console`, a WebSocket carrying a PTY over the guest agent).
 # A shell answers typed commands, a text frame resizes the PTY, a malformed control frame is dropped without ending the session,
 # a second session works after the first closes, and a guest without the agent is refused with an HTTP error before any upgrade.

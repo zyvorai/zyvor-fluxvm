@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Recipes that are text, not actions: a `hostPath` PersistentVolume and claim for a folder shared with the VM over
 //! virtiofs, and guidance for running linux/amd64 images through Rosetta.

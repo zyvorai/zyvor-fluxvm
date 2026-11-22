@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Fault-injection test for crash-safe VM lifecycle: kills the daemon with
 # SIGKILL in the middle of create, delete, snapshot and fork, restarts it, and
 # proves the next start converges - no leaked taps, network namespaces, VMM

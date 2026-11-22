@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Node-side self-fencing (opt-in): `FLUXVM_NODE_SELF_FENCE_SECS=N`. A node that has had no successful heartbeat for
 //! `N` seconds stops every VM on its own daemon, and advertises `self_fence:N` in its heartbeat. That promise is

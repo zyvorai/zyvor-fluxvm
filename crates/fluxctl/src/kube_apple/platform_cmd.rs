@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube apple platform ...` and the small hooks the other `kube apple` commands call: the command line for the
 //! platform layer (apply, gitops, metallb, cert-manager, metrics-server, netpol, pins), `upgrade --channel`,

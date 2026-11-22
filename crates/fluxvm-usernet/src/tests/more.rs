@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Gateway-feature tests: DNS over TCP, ICMP echo proxy, TCP window scaling / SACK / congestion control,
 //! IP fragmentation, IPv6 and the versioned frame tap. Same method as the parent module: crafted frames over a

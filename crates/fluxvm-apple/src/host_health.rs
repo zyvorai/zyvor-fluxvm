@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Host facts that decide whether a Mac can run a VM right now: the macOS build, whether the login session is unlocked,
 //! whether something holds sleep off, thermal throttling and free disk. Read-only: every probe is a command that needs no

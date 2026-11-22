@@ -71,7 +71,7 @@ index 0000000..1fb5623
 +++ b/crates/fluxvm-container-agent/Cargo.toml
 @@ -0,0 +1,20 @@
 +# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +[package]
 +name = "fluxvm-container-agent"
@@ -97,7 +97,7 @@ index 0000000..1474879
 +++ b/crates/fluxvm-container-agent/src/main.rs
 @@ -0,0 +1,729 @@
 +// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +//! Minimal in-guest OCI process supervisor for FluxVM's containerd runtime.
 +//!
@@ -832,7 +832,7 @@ index 0000000..302b0fe
 +++ b/crates/fluxvm-container-client/Cargo.toml
 @@ -0,0 +1,16 @@
 +# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +[package]
 +name = "fluxvm-container-client"
@@ -854,7 +854,7 @@ index 0000000..9db08e0
 +++ b/crates/fluxvm-container-client/src/lib.rs
 @@ -0,0 +1,183 @@
 +// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +use anyhow::{Context, Result, bail};
 +use fluxvm_container_protocol::{
@@ -1043,7 +1043,7 @@ index 0000000..15ef8f6
 +++ b/crates/fluxvm-container-protocol/Cargo.toml
 @@ -0,0 +1,13 @@
 +# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +[package]
 +name = "fluxvm-container-protocol"
@@ -1062,7 +1062,7 @@ index 0000000..0fdb9c7
 +++ b/crates/fluxvm-container-protocol/src/lib.rs
 @@ -0,0 +1,164 @@
 +// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +//! Container lifecycle protocol spoken between `containerd-shim-fluxvm-v2`
 +//! on the host and `fluxvm-container-agent` inside a FluxVM guest.
@@ -1232,7 +1232,7 @@ index 0000000..1f4b94b
 +++ b/crates/fluxvm-containerd-shim/Cargo.toml
 @@ -0,0 +1,31 @@
 +# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +[package]
 +name = "fluxvm-containerd-shim"
@@ -1269,7 +1269,7 @@ index 0000000..832eb56
 +++ b/crates/fluxvm-containerd-shim/src/main.rs
 @@ -0,0 +1,600 @@
 +// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
++// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 +
 +//! containerd runtime-v2 shim for FluxVM secure containers.
 +//!

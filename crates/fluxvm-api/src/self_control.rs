@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Self-control for `vz` guests created with `apple.self_control`: an MCP server (streamable HTTP, JSON replies) that
 //! software inside the guest reaches at `http://127.0.0.1:7790/mcp`. The guest's relay goes over vsock to the runner,

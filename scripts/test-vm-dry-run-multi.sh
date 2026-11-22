@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Opt-in, root-only lab test: VM sandbox dry-run and explicit snapshot/restore
 # for a non-flux-vm backend (QEMU or Firecracker), reached through an
 # operator template (client specs always force flux-vm). Starts its own

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube apple doctor NAME`: the checks that matter for a long-lived, possibly multi-server cluster, each with the
 //! command that fixes it. Facts are gathered through [`Host`]; the verdicts are pure functions of those facts.

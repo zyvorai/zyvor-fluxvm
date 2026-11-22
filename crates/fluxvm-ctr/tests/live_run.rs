@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Runs the real launcher against a tiny rootfs (a static busybox). It needs a Linux host that lets this user create
 //! namespaces (root, or unprivileged user namespaces not blocked by AppArmor) and a static `busybox` on PATH; otherwise

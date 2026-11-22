@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 /** The recipe catalog (docs/recipes.md). A Rust test checks that every name here exists in `fluxctl recipe list`. */
 export interface Recipe { name: string; title: string; summary: string; params: { key: string; value: string; help: string }[] }

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! HTTPS for the service names: a local certificate authority that `fluxctl kube trust` creates and prints the one command
 //! to trust, and a resolver that mints a short-lived certificate for each `*.localhost` name on demand. The CA's key never

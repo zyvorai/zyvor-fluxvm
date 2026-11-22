@@ -1,6 +1,6 @@
 #!/sbin/openrc-run
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # The OpenRC counterpart of packaging/systemd/fluxvm-central.service: the fleet registry (`fluxvm-agent central`).
 # Installed by scripts/install.sh --server. Reads optional /etc/fluxvm/central.env (LISTEN, FLUXVM_NODE_AUTH, ...). No token

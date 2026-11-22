@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Does the enrollment security suite notice when a guard is removed? Copies the tree, breaks one guard at a time in the
 # copy, builds fluxvm-agent and runs scripts/e2e/enroll-security.sh against it; every mutant must make the suite FAIL.

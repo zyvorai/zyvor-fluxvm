@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The cluster as MCP tools, so an AI agent (Claude Code, Cursor, Codex) can look at and change a `fluxctl kube` cluster
 //! with a safety net: `kube_apply` saves a checkpoint before it changes anything, then reports what changed and how to put

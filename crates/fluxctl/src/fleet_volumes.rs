@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl fleet volumes | volume-create | volume-rm | volume-resize`: persistent volumes, disks that keep their data
 //! when the VM using them is deleted (`/fleet/volumes`). `fluxctl fleet launch --volume NAME` attaches one.

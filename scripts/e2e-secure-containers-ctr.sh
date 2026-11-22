@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Live smoke: one `ctr run` through io.containerd.fluxvm.v2.
 # `ctr run --rm` can hang on teardown after the guest exits; the gate is the

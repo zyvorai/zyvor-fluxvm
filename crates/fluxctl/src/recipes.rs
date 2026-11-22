@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl recipe list | show | run | credentials | uninstall`: a short catalog of things people actually want ("a dev
 //! database", "a website", "a CI runner", "a private registry", "monitoring"), layered over what already exists

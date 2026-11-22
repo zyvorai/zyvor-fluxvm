@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Names, not ports: `http://web.shop.localhost` on 127.0.0.1:80 reaches the published service `web` in namespace `shop`.
 //! `*.localhost` resolves to loopback on a Mac, so no `/etc/hosts` edit and no port number. While the cluster sleeps, the

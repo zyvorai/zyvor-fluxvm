@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac-fleet`: the inventory file (YAML, or JSON, which YAML reads) that `apply` converges the fleet to.
 //! It holds no secret: the join token is a path to a file on the machine running `fluxctl`.

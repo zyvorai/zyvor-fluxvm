@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Typed fetch wrapper for the FluxVM REST API. The UI is served by the daemon itself (same origin), so there
 // is no CORS; the bearer lives in sessionStorage (never in a URL) exactly like the legacy console.

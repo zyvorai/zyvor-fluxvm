@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac-fleet`: how commands reach a Mac. The system `ssh` binary, always with `BatchMode=yes` (never a prompt,
 //! so a missing key fails fast instead of hanging a parallel run) and `StrictHostKeyChecking=yes` (the host key must

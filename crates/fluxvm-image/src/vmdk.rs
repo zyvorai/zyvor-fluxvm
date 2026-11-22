@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Native reader for sparse and stream-optimized VMDK extents. All offsets in the
 //! format are little-endian sector numbers. Unsupported variants use qemu-img.

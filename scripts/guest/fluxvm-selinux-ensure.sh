@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Ensure selinuxfs is mounted, policy is loaded, and FluxVM guest-agent files
 # have usable SELinux labels before fluxvm-guest-agent starts.

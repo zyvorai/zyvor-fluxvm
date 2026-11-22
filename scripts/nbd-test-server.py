@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 """Minimal NBD server (fixed newstyle, one export) for live tests of `vz` NBD disks; not for real use.
 
 Usage: scripts/nbd-test-server.py FILE PORT [EXPORT]

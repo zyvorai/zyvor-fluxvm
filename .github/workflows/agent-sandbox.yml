@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Agent-sandbox tooling: egress HTTP/HTTPS ACL, sandbox change-set, rootless
 # procbox (and its /v1/sandboxes kind), and the Python and Go SDKs. Portable:

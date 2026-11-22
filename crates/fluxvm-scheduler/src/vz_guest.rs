@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Sandbox exec and file access for `vz` guests. A guest with the agent enabled (the `agent-micro` image, or a spec that asks
 //! for it) is reached over vsock through the runner's `CONNECT` proxy first; when the agent does not answer, and always for

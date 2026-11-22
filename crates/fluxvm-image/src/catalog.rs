@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Named, checksummed, optionally-signed base images ("`ubuntu-24.04`"
 //! instead of a raw path), resolved by [`resolve`] before a VM is created.

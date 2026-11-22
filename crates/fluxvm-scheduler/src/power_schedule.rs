@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Cron-driven power schedules (`power_schedule`, or the `fluxvm.io/power-start`
 //! and `fluxvm.io/power-stop` labels): parsing, the next fire time, and the

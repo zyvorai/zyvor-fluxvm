@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! RED-style roll-ups (rate, errors, duration) per VM, peer, service port and protocol, in fixed time windows, with
 //! a retained history that is bounded both by window count and by age. Cardinality is bounded too: past

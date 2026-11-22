@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac metrics`: Prometheus text for what the daemon's own `/metrics` cannot know, because it is fluxctl's view of
 //! the Mac: instances by state, macOS slots in use (of 2), the macOS template store's size, and, with `--kube`, readiness of

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `Idempotency-Key` support for the mutating VM routes:
 //! `POST /v1/vms`, `DELETE /v1/vms/{id}`, `POST /v1/vms/{id}/snapshot` and

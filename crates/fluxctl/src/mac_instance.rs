@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Starting `fluxctl mac` instances with Docker-style options: `-e`, `--env-file`, `-v`, `--workdir`, `--label`, `--restart`,
 //! `--cpus`, `--memory`, `-d`. `mac run` and `mac compose up` both go through [`launch`].

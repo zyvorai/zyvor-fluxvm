@@ -1,5 +1,5 @@
 <!-- Copyright 2026 Zyvor AI Labs · https://zyvor.dev -->
-<!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0 -->
+<!-- SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0 -->
 # Research: macOS guests and containers on Apple silicon, versus `fluxctl mac`
 
 Researched 2026-11-21. This is a survey and a backlog, not a design commitment. It compares the `fluxctl mac` workflow
@@ -179,7 +179,7 @@ VM or registry. A dash means I found no evidence either way.
 | Nested virt | macOS guests: not supported [F] | Linux guests `--nested` [S] | - | - | M3+, macOS 15+ [S] | - | - |
 | Rosetta | Not for macOS guests [F] | - | - | - | Yes (Linux guests) | - | - |
 | CI runner integration | Docs page only [F]; no `fluxctl mac` command | Cirrus Runners (CI shutdown reported) [?] | - | CI integrations [S] | n/a | n/a | n/a |
-| Licence | Zyvor Production 1.0 [F] | Fair Source / FSL [?] | commercial [I] | commercial [S] | MIT / closed (OrbStack) | Apache-2.0 | - |
+| Licence | Zyvor Production Licence v2.0 [F] | Fair Source / FSL [?] | commercial [I] | commercial [S] | MIT / closed (OrbStack) | Apache-2.0 | - |
 
 ## 4. Top gaps
 

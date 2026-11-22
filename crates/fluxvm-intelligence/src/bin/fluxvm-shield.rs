@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 use anyhow::{Context, Result, bail};
 use fluxvm_intelligence::shield::{
     self, DEFAULT_SHIELD_PIN_ROOT, DEFAULT_SHIELD_STATE_ROOT, ShieldPolicy,

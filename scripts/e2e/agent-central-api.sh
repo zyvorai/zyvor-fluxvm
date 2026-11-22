@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2154,SC2034,SC2120
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # The central API as a client sees it, on Linux and macOS: one real `fluxvm-agent central` (own port and state dir) and
 # `sim-node` fleets, no VMs. Tenants and API keys (scopes, read-only, expiry, revocation, rotation, disable), what a tenant

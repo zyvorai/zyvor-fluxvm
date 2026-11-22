@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The observer: one `ingest(frame, meta)` entry point that parses, tracks flows and health, extracts L7
 //! metadata (redacted), feeds the roll-ups and the capture ring, and publishes events.

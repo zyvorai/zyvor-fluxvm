@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The certificates the production profile needs, made the way Kairon's `scripts/gen-webhook-tls-certs.sh` and
 //! `scripts/gen-migration-mtls-certs.sh` make them (ECDSA P-256, a throwaway CA, the same names and key usages), but in

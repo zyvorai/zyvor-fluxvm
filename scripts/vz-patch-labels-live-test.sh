@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: renaming and labelling vz guests (`PATCH /v1/vms/{id}`) and finding them again (`GET /v1/vms?name=&label=`). A rename shows in
 # the record and the name filter; labels are added and removed; the selector forms (k=v, k!=v, k, !k, and several joined by a comma) pick
 # the right guests; bad names, label keys and values are refused with 400 and a failed patch changes nothing; the change is an event.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! In-process tests: crafted Ethernet frames over a SOCK_DGRAM socketpair, exactly what a
 //! `VZFileHandleNetworkDeviceAttachment` guest would exchange, against real host sockets on 127.0.0.1.

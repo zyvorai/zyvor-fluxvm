@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! GitOps bootstrap: installs Flux or Argo CD from a pinned, checksum-verified manifest ([`super::pins`]) and points it at one
 //! Git repository. This is not `flux bootstrap`: it does not create the repository or push to it.

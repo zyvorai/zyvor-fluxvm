@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl cluster report`: the cluster passport, ONE document a person can hand to someone else: the machines and their
 //! roles, versions, a health summary, how to add a machine, how to back up and restore, how to undo, where the logs are,

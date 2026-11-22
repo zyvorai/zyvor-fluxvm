@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // UI form flows against a real central: a join token is created, validated and revoked; a host is leased to a tenant (with the
 // 24-hour minimum enforced in the sheet); the billing page renders. Each flow is driven through the UI and then confirmed through the

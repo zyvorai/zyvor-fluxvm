@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Enrollment security checks against a real central (docs/fleet-enroll.md): every way a join token or a node
 # credential must be refused, what a credential may reach, the three --node-auth modes, and that no secret reaches

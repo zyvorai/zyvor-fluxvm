@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The easy way in for `fluxctl mac`: `quickstart` (alias `setup`) walks a new Mac from nothing to a running macOS instance
 //! and, if asked, a k3s cluster; `cheatsheet` prints the commands you will want; `complete` and `complete-script` give the

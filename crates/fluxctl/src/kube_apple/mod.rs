@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube apple`: a persistent ARM64 Linux guest (Apple Virtualization) running k3s, one VM per node, driven from
 //! the Mac. Unlike `kube up`, which provisions everything through cloud-init and the installer script, this workflow

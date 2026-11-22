@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! A launchd LaunchAgent that keeps the API tunnel (or, for a multi-server cluster, the failover forwarder) of one cluster
 //! up: `fluxctl kube apple tunnel NAME --foreground`, started at login and restarted whenever it exits (the guests'

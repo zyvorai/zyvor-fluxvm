@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `/v1/instancetypes` and `/v1/preferences`: named size classes and device-default bundles (see
 //! `fluxvm_core::instancetype`), plus `GET /v1/vms/{id}/instancetype`, the snapshot recorded when a VM

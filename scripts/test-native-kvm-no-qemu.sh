@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Real-host acceptance gate for the direct-kernel, flat-ext4 native profile.
 # Requires a running FluxVM service configured with fluxvm_engine = "kvm".
 set -euo pipefail

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl gateway expose | unexpose | list | publish | explain | check | inspect | demo`: built-in Gateway API tooling for Envoy Gateway on a FluxVM
 //! k3s cluster, ported from Zyvor Setura 0.1.0 (see docs/gateway.md).

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Pairing by short code (docs/cluster-pairing.md): a machine asks to join, a person approves, the machine receives its
 //! node credential. The protocol and the state machine are `fluxvm_core::pairing`; this file is the HTTP glue and the

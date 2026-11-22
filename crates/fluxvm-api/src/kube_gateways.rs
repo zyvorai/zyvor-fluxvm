@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The Gateway API objects of a cluster for the Kubernetes page: `GET /v1/kube/{cluster}/gateways`. Read-only (four GETs through the
 //! same client certificate and address fallback as the workloads), objects only and never Secrets. Not being able to reach the

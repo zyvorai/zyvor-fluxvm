@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Distributed node-agent for multi-host Zyvor FluxVM deployments. Two
 //! halves, both in this one binary (`fluxvm-agent central` /

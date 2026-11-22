@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Gives a sandbox whose traffic has no address of its own (a vz guest with no network card, reaching the
 //! host egress proxy through the runner) a stable *alias* address, so the proxy's per-sandbox rules and

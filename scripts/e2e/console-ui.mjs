@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //
 // The fleet console in a real (headless) browser: sign in as the operator and as a tenant, open every page of the nav and the
 // inspector of a node and a VM, and fail on any uncaught exception, console error or failed request that is not an expected 4xx.

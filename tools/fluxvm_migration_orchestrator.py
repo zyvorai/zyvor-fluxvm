@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 """Crash-resumable FluxVM migration transaction orchestrator (Sentinel Set 13E)."""
 from __future__ import annotations
 import argparse, dataclasses, fcntl, hashlib, http.server, json, os, re, shlex, shutil

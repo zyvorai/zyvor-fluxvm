@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 """Agent sessions: one handle for a sandbox, its workspace, policy, checkpoints and ledger.
 
 ``FluxVM.create_session()`` returns a :class:`Session`. Fork works only on the in-tree KVM

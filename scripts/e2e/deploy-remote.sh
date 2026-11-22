@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015,SC2029
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # scripts/deploy-remote.sh against a real host, from the control machine: --help, --dry-run (changes nothing),
 # --preflight-only, --verify-only, then a real --quick deploy twice. The second deploy is the idempotency check:

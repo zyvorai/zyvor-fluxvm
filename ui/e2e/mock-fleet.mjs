@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Mock fleet API for the UI smoke test (e2e/smoke.cjs). Not a model of the real daemon: it serves plausible shapes.
 import http from 'node:http';

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Tests scripts/fluxvm-bootstrap.sh against a local mirror signed with a throwaway key. Linux only (flock, GNU
 # coreutils); needs openssl >= 3.0, jq, curl and python3. Nothing outside a temp directory is touched (FLUXVM_ROOT).

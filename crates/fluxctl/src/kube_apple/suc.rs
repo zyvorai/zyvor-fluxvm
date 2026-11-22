@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `kube apple upgrade NAME --channel stable`: upgrades the cluster through Rancher's system-upgrade-controller (SUC) instead
 //! of replacing the binary from the Mac. The controller and its CRDs come from a pinned, checksum-verified manifest

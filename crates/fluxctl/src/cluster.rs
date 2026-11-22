@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl cluster`: the k3s-style front door to FluxVM's own fleet. One machine runs `init` (the fleet central as a
 //! service, plus a short-lived join token); every other machine runs `join URL`; `nodes`, `token`, `remove` and `add`

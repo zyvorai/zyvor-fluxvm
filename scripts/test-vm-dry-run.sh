@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Opt-in, root-only lab test: dry-run against a native-KVM VM sandbox reverts
 # BOTH guest memory and disk. Starts its own throwaway daemon (own state dirs,
 # own port); never touches the host's fluxvm service.

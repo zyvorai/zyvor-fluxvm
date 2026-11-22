@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Seccomp filter for a QEMU or Cloud Hypervisor child. Installed in the
 //! child before exec, so it never attaches to `fluxctl serve`. The filter

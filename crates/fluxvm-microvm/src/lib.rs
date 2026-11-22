@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! FluxVM MicroVM: Kubernetes-native MicroVM compute (not KubeVirt).
 //! Supports short-lived / disposable jobs via TTL when configured.

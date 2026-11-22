@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # End-to-end smoke test of agent sandboxes on a Mac, against a running `fluxctl serve`:
 # health, a default (warm-pool) sandbox, COUNT sandboxes of PROFILE, a command and a file round trip in each, the density report,
