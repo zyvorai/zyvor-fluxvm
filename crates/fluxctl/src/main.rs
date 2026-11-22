@@ -40,6 +40,7 @@ mod docker_host;
 mod doctor;
 mod exec_policy_check;
 mod explain;
+mod gateway;
 mod fleet_cli;
 mod fleet_client;
 mod guard_cmd;
@@ -1051,6 +1052,13 @@ enum Command {
     Recipe {
         #[command(subcommand)]
         command: recipes::RecipeCommand,
+    },
+    /// Gateway API on Envoy Gateway: `publish` a listener to 127.0.0.1, `explain` one request step by step (dns, tcp, tls, http,
+    /// backend), `check` a file of such probes, `inspect` an HTTPRoute, and a `demo`. Install Envoy Gateway with
+    /// `kube apple create --addons envoy-gateway`. Ported from Zyvor Setura. See docs/gateway.md.
+    Gateway {
+        #[command(subcommand)]
+        command: gateway::GatewayCommand,
     },
     /// Several Macs as one fleet over SSH: `up user@host...` installs FluxVM (pinned, checksum-verified), starts the daemon,
     /// enrolls the node and optionally prepares k3s; plus `status`, `exec`, `upgrade`, `remove`, `doctor`, and `apply` for an
@@ -6280,6 +6288,14 @@ async fn main() -> Result<()> {
         };
         return tokio::task::block_in_place(|| recipes::run(command));
     }
+    if let Command::Gateway { .. } = &cli.command {
+        let Command::Gateway { command } = cli.command else {
+            unreachable!()
+        };
+        // Exit codes are part of the contract: 0 passed, 1 a probe failed, 2 usage or kubectl error.
+        let code = tokio::task::block_in_place(|| gateway::run(command));
+        std::process::exit(code);
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -6634,6 +6650,7 @@ async fn main() -> Result<()> {
         | Command::Service { .. }
         | Command::NodeAgent { .. }
         | Command::Recipe { .. }
+        | Command::Gateway { .. }
         | Command::MacFleet { .. }
         | Command::Cluster { .. }
         | Command::Dashboard { .. }

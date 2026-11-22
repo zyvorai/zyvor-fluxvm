@@ -227,6 +227,10 @@ pub fn after_help() -> String {
                     "fleet",
                     "Your Mac cloud: status, launch, leases, tenants (start with `fleet status`)",
                 ),
+                (
+                    "gateway",
+                    "Gateway API: publish a listener, explain a request, check routes, demo",
+                ),
             ],
         ),
     ];
