@@ -338,7 +338,10 @@ impl PairBook {
     }
 
     fn fail(&mut self, ip: &str, now: i64) {
-        self.failures.entry(ip.to_owned()).or_default().push_back(now);
+        self.failures
+            .entry(ip.to_owned())
+            .or_default()
+            .push_back(now);
     }
 
     fn blocked(&self, ip: &str) -> bool {
@@ -362,16 +365,13 @@ impl PairBook {
                 "name must be lowercase letters, digits, dashes and dots (at most 63)",
             ));
         }
-        let ed_pub: [u8; 32] =
-            unhex(ed_pub_hex).ok_or(PairError::Invalid("bad public key"))?;
+        let ed_pub: [u8; 32] = unhex(ed_pub_hex).ok_or(PairError::Invalid("bad public key"))?;
         let x_pub: [u8; 32] = unhex(x_pub_hex).ok_or(PairError::Invalid("bad public key"))?;
         VerifyingKey::from_bytes(&ed_pub).map_err(|_| PairError::Invalid("bad public key"))?;
         // The same machine asking again (a lost response) gets its own request back, not a second one.
-        if let Some((id, e)) = self
-            .entries
-            .iter()
-            .find(|(_, e)| e.ed_pub == ed_pub && e.x_pub == x_pub && matches!(e.state, State::Pending))
-        {
+        if let Some((id, e)) = self.entries.iter().find(|(_, e)| {
+            e.ed_pub == ed_pub && e.x_pub == x_pub && matches!(e.state, State::Pending)
+        }) {
             return Ok(Offer {
                 id: id.clone(),
                 server_pub: hex(&e.server_pub),
@@ -488,7 +488,13 @@ impl PairBook {
     }
 
     /// The machine asks what became of its request. `sig_hex` proves it holds the key it asked with.
-    pub fn claim(&mut self, now: i64, ip: &str, id: &str, sig_hex: &str) -> Result<Claim, PairError> {
+    pub fn claim(
+        &mut self,
+        now: i64,
+        ip: &str,
+        id: &str,
+        sig_hex: &str,
+    ) -> Result<Claim, PairError> {
         self.gc(now);
         if self.blocked(ip) {
             return Err(PairError::Busy(60));
@@ -499,7 +505,12 @@ impl PairBook {
         };
         let ok = unhex::<64>(sig_hex).is_some_and(|s| {
             VerifyingKey::from_bytes(&e.ed_pub)
-                .and_then(|k| k.verify(&claim_message(id, &e.server_pub), &Signature::from_bytes(&s)))
+                .and_then(|k| {
+                    k.verify(
+                        &claim_message(id, &e.server_pub),
+                        &Signature::from_bytes(&s),
+                    )
+                })
                 .is_ok()
         });
         if !ok {
@@ -562,7 +573,10 @@ mod tests {
         let Ok(Claim::Approved(sealed)) = book.claim(NOW + 5, "10.0.0.7", &offer.id, &sig) else {
             panic!("expected approval");
         };
-        assert!(!sealed.windows(5).any(|w| w == b"fvnc_"), "sealed, not plain");
+        assert!(
+            !sealed.windows(5).any(|w| w == b"fvnc_"),
+            "sealed, not plain"
+        );
         assert_eq!(
             keys.open_credential(&offer.id, &sp, &sealed).as_deref(),
             Some("fvnc_secret.1.mac")
@@ -608,7 +622,10 @@ mod tests {
         assert_ne!(a.code("id", &sp), a.code("id", &[8u8; 32]));
         let c = a.code("id", &sp);
         assert_eq!(c.len(), CODE_LEN + 1);
-        assert!(c.chars().all(|ch| ch == '-' || ALPHABET.contains(&(ch as u8))));
+        assert!(
+            c.chars()
+                .all(|ch| ch == '-' || ALPHABET.contains(&(ch as u8)))
+        );
     }
 
     #[test]
@@ -664,14 +681,23 @@ mod tests {
         let offer = ask(&mut book, &keys, "10.0.0.7", "mini-1").unwrap();
         let r = book.approve(NOW, &offer.id, |_, _| Err("name taken".into()));
         assert_eq!(r, Err(PairError::Issue("name taken".into())));
-        assert!(book.approve(NOW, &offer.id, |_, _| Ok("fvnc_a.1.b".into())).is_ok());
+        assert!(
+            book.approve(NOW, &offer.id, |_, _| Ok("fvnc_a.1.b".into()))
+                .is_ok()
+        );
     }
 
     #[test]
     fn open_requests_are_capped_overall_and_per_address() {
         let mut book = PairBook::new(PairConfig::default());
         for i in 0..3 {
-            ask(&mut book, &NodeKeys::new(None), "10.0.0.7", &format!("n{i}")).unwrap();
+            ask(
+                &mut book,
+                &NodeKeys::new(None),
+                "10.0.0.7",
+                &format!("n{i}"),
+            )
+            .unwrap();
         }
         assert_eq!(
             ask(&mut book, &NodeKeys::new(None), "10.0.0.7", "n9"),
@@ -729,7 +755,10 @@ mod tests {
         let offer = ask(&mut book, &keys, "10.0.0.7", "mini-1").unwrap();
         let sp: [u8; 32] = unhex(&offer.server_pub).unwrap();
         let sig = keys.claim_signature(&offer.id, &sp);
-        assert_eq!(book.claim(NOW + 5, "a", &offer.id, &sig), Ok(Claim::Pending));
+        assert_eq!(
+            book.claim(NOW + 5, "a", &offer.id, &sig),
+            Ok(Claim::Pending)
+        );
         assert_eq!(
             book.claim(NOW + 5, "a", &offer.id, &sig),
             Err(PairError::Busy(1))
@@ -741,17 +770,32 @@ mod tests {
         let mut book = PairBook::new(PairConfig::default());
         let k = NodeKeys::new(None);
         let (e, x) = (hex(&k.ed_pub()), hex(&k.x_pub()));
-        assert!(matches!(book.request(NOW, "a", "Bad Name", &e, &x), Err(PairError::Invalid(_))));
-        assert!(matches!(book.request(NOW, "a", "ok", "zz", &x), Err(PairError::Invalid(_))));
-        assert!(matches!(book.request(NOW, "a", "ok", &e, &x[2..]), Err(PairError::Invalid(_))));
+        assert!(matches!(
+            book.request(NOW, "a", "Bad Name", &e, &x),
+            Err(PairError::Invalid(_))
+        ));
+        assert!(matches!(
+            book.request(NOW, "a", "ok", "zz", &x),
+            Err(PairError::Invalid(_))
+        ));
+        assert!(matches!(
+            book.request(NOW, "a", "ok", &e, &x[2..]),
+            Err(PairError::Invalid(_))
+        ));
     }
 
     #[test]
     fn codes_are_normalised() {
-        assert_eq!(normalize_code("ab0o1-il x"), "AB001" .to_owned() + "11X");
+        assert_eq!(normalize_code("ab0o1-il x"), "AB001".to_owned() + "11X");
         let mut book = PairBook::new(PairConfig::default());
-        assert_eq!(book.approve(NOW, "ABCDE-FGHJK", |_, _| Ok("x".into())), Err(PairError::NotFound));
-        assert_eq!(book.approve(NOW, "short", |_, _| Ok("x".into())), Err(PairError::NotFound));
+        assert_eq!(
+            book.approve(NOW, "ABCDE-FGHJK", |_, _| Ok("x".into())),
+            Err(PairError::NotFound)
+        );
+        assert_eq!(
+            book.approve(NOW, "short", |_, _| Ok("x".into())),
+            Err(PairError::NotFound)
+        );
     }
 
     #[test]

@@ -24,20 +24,34 @@ pub fn pool_cap(hard: usize, ephemeral_pool: Option<usize>) -> usize {
 }
 
 /// One line saying what the pool decided, for the log.
-pub fn describe(queued: usize, busy: usize, in_flight: usize, warm: usize, cap: usize, spawn: usize) -> String {
-    format!("pool: queued={queued} busy={busy} waiting={} warm={warm} cap={cap} -> start {spawn}", in_flight.saturating_sub(busy))
+pub fn describe(
+    queued: usize,
+    busy: usize,
+    in_flight: usize,
+    warm: usize,
+    cap: usize,
+    spawn: usize,
+) -> String {
+    format!(
+        "pool: queued={queued} busy={busy} waiting={} warm={warm} cap={cap} -> start {spawn}",
+        in_flight.saturating_sub(busy)
+    )
 }
 
 pub fn group_name_ok(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 100 && s.bytes().all(|c| c.is_ascii_alphanumeric() || b" -_.".contains(&c))
+    !s.is_empty()
+        && s.len() <= 100
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b" -_.".contains(&c))
 }
 
 /// The id of the runner group called `name` in a `runner-groups` listing.
 pub fn find_group(listing: &serde_json::Value, name: &str) -> Option<u64> {
-    listing["runner_groups"]
-        .as_array()?
-        .iter()
-        .find(|g| g["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)))?["id"]
+    listing["runner_groups"].as_array()?.iter().find(|g| {
+        g["name"]
+            .as_str()
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })?["id"]
         .as_u64()
 }
 
@@ -51,7 +65,11 @@ pub fn scan_repos(listing: &serde_json::Value, limit: usize) -> Vec<(String, Str
         .filter_map(|r| {
             let full = r["full_name"].as_str()?;
             let (o, n) = full.split_once('/')?;
-            Some((o.to_owned(), n.to_owned(), r["pushed_at"].as_str().unwrap_or("").to_owned()))
+            Some((
+                o.to_owned(),
+                n.to_owned(),
+                r["pushed_at"].as_str().unwrap_or("").to_owned(),
+            ))
         })
         .collect();
     v.sort_by(|a, b| b.2.cmp(&a.2));
@@ -77,18 +95,38 @@ pub struct OrgPool {
 }
 
 impl OrgPool {
-    pub fn new(org: RealGithub, api: &str, token: Secret, explicit: Vec<(String, String)>, scan: Option<usize>) -> Self {
-        Self { org, api: api.into(), token, explicit, scan, cache: Mutex::new(None) }
+    pub fn new(
+        org: RealGithub,
+        api: &str,
+        token: Secret,
+        explicit: Vec<(String, String)>,
+        scan: Option<usize>,
+    ) -> Self {
+        Self {
+            org,
+            api: api.into(),
+            token,
+            explicit,
+            scan,
+            cache: Mutex::new(None),
+        }
     }
 
     fn repos(&self) -> Result<Vec<(String, String)>> {
         let mut out = self.explicit.clone();
         if let Some(limit) = self.scan {
             let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            let fresh = c.as_ref().is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(300));
+            let fresh = c
+                .as_ref()
+                .is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(300));
             if !fresh {
-                let Scope::Org(o) = self.org.scope() else { bail!("--queue-scan needs --org") };
-                let v = self.org.get(&org_repos_path(o), "listing the organisation's repositories")?;
+                let Scope::Org(o) = self.org.scope() else {
+                    bail!("--queue-scan needs --org")
+                };
+                let v = self.org.get(
+                    &org_repos_path(o),
+                    "listing the organisation's repositories",
+                )?;
                 *c = Some((Instant::now(), scan_repos(&v, limit)));
             }
             for r in c.as_ref().map(|(_, v)| v.clone()).unwrap_or_default() {
@@ -135,7 +173,8 @@ pub fn resolve_group(api: &str, org: &str, token: &Secret, name: &str) -> Result
     }
     let g = RealGithub::new(api, Scope::Org(org.into()), 1, token.clone())?;
     let v = g.get(&runner_groups_path(org), "listing runner groups")?;
-    find_group(&v, name).with_context(|| format!("organisation {org} has no runner group called {name:?}"))
+    find_group(&v, name)
+        .with_context(|| format!("organisation {org} has no runner group called {name:?}"))
 }
 
 #[cfg(test)]
@@ -153,17 +192,28 @@ mod tests {
         use crate::mac_runner::plan_spawn;
         assert_eq!(plan_spawn(0, 0, 5, 0, 3), 3);
         assert_eq!(plan_spawn(3, 3, 5, 0, 3), 0);
-        assert_eq!(plan_spawn(3, 3, 0, 0, 3), 0, "nothing queued: no new runner, finished ones simply go");
-        assert!(describe(5, 1, 3, 0, 3, 2).contains("queued=5") && describe(5, 1, 3, 0, 3, 2).contains("waiting=2"));
+        assert_eq!(
+            plan_spawn(3, 3, 0, 0, 3),
+            0,
+            "nothing queued: no new runner, finished ones simply go"
+        );
+        assert!(
+            describe(5, 1, 3, 0, 3, 2).contains("queued=5")
+                && describe(5, 1, 3, 0, 3, 2).contains("waiting=2")
+        );
     }
 
     #[test]
     fn runner_groups_are_found_by_name() {
-        let l = json!({"runner_groups": [{"id": 1, "name": "Default"}, {"id": 7, "name": "Mac CI"}]});
+        let l =
+            json!({"runner_groups": [{"id": 1, "name": "Default"}, {"id": 7, "name": "Mac CI"}]});
         assert_eq!(find_group(&l, "mac ci"), Some(7));
         assert_eq!(find_group(&l, "nope"), None);
         assert!(group_name_ok("Mac CI") && !group_name_ok("a/b") && !group_name_ok(""));
-        assert_eq!(runner_groups_path("acme"), "orgs/acme/actions/runner-groups?per_page=100");
+        assert_eq!(
+            runner_groups_path("acme"),
+            "orgs/acme/actions/runner-groups?per_page=100"
+        );
     }
 
     #[test]
@@ -176,7 +226,10 @@ mod tests {
         ]);
         assert_eq!(
             scan_repos(&l, 2),
-            vec![("acme".to_owned(), "new".to_owned()), ("acme".to_owned(), "mid".to_owned())]
+            vec![
+                ("acme".to_owned(), "new".to_owned()),
+                ("acme".to_owned(), "mid".to_owned())
+            ]
         );
     }
 }

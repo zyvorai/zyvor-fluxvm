@@ -738,11 +738,15 @@ pub async fn run(command: MacCommand) -> Result<()> {
         MacCommand::Runner(a) => return tokio::task::block_in_place(|| crate::mac_runner::run(a)),
         MacCommand::Ps { json, opts } if opts.fleet.is_some() => {
             let inv = opts.fleet.clone().unwrap_or_default();
-            return tokio::task::block_in_place(|| crate::mac_fleet_agg::ps_fleet(&inv, json, &opts));
+            return tokio::task::block_in_place(|| {
+                crate::mac_fleet_agg::ps_fleet(&inv, json, &opts)
+            });
         }
         MacCommand::Images { json, extra } if extra.fleet.is_some() => {
             let inv = extra.fleet.clone().unwrap_or_default();
-            return tokio::task::block_in_place(|| crate::mac_fleet_agg::images_fleet(&inv, json, &extra));
+            return tokio::task::block_in_place(|| {
+                crate::mac_fleet_agg::images_fleet(&inv, json, &extra)
+            });
         }
         MacCommand::Run {
             publish,
@@ -757,7 +761,9 @@ pub async fn run(command: MacCommand) -> Result<()> {
             ..
         } => {
             return tokio::task::block_in_place(|| {
-                crate::mac_fleet_run::mac_run_fleet(publish, name, user, wait, opts, sched, &queue, image, cmd)
+                crate::mac_fleet_run::mac_run_fleet(
+                    publish, name, user, wait, opts, sched, &queue, image, cmd,
+                )
             });
         }
         _ => {}
@@ -769,7 +775,9 @@ pub async fn run(command: MacCommand) -> Result<()> {
     let store = Store::open(mac_store::default_root()?)?;
     match command {
         MacCommand::Images { json, extra } => crate::mac_plus::images(&store, json, &extra)?,
-        MacCommand::Pull { reference, extra } => crate::mac_plus::pull(&store, &reference, &extra).await?,
+        MacCommand::Pull { reference, extra } => {
+            crate::mac_plus::pull(&store, &reference, &extra).await?
+        }
         MacCommand::Push {
             reference,
             remote,

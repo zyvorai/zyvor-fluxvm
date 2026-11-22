@@ -139,7 +139,8 @@ pub(super) async fn decide(
             if super::enroll::node_auth() == super::enroll::NodeAuth::Legacy {
                 return Err(AppError(
                     StatusCode::CONFLICT,
-                    "enrollment is off (--node-auth legacy); pairing cannot issue credentials".into(),
+                    "enrollment is off (--node-auth legacy); pairing cannot issue credentials"
+                        .into(),
                 ));
             }
             // Lock order: the book, then the enrollment state.
@@ -164,7 +165,10 @@ pub(super) async fn decide(
             book.deny(now, &key).map_err(app)?;
             Ok(Json(json!({"denied": key})))
         }
-        _ => Err(AppError(StatusCode::NOT_FOUND, "unknown pairing action".into())),
+        _ => Err(AppError(
+            StatusCode::NOT_FOUND,
+            "unknown pairing action".into(),
+        )),
     }
 }
 
@@ -196,7 +200,9 @@ mod tests {
             .insert(ConnectInfo("10.1.2.3:5000".parse::<SocketAddr>().unwrap()));
         let resp = app.clone().oneshot(req).await.unwrap();
         let s = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
         (s, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
@@ -225,7 +231,14 @@ mod tests {
         let sig = keys.claim_signature(&id, &sp);
 
         // Nothing is granted yet.
-        let (s, v) = call(&app, "POST", "/fleet/pair/claim", None, json!({"id": id, "sig": sig})).await;
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/pair/claim",
+            None,
+            json!({"id": id, "sig": sig}),
+        )
+        .await;
         assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("pending")));
 
         // Listing and approving need the operator.
@@ -240,7 +253,11 @@ mod tests {
         let (s, v) = call(&app, "GET", "/fleet/pair/pending", Some("admin"), json!({})).await;
         assert_eq!(s, StatusCode::OK);
         let code = v["items"][0]["code"].as_str().unwrap().to_owned();
-        assert_eq!(code, keys.code(&id, &sp), "the screen and the page show the same code");
+        assert_eq!(
+            code,
+            keys.code(&id, &sp),
+            "the screen and the page show the same code"
+        );
 
         // Approve by the code a person reads off the machine.
         let (s, v) = call(
@@ -255,7 +272,14 @@ mod tests {
 
         // Claims are rate limited to one a second per request.
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-        let (s, v) = call(&app, "POST", "/fleet/pair/claim", None, json!({"id": id, "sig": sig})).await;
+        let (s, v) = call(
+            &app,
+            "POST",
+            "/fleet/pair/claim",
+            None,
+            json!({"id": id, "sig": sig}),
+        )
+        .await;
         assert_eq!(s, StatusCode::OK, "{v}");
         let sealed = unhex_vec(v["sealed"].as_str().unwrap());
         let cred = keys.open_credential(&id, &sp, &sealed).unwrap();
@@ -270,11 +294,31 @@ mod tests {
         assert_ne!(s, StatusCode::OK);
         // A second collection (replay) yields nothing.
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-        let (s, _) = call(&app, "POST", "/fleet/pair/claim", None, json!({"id": id, "sig": sig})).await;
+        let (s, _) = call(
+            &app,
+            "POST",
+            "/fleet/pair/claim",
+            None,
+            json!({"id": id, "sig": sig}),
+        )
+        .await;
         assert_eq!(s, StatusCode::CONFLICT);
         // No join token is left usable.
-        let (_, v) = call(&app, "GET", "/fleet/enroll/tokens", Some("admin"), json!({})).await;
-        assert!(v["items"].as_array().unwrap().iter().all(|t| t["revoked"] == true));
+        let (_, v) = call(
+            &app,
+            "GET",
+            "/fleet/enroll/tokens",
+            Some("admin"),
+            json!({}),
+        )
+        .await;
+        assert!(
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["revoked"] == true)
+        );
     }
 
     fn unhex_vec(s: &str) -> Vec<u8> {

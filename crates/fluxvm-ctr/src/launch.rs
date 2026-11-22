@@ -30,7 +30,13 @@ fn errno() -> io::Error {
     io::Error::last_os_error()
 }
 
-fn mount(src: &str, target: &Path, fstype: Option<&str>, flags: libc::c_ulong, data: Option<&str>) -> io::Result<()> {
+fn mount(
+    src: &str,
+    target: &Path,
+    fstype: Option<&str>,
+    flags: libc::c_ulong,
+    data: Option<&str>,
+) -> io::Result<()> {
     let s = CString::new(src).unwrap();
     let t = CString::new(target.as_os_str().as_bytes()).unwrap();
     let f = fstype.map(|f| CString::new(f).unwrap());
@@ -49,13 +55,47 @@ fn mount(src: &str, target: &Path, fstype: Option<&str>, flags: libc::c_ulong, d
 
 pub fn cap_number(name: &str) -> Option<u32> {
     const NAMES: &[&str] = &[
-        "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_DAC_READ_SEARCH", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL", "CAP_SETGID",
-        "CAP_SETUID", "CAP_SETPCAP", "CAP_LINUX_IMMUTABLE", "CAP_NET_BIND_SERVICE", "CAP_NET_BROADCAST", "CAP_NET_ADMIN",
-        "CAP_NET_RAW", "CAP_IPC_LOCK", "CAP_IPC_OWNER", "CAP_SYS_MODULE", "CAP_SYS_RAWIO", "CAP_SYS_CHROOT",
-        "CAP_SYS_PTRACE", "CAP_SYS_PACCT", "CAP_SYS_ADMIN", "CAP_SYS_BOOT", "CAP_SYS_NICE", "CAP_SYS_RESOURCE",
-        "CAP_SYS_TIME", "CAP_SYS_TTY_CONFIG", "CAP_MKNOD", "CAP_LEASE", "CAP_AUDIT_WRITE", "CAP_AUDIT_CONTROL",
-        "CAP_SETFCAP", "CAP_MAC_OVERRIDE", "CAP_MAC_ADMIN", "CAP_SYSLOG", "CAP_WAKE_ALARM", "CAP_BLOCK_SUSPEND",
-        "CAP_AUDIT_READ", "CAP_PERFMON", "CAP_BPF", "CAP_CHECKPOINT_RESTORE",
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_DAC_READ_SEARCH",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_SETGID",
+        "CAP_SETUID",
+        "CAP_SETPCAP",
+        "CAP_LINUX_IMMUTABLE",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_NET_BROADCAST",
+        "CAP_NET_ADMIN",
+        "CAP_NET_RAW",
+        "CAP_IPC_LOCK",
+        "CAP_IPC_OWNER",
+        "CAP_SYS_MODULE",
+        "CAP_SYS_RAWIO",
+        "CAP_SYS_CHROOT",
+        "CAP_SYS_PTRACE",
+        "CAP_SYS_PACCT",
+        "CAP_SYS_ADMIN",
+        "CAP_SYS_BOOT",
+        "CAP_SYS_NICE",
+        "CAP_SYS_RESOURCE",
+        "CAP_SYS_TIME",
+        "CAP_SYS_TTY_CONFIG",
+        "CAP_MKNOD",
+        "CAP_LEASE",
+        "CAP_AUDIT_WRITE",
+        "CAP_AUDIT_CONTROL",
+        "CAP_SETFCAP",
+        "CAP_MAC_OVERRIDE",
+        "CAP_MAC_ADMIN",
+        "CAP_SYSLOG",
+        "CAP_WAKE_ALARM",
+        "CAP_BLOCK_SUSPEND",
+        "CAP_AUDIT_READ",
+        "CAP_PERFMON",
+        "CAP_BPF",
+        "CAP_CHECKPOINT_RESTORE",
     ];
     NAMES.iter().position(|n| *n == name).map(|i| i as u32)
 }
@@ -71,7 +111,9 @@ fn restrict_capabilities(keep: &[String]) -> Result<()> {
         .map(|c| cap_number(c).with_context(|| format!("unknown capability {c}")))
         .collect::<Result<_>>()?;
     for cap in 0..=last {
-        if !keep.contains(&cap) && unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) } != 0 {
+        if !keep.contains(&cap)
+            && unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) } != 0
+        {
             let e = errno();
             // EINVAL: this kernel has fewer capabilities than the table.
             if e.raw_os_error() != Some(libc::EINVAL) {
@@ -101,9 +143,14 @@ fn parse_user(user: &str) -> Option<(u32, u32)> {
 }
 
 fn drop_identity(spec: &ContainerSpec, rootless: bool) -> Result<()> {
-    let Some((uid, gid)) = parse_user(&spec.user) else { return Ok(()) };
+    let Some((uid, gid)) = parse_user(&spec.user) else {
+        return Ok(());
+    };
     if rootless && (uid != 0 || gid != 0) {
-        bail!("a rootless container maps only your own uid to root; user {} needs a root daemon (or newuidmap, not supported yet)", spec.user);
+        bail!(
+            "a rootless container maps only your own uid to root; user {} needs a root daemon (or newuidmap, not supported yet)",
+            spec.user
+        );
     }
     unsafe {
         if libc::setgroups(0, std::ptr::null()) != 0 && !rootless {
@@ -130,7 +177,10 @@ fn exec_argv(spec: &ContainerSpec) -> io::Error {
         }
     }
     if !has_path {
-        cmd.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        cmd.env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
     }
     cmd.env("HOSTNAME", &spec.name);
     cmd.current_dir(&spec.workdir);
@@ -139,11 +189,16 @@ fn exec_argv(spec: &ContainerSpec) -> io::Error {
 
 /// Write the cgroup limits when no service manager did (`cgroup_dir` set), then move this process in.
 fn setup_cgroup(spec: &ContainerSpec) -> Result<()> {
-    let Some(dir) = &spec.cgroup_dir else { return Ok(()) };
+    let Some(dir) = &spec.cgroup_dir else {
+        return Ok(());
+    };
     let files = crate::render::cgroup_files(spec);
     fs::create_dir_all(dir).with_context(|| format!("creating cgroup {}", dir.display()))?;
     if let Some(parent) = dir.parent() {
-        let need: Vec<String> = crate::render::controllers_needed(spec).iter().map(|c| format!("+{c}")).collect();
+        let need: Vec<String> = crate::render::controllers_needed(spec)
+            .iter()
+            .map(|c| format!("+{c}"))
+            .collect();
         if !need.is_empty() {
             // Best effort: the parent may already have them enabled, or be delegated to us with them.
             let _ = fs::write(parent.join("cgroup.subtree_control"), need.join(" "));
@@ -157,7 +212,8 @@ fn setup_cgroup(spec: &ContainerSpec) -> Result<()> {
             )
         })?;
     }
-    fs::write(dir.join("cgroup.procs"), std::process::id().to_string()).context("moving the launcher into its cgroup")?;
+    fs::write(dir.join("cgroup.procs"), std::process::id().to_string())
+        .context("moving the launcher into its cgroup")?;
     Ok(())
 }
 
@@ -178,15 +234,33 @@ fn mkdir_p(p: &Path) {
 /// Everything between "new mount namespace" and "pivot_root into the image".
 fn setup_root(spec: &ContainerSpec) -> Result<()> {
     let root = &spec.rootfs;
-    mount("none", Path::new("/"), None, libc::MS_REC | libc::MS_PRIVATE, None).context("making / private")?;
-    mount(&root.display().to_string(), root, None, libc::MS_BIND | libc::MS_REC, None)
-        .with_context(|| format!("bind-mounting the rootfs {}", root.display()))?;
+    mount(
+        "none",
+        Path::new("/"),
+        None,
+        libc::MS_REC | libc::MS_PRIVATE,
+        None,
+    )
+    .context("making / private")?;
+    mount(
+        &root.display().to_string(),
+        root,
+        None,
+        libc::MS_BIND | libc::MS_REC,
+        None,
+    )
+    .with_context(|| format!("bind-mounting the rootfs {}", root.display()))?;
     if spec.hardening.read_only_root {
         // A remount of a bind mount must keep the flags the kernel locked in a user namespace.
         let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
         let c = cstr(root)?;
         let locked = if unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0 {
-            st.f_flag & (libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC | libc::ST_NOATIME | libc::ST_RELATIME)
+            st.f_flag
+                & (libc::ST_NOSUID
+                    | libc::ST_NODEV
+                    | libc::ST_NOEXEC
+                    | libc::ST_NOATIME
+                    | libc::ST_RELATIME)
         } else {
             0
         };
@@ -210,30 +284,69 @@ fn setup_root(spec: &ContainerSpec) -> Result<()> {
     }
     let proc_ = root.join("proc");
     mkdir_p(&proc_);
-    mount("proc", &proc_, Some("proc"), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None).context("mounting /proc")?;
+    mount(
+        "proc",
+        &proc_,
+        Some("proc"),
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        None,
+    )
+    .context("mounting /proc")?;
     let dev = root.join("dev");
     mkdir_p(&dev);
-    mount("tmpfs", &dev, Some("tmpfs"), libc::MS_NOSUID | libc::MS_NOEXEC, Some("mode=755,size=1m")).context("mounting /dev")?;
+    mount(
+        "tmpfs",
+        &dev,
+        Some("tmpfs"),
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        Some("mode=755,size=1m"),
+    )
+    .context("mounting /dev")?;
     for node in ["null", "zero", "full", "random", "urandom", "tty"] {
         let target = dev.join(node);
         fs::File::create(&target).with_context(|| format!("creating /dev/{node}"))?;
-        mount(&format!("/dev/{node}"), &target, None, libc::MS_BIND, None).with_context(|| format!("binding /dev/{node}"))?;
+        mount(&format!("/dev/{node}"), &target, None, libc::MS_BIND, None)
+            .with_context(|| format!("binding /dev/{node}"))?;
     }
-    for (link, to) in [("stdin", "/proc/self/fd/0"), ("stdout", "/proc/self/fd/1"), ("stderr", "/proc/self/fd/2"), ("fd", "/proc/self/fd")] {
+    for (link, to) in [
+        ("stdin", "/proc/self/fd/0"),
+        ("stdout", "/proc/self/fd/1"),
+        ("stderr", "/proc/self/fd/2"),
+        ("fd", "/proc/self/fd"),
+    ] {
         let _ = std::os::unix::fs::symlink(to, dev.join(link));
     }
     let shm = dev.join("shm");
     mkdir_p(&shm);
-    let _ = mount("shm", &shm, Some("tmpfs"), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, Some("mode=1777,size=64m"));
+    let _ = mount(
+        "shm",
+        &shm,
+        Some("tmpfs"),
+        libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+        Some("mode=1777,size=64m"),
+    );
     for (d, mode) in [("tmp", "mode=1777,size=256m"), ("run", "mode=755,size=64m")] {
         let p = root.join(d);
         mkdir_p(&p);
-        mount(d, &p, Some("tmpfs"), libc::MS_NOSUID | libc::MS_NODEV, Some(mode)).with_context(|| format!("mounting /{d}"))?;
+        mount(
+            d,
+            &p,
+            Some("tmpfs"),
+            libc::MS_NOSUID | libc::MS_NODEV,
+            Some(mode),
+        )
+        .with_context(|| format!("mounting /{d}"))?;
     }
     if spec.net == Net::Host {
         let target = root.join("etc/resolv.conf");
         if target.exists() {
-            let _ = mount("/etc/resolv.conf", &target, None, libc::MS_BIND | libc::MS_RDONLY, None);
+            let _ = mount(
+                "/etc/resolv.conf",
+                &target,
+                None,
+                libc::MS_BIND | libc::MS_RDONLY,
+                None,
+            );
         }
     }
     // pivot_root(".", "."): the old root is stacked under the new one and then detached; no put_old directory needed.
@@ -300,8 +413,16 @@ fn wait_for(pid: i32, grace: std::time::Duration) -> i32 {
 /// from the host) and `<state_dir>/exit`.
 pub fn run(spec: &ContainerSpec) -> Result<i32> {
     spec.validate().map_err(anyhow::Error::msg)?;
-    if spec.net == Net::Host && spec.hardening.capabilities.iter().any(|c| c == "CAP_NET_ADMIN") {
-        bail!("CAP_NET_ADMIN with the host network namespace would let the container reconfigure the host network");
+    if spec.net == Net::Host
+        && spec
+            .hardening
+            .capabilities
+            .iter()
+            .any(|c| c == "CAP_NET_ADMIN")
+    {
+        bail!(
+            "CAP_NET_ADMIN with the host network namespace would let the container reconfigure the host network"
+        );
     }
     let uid = unsafe { libc::geteuid() };
     let gid = unsafe { libc::getegid() };
@@ -323,7 +444,11 @@ pub fn run(spec: &ContainerSpec) -> Result<i32> {
         if rootless && matches!(e.raw_os_error(), Some(libc::EPERM) | Some(libc::EACCES)) {
             bail!(
                 "unshare({}) was refused ({e}). A rootless container needs an unprivileged user namespace; on Ubuntu 23.10+ AppArmor restricts that (kernel.apparmor_restrict_unprivileged_userns=1): install deploy/apparmor/fluxvm-container-run, or run the daemon as root. `fluxctl doctor` shows which",
-                if rootless { "NEWUSER|NEWPID|NEWIPC|NEWUTS" } else { "" }
+                if rootless {
+                    "NEWUSER|NEWPID|NEWIPC|NEWUTS"
+                } else {
+                    ""
+                }
             );
         }
         bail!("unshare: {e}");
@@ -341,7 +466,15 @@ pub fn run(spec: &ContainerSpec) -> Result<i32> {
     }
     if pid == 0 {
         // PID 1 of the new pid namespace.
-        unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) };
+        unsafe {
+            libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGKILL as libc::c_ulong,
+                0,
+                0,
+                0,
+            )
+        };
         let code = match child(spec, rootless) {
             Ok(never) => match never {},
             Err(e) => {
@@ -353,11 +486,17 @@ pub fn run(spec: &ContainerSpec) -> Result<i32> {
     }
     CHILD.store(pid, Ordering::SeqCst);
     if let Err(e) = fs::write(spec.state_dir.join("pid"), pid.to_string()) {
-        eprintln!("fluxvm-container-run: recording the pid in {}: {e}", spec.state_dir.display());
+        eprintln!(
+            "fluxvm-container-run: recording the pid in {}: {e}",
+            spec.state_dir.display()
+        );
     }
     let code = wait_for(pid, std::time::Duration::from_secs(10));
     if let Err(e) = fs::write(spec.state_dir.join("exit"), code.to_string()) {
-        eprintln!("fluxvm-container-run: recording the exit code in {}: {e}", spec.state_dir.display());
+        eprintln!(
+            "fluxvm-container-run: recording the exit code in {}: {e}",
+            spec.state_dir.display()
+        );
     }
     Ok(code)
 }
@@ -373,7 +512,9 @@ fn child(spec: &ContainerSpec, rootless: bool) -> Result<std::convert::Infallibl
     setup_root(spec)?;
     restrict_capabilities(&spec.hardening.capabilities)?;
     drop_identity(spec, rootless)?;
-    if spec.hardening.no_new_privileges && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+    if spec.hardening.no_new_privileges
+        && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0
+    {
         bail!("no_new_privs: {}", errno());
     }
     apply_seccomp(spec)?;
@@ -383,9 +524,13 @@ fn child(spec: &ContainerSpec, rootless: bool) -> Result<std::convert::Infallibl
 /// Move this process into the cgroup of host pid `pid`. Refused, not skipped: an exec that escaped the memory limit
 /// would make the limit meaningless.
 fn join_cgroup_of(pid: i32) -> Result<()> {
-    let raw = fs::read_to_string(format!("/proc/{pid}/cgroup")).with_context(|| format!("reading /proc/{pid}/cgroup (is the container running?)"))?;
-    let rel = crate::probe::parse_self_cgroup(&raw).context("the container is not in a cgroup v2 hierarchy")?;
-    let mine = fs::read_to_string("/proc/self/cgroup").ok().and_then(|s| crate::probe::parse_self_cgroup(&s));
+    let raw = fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .with_context(|| format!("reading /proc/{pid}/cgroup (is the container running?)"))?;
+    let rel = crate::probe::parse_self_cgroup(&raw)
+        .context("the container is not in a cgroup v2 hierarchy")?;
+    let mine = fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|s| crate::probe::parse_self_cgroup(&s));
     if mine.as_deref() == Some(rel.as_str()) {
         return Ok(());
     }
@@ -403,13 +548,22 @@ fn join_namespaces(pid: i32) -> Result<()> {
         let c = cstr(&ns(n))?;
         let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
-            bail!("opening {}: {} (is the container running?)", ns(n).display(), errno());
+            bail!(
+                "opening {}: {} (is the container running?)",
+                ns(n).display(),
+                errno()
+            );
         }
         Ok(fd)
     };
     let same = |n: &str| -> bool {
-        match (fs::metadata(ns(n)), fs::metadata(format!("/proc/self/ns/{n}"))) {
-            (Ok(a), Ok(b)) => std::os::unix::fs::MetadataExt::ino(&a) == std::os::unix::fs::MetadataExt::ino(&b),
+        match (
+            fs::metadata(ns(n)),
+            fs::metadata(format!("/proc/self/ns/{n}")),
+        ) {
+            (Ok(a), Ok(b)) => {
+                std::os::unix::fs::MetadataExt::ino(&a) == std::os::unix::fs::MetadataExt::ino(&b)
+            }
             _ => false,
         }
     };
@@ -459,7 +613,8 @@ pub fn write_in(pid: i32, path: &str, mode: u32, data: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     join_namespaces(pid)?;
     if let Some(parent) = Path::new(path).parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {} in the container", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating {} in the container", parent.display()))?;
     }
     let mut f = fs::OpenOptions::new()
         .write(true)
@@ -488,13 +643,23 @@ pub fn exec_in(spec: &ContainerSpec, pid: i32, argv: &[String]) -> Result<i32> {
         bail!("fork: {}", errno());
     }
     if pid_child == 0 {
-        unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) };
+        unsafe {
+            libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGKILL as libc::c_ulong,
+                0,
+                0,
+                0,
+            )
+        };
         let mut s = spec.clone();
         s.argv = argv.to_vec();
         let r: Result<std::convert::Infallible> = (|| {
             restrict_capabilities(&s.hardening.capabilities)?;
             drop_identity(&s, rootless)?;
-            if s.hardening.no_new_privileges && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+            if s.hardening.no_new_privileges
+                && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0
+            {
                 bail!("no_new_privs: {}", errno());
             }
             apply_seccomp(&s)?;
@@ -537,7 +702,15 @@ mod tests {
 
     #[test]
     fn a_rootless_container_for_another_uid_is_refused() {
-        let s = ContainerSpec { user: "1000".into(), ..Default::default() };
-        assert!(drop_identity(&s, true).unwrap_err().to_string().contains("root daemon"));
+        let s = ContainerSpec {
+            user: "1000".into(),
+            ..Default::default()
+        };
+        assert!(
+            drop_identity(&s, true)
+                .unwrap_err()
+                .to_string()
+                .contains("root daemon")
+        );
     }
 }

@@ -598,7 +598,11 @@ fn load(file: Option<PathBuf>, project: Option<&str>) -> Result<Resolved> {
 fn profiles_from_env(flags: &[String]) -> Vec<String> {
     let mut v = flags.to_vec();
     if let Ok(e) = std::env::var("COMPOSE_PROFILES") {
-        v.extend(e.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        v.extend(
+            e.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
     }
     v
 }
@@ -607,7 +611,10 @@ fn profiles_from_env(flags: &[String]) -> Vec<String> {
 /// two-service limit is not an error here (only `up` starts anything). Returns the project and the services in start order.
 fn load_existing(file: Option<PathBuf>, project: Option<&str>) -> Result<(String, Vec<String>)> {
     match load_with(file.clone(), project, &["*".to_string()]) {
-        Ok(r) => Ok((r.project, r.services.into_iter().map(|s| s.service).collect())),
+        Ok(r) => Ok((
+            r.project,
+            r.services.into_iter().map(|s| s.service).collect(),
+        )),
         Err(e) => match project {
             Some(p) => Ok((p.to_string(), vec![])),
             None => Err(e),
@@ -615,7 +622,11 @@ fn load_existing(file: Option<PathBuf>, project: Option<&str>) -> Result<(String
     }
 }
 
-fn load_with(file: Option<PathBuf>, project: Option<&str>, profiles: &[String]) -> Result<Resolved> {
+fn load_with(
+    file: Option<PathBuf>,
+    project: Option<&str>,
+    profiles: &[String],
+) -> Result<Resolved> {
     let path = find_file(file)?;
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -623,9 +634,14 @@ fn load_with(file: Option<PathBuf>, project: Option<&str>, profiles: &[String]) 
     let abs = std::fs::canonicalize(&path).unwrap_or(path.clone());
     let base = abs.parent().unwrap_or(Path::new("."));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    resolve_with(&parsed, project, base, home.as_deref(), |k| {
-        std::env::var(k).ok()
-    }, profiles)
+    resolve_with(
+        &parsed,
+        project,
+        base,
+        home.as_deref(),
+        |k| std::env::var(k).ok(),
+        profiles,
+    )
     .with_context(|| path.display().to_string())
 }
 
@@ -650,8 +666,15 @@ pub fn run_client(cmd: ComposeCommand) -> Result<()> {
             }
             for s in &r.services {
                 for dep in &s.healthy_deps {
-                    let image = &r.services.iter().find(|d| &d.service == dep).map(|d| d.spec.image.clone());
-                    let built = r.services.iter().any(|d| &d.service == dep && d.build.is_some());
+                    let image = &r
+                        .services
+                        .iter()
+                        .find(|d| &d.service == dep)
+                        .map(|d| d.spec.image.clone());
+                    let built = r
+                        .services
+                        .iter()
+                        .any(|d| &d.service == dep && d.build.is_some());
                     let has = built
                         || image
                             .as_deref()
@@ -744,9 +767,12 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                         continue;
                     }
                     eprintln!("building {} from {} ...", s.spec.image, b.context.display());
-                    Box::pin(crate::mac_cmd::run_daemon(r, build_command(&s.spec.image, b, wait)))
-                        .await
-                        .with_context(|| format!("service {:?}: build", s.service))?;
+                    Box::pin(crate::mac_cmd::run_daemon(
+                        r,
+                        build_command(&s.spec.image, b, wait),
+                    ))
+                    .await
+                    .with_context(|| format!("service {:?}: build", s.service))?;
                 }
             }
             eprintln!(
@@ -825,15 +851,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             let (project, _) = load_existing(t.file, t.project.as_deref())?;
             let vm = service_instance(r, &project, &service).await?;
             let name = vm["name"].as_str().unwrap_or_default().to_string();
-            crate::mac_more::run_daemon(
-                r,
-                crate::mac_more::MacMore::Logs {
-                    name,
-                    follow,
-                    tail,
-                },
-            )
-            .await
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Logs { name, follow, tail })
+                .await
         }
         ComposeCommand::Exec {
             service,
@@ -859,7 +878,10 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 })
                 .filter_map(|v| v["name"].as_str().map(String::from))
                 .collect();
-            ensure!(!names.is_empty(), "no matching instances in project {project:?}");
+            ensure!(
+                !names.is_empty(),
+                "no matching instances in project {project:?}"
+            );
             crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Restart { names }).await
         }
         ComposeCommand::Ps { file, project, all } => {
@@ -946,7 +968,10 @@ mod tests {
         assert_eq!(app.spec.image, "ci-app:latest");
         let b = app.build.as_ref().unwrap();
         assert_eq!(b.context, Path::new("/proj/My App/./app"));
-        assert_eq!(b.file.as_deref(), Some(Path::new("/proj/My App/./app/Macfile.ci")));
+        assert_eq!(
+            b.file.as_deref(),
+            Some(Path::new("/proj/My App/./app/Macfile.ci"))
+        );
         assert_eq!(b.args, ["MODE=fast"]);
         let r = res("services:\n  a:\n    build: ./x\n    image: mine:1\n").unwrap();
         assert_eq!(r.services[0].spec.image, "mine:1");
@@ -965,7 +990,10 @@ mod tests {
         };
         assert_eq!(go(&[]).unwrap().services.len(), 2);
         let e = go(&["debug"]).unwrap_err().to_string();
-        assert!(e.contains("at most 2 macOS VMs") && e.contains("--profile"), "{e}");
+        assert!(
+            e.contains("at most 2 macOS VMs") && e.contains("--profile"),
+            "{e}"
+        );
         assert!(go(&["*"]).is_err());
         let only = parse("services:\n  a:\n    image: a:1\n    profiles: [x]\n").unwrap();
         let e = resolve_with(&only, None, Path::new("/p"), None, |_| None, &[])
@@ -983,10 +1011,22 @@ mod tests {
             c: ComposeCommand,
         }
         let p = |a: &[&str]| T::try_parse_from(std::iter::once("t").chain(a.iter().copied()));
-        assert!(matches!(p(&["logs", "db", "--tail", "5", "-p", "ci"]).unwrap().c, ComposeCommand::Logs { tail: 5, .. }));
-        assert!(matches!(p(&["exec", "db", "--", "ls"]).unwrap().c, ComposeCommand::Exec { .. }));
-        assert!(matches!(p(&["restart"]).unwrap().c, ComposeCommand::Restart { .. }));
-        assert!(matches!(p(&["up", "--build", "--profile", "debug"]).unwrap().c, ComposeCommand::Up { build: true, .. }));
+        assert!(matches!(
+            p(&["logs", "db", "--tail", "5", "-p", "ci"]).unwrap().c,
+            ComposeCommand::Logs { tail: 5, .. }
+        ));
+        assert!(matches!(
+            p(&["exec", "db", "--", "ls"]).unwrap().c,
+            ComposeCommand::Exec { .. }
+        ));
+        assert!(matches!(
+            p(&["restart"]).unwrap().c,
+            ComposeCommand::Restart { .. }
+        ));
+        assert!(matches!(
+            p(&["up", "--build", "--profile", "debug"]).unwrap().c,
+            ComposeCommand::Up { build: true, .. }
+        ));
         assert!(p(&["exec", "db"]).is_err());
     }
 
@@ -1036,7 +1076,10 @@ mod tests {
         );
         assert!(e.contains("networks"), "{e}");
         // `build:` is supported now, but a service still needs an image or a build.
-        let e = format!("{:#}", res("services:\n  a:\n    command: [\"x\"]\n").unwrap_err());
+        let e = format!(
+            "{:#}",
+            res("services:\n  a:\n    command: [\"x\"]\n").unwrap_err()
+        );
         assert!(e.contains("image"), "{e}");
         let e = format!(
             "{:#}",

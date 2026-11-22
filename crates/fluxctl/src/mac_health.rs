@@ -112,7 +112,9 @@ pub fn labels_patch(h: &Health) -> Value {
 /// What `mac inspect` shows under `state.health`; `null` when the image has no healthcheck and nothing ran.
 pub fn inspect_value(vm: &Value) -> Value {
     match from_labels(vm) {
-        Some(h) => json!({"status": h.status.as_str(), "failing_streak": h.streak, "last_check_unix": h.checked_unix}),
+        Some(h) => {
+            json!({"status": h.status.as_str(), "failing_streak": h.streak, "last_check_unix": h.checked_unix})
+        }
         None => Value::Null,
     }
 }
@@ -190,8 +192,7 @@ pub(crate) async fn probe_vm<P: Prober>(
 /// The healthcheck of the image an instance was made from, when the image is still in the store.
 pub fn healthcheck_of(vm: &Value) -> Option<Healthcheck> {
     let image = vm["labels"][crate::mac_inspect::IMAGE_LABEL].as_str()?;
-    let store =
-        crate::mac_store::Store::open(crate::mac_store::default_root().ok()?).ok()?;
+    let store = crate::mac_store::Store::open(crate::mac_store::default_root().ok()?).ok()?;
     crate::mac_config::load(&store.resolve(image).ok()?)
         .ok()?
         .healthcheck
@@ -353,7 +354,11 @@ pub async fn health_once(r: &crate::remote::Remote, name: &str, json_out: bool) 
             }))?
         );
     } else {
-        println!("{name}: {} (failing streak {})", h.status.as_str(), h.streak);
+        println!(
+            "{name}: {} (failing streak {})",
+            h.status.as_str(),
+            h.streak
+        );
     }
     if h.status != Status::Healthy {
         std::process::exit(1);
@@ -429,7 +434,11 @@ mod tests {
     async fn probe_vm_needs_a_running_vm_with_an_address() {
         let mut f = Fake(VecDeque::from([true]));
         let stopped = json!({"status": "stopped", "guest_ip": "1.2.3.4"});
-        assert!(probe_vm(&mut f, &stopped, &hc(1), "admin", 1).await.is_none());
+        assert!(
+            probe_vm(&mut f, &stopped, &hc(1), "admin", 1)
+                .await
+                .is_none()
+        );
         let noip = json!({"status": "running"});
         assert!(probe_vm(&mut f, &noip, &hc(1), "admin", 1).await.is_none());
         let up = json!({"status": "running", "guest_ip": "1.2.3.4"});
@@ -469,14 +478,9 @@ mod tests {
             .unwrap_err();
         assert!(e.to_string().contains("it is stopped"), "{e}");
         let mut s = Script(VecDeque::new());
-        let e = wait_healthy(
-            &mut s,
-            "db",
-            Some(Duration::ZERO),
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap_err();
+        let e = wait_healthy(&mut s, "db", Some(Duration::ZERO), Duration::from_millis(1))
+            .await
+            .unwrap_err();
         assert!(e.to_string().contains("not healthy after 0s"), "{e}");
     }
 }

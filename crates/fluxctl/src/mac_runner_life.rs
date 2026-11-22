@@ -121,7 +121,11 @@ pub fn shutdown_cleanup(gh: &dyn Github, tr: &dyn Transport, live: &[Live]) -> V
             let ok = delete_instance(tr, t, &name);
             out.push(format!(
                 "{name}: {} on {}",
-                if ok { "guest deleted" } else { "guest not deleted (gone already or Mac unreachable)" },
+                if ok {
+                    "guest deleted"
+                } else {
+                    "guest not deleted (gone already or Mac unreachable)"
+                },
                 t.label()
             ));
         }
@@ -130,7 +134,11 @@ pub fn shutdown_cleanup(gh: &dyn Github, tr: &dyn Transport, live: &[Live]) -> V
             out.push(format!(
                 "{NAME_PREFIX}{}: {}",
                 l.id,
-                if ok { "runner unregistered" } else { "runner not unregistered (gone already)" }
+                if ok {
+                    "runner unregistered"
+                } else {
+                    "runner not unregistered (gone already)"
+                }
             ));
         }
     }
@@ -160,16 +168,29 @@ pub struct SweepPlan {
 
 /// Orphans: `fleet-<id>` guests and idle `fluxvm-<id>` runners whose id `keep` does not claim (a live lease of another
 /// process, or a job of this one). A busy runner is never touched: it is running a job.
-pub fn plan_sweep(guests: &[GuestSeen], runners: &[RunnerSeen], keep: &dyn Fn(&str) -> bool) -> SweepPlan {
+pub fn plan_sweep(
+    guests: &[GuestSeen],
+    runners: &[RunnerSeen],
+    keep: &dyn Fn(&str) -> bool,
+) -> SweepPlan {
     SweepPlan {
         guests: guests
             .iter()
-            .filter(|g| g.name.strip_prefix(GUEST_PREFIX).is_some_and(|id| !id.is_empty() && !keep(id)))
+            .filter(|g| {
+                g.name
+                    .strip_prefix(GUEST_PREFIX)
+                    .is_some_and(|id| !id.is_empty() && !keep(id))
+            })
             .cloned()
             .collect(),
         runners: runners
             .iter()
-            .filter(|r| !r.busy && r.name.strip_prefix(NAME_PREFIX).is_some_and(|id| !id.is_empty() && !keep(id)))
+            .filter(|r| {
+                !r.busy
+                    && r.name
+                        .strip_prefix(NAME_PREFIX)
+                        .is_some_and(|id| !id.is_empty() && !keep(id))
+            })
             .cloned()
             .collect(),
     }
@@ -193,8 +214,14 @@ pub fn parse_guests(target: &Target, ps_json: &str) -> Vec<GuestSeen> {
 }
 
 pub fn list_guests(tr: &dyn Transport, target: &Target) -> Vec<GuestSeen> {
-    let script = format!("{PRELUDE}[ -n \"$FLUXCTL\" ] && \"$FLUXCTL\" mac ps -a --json 2>/dev/null\n");
-    match tr.run_timed(target, &remote(&script), None, Some(Duration::from_secs(60))) {
+    let script =
+        format!("{PRELUDE}[ -n \"$FLUXCTL\" ] && \"$FLUXCTL\" mac ps -a --json 2>/dev/null\n");
+    match tr.run_timed(
+        target,
+        &remote(&script),
+        None,
+        Some(Duration::from_secs(60)),
+    ) {
         Ok(o) if o.ok() => parse_guests(target, &o.stdout),
         _ => vec![],
     }
@@ -213,7 +240,11 @@ pub fn sweep(
         .runners()
         .map(|v| {
             v.into_iter()
-                .map(|r| RunnerSeen { id: r.id, name: r.name, busy: r.busy })
+                .map(|r| RunnerSeen {
+                    id: r.id,
+                    name: r.name,
+                    busy: r.busy,
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -221,26 +252,41 @@ pub fn sweep(
     let mut out = vec![];
     for g in &plan.guests {
         if dry {
-            out.push(format!("sweep: would delete orphaned guest {} on {}", g.name, g.target.label()));
+            out.push(format!(
+                "sweep: would delete orphaned guest {} on {}",
+                g.name,
+                g.target.label()
+            ));
         } else {
             let ok = delete_instance(tr, &g.target, &g.name);
             out.push(format!(
                 "sweep: orphaned guest {} on {} {}",
                 g.name,
                 g.target.label(),
-                if ok { "deleted" } else { "could not be deleted" }
+                if ok {
+                    "deleted"
+                } else {
+                    "could not be deleted"
+                }
             ));
         }
     }
     for r in &plan.runners {
         if dry {
-            out.push(format!("sweep: would unregister orphaned runner {}", r.name));
+            out.push(format!(
+                "sweep: would unregister orphaned runner {}",
+                r.name
+            ));
         } else {
             let ok = gh.remove(r.id).is_ok();
             out.push(format!(
                 "sweep: orphaned runner {} {}",
                 r.name,
-                if ok { "unregistered" } else { "could not be unregistered" }
+                if ok {
+                    "unregistered"
+                } else {
+                    "could not be unregistered"
+                }
             ));
         }
     }
@@ -305,19 +351,50 @@ mod tests {
         let tr = FakeTransport::new(move |_, c| if c.contains("mac ps") { ok(ps) } else { ok("") });
         let gh = Gh {
             runners: vec![
-                RunnerInfo { id: 1, name: "fluxvm-aaa".into(), busy: false, status: "offline".into() },
-                RunnerInfo { id: 2, name: "fluxvm-bbb".into(), busy: true, status: "online".into() },
-                RunnerInfo { id: 3, name: "fluxvm-zzz".into(), busy: false, status: "online".into() },
-                RunnerInfo { id: 4, name: "somebody-else".into(), busy: false, status: "online".into() },
+                RunnerInfo {
+                    id: 1,
+                    name: "fluxvm-aaa".into(),
+                    busy: false,
+                    status: "offline".into(),
+                },
+                RunnerInfo {
+                    id: 2,
+                    name: "fluxvm-bbb".into(),
+                    busy: true,
+                    status: "online".into(),
+                },
+                RunnerInfo {
+                    id: 3,
+                    name: "fluxvm-zzz".into(),
+                    busy: false,
+                    status: "online".into(),
+                },
+                RunnerInfo {
+                    id: 4,
+                    name: "somebody-else".into(),
+                    busy: false,
+                    status: "online".into(),
+                },
             ],
             removed: Default::default(),
         };
         // zzz belongs to another supervisor's live lease
         let lines = sweep(&gh, &tr, &[t()], &|id| id == "zzz", false);
-        assert_eq!(*gh.removed.lock().unwrap(), vec![1], "idle orphan only; busy, claimed and foreign runners stay");
+        assert_eq!(
+            *gh.removed.lock().unwrap(),
+            vec![1],
+            "idle orphan only; busy, claimed and foreign runners stay"
+        );
         let calls = tr.calls_for("mini-1.local");
-        let rms: Vec<_> = calls.iter().filter(|c| c.command.contains("mac rm")).collect();
-        assert_eq!(rms.len(), 2, "fleet-aaa and fleet-bbb; not unlabelled fleet-ccc, not my-vm: {lines:?}");
+        let rms: Vec<_> = calls
+            .iter()
+            .filter(|c| c.command.contains("mac rm"))
+            .collect();
+        assert_eq!(
+            rms.len(),
+            2,
+            "fleet-aaa and fleet-bbb; not unlabelled fleet-ccc, not my-vm: {lines:?}"
+        );
         assert!(lines.iter().all(|l| l.starts_with("sweep:")));
         // a dry sweep changes nothing
         gh.removed.lock().unwrap().clear();
@@ -331,15 +408,27 @@ mod tests {
     #[test]
     fn shutdown_deletes_guests_and_unregisters_runners() {
         let tr = FakeTransport::new(|_, _| ok(""));
-        let gh = Gh { runners: vec![], removed: Default::default() };
+        let gh = Gh {
+            runners: vec![],
+            removed: Default::default(),
+        };
         track_runner("job1", 11);
         track_target("job1", &t());
         track_runner("job2", 12); // never placed: only the runner goes
-        let live: Vec<Live> = live_snapshot().into_iter().filter(|l| l.id.starts_with("job")).collect();
+        let live: Vec<Live> = live_snapshot()
+            .into_iter()
+            .filter(|l| l.id.starts_with("job"))
+            .collect();
         let lines = shutdown_cleanup(&gh, &tr, &live);
         assert_eq!(*gh.removed.lock().unwrap(), vec![11, 12]);
         let calls = tr.calls_for("mini-1.local");
-        assert_eq!(calls.iter().filter(|c| c.command.contains("mac rm") && c.command.contains("fleet-job1")).count(), 1);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.command.contains("mac rm") && c.command.contains("fleet-job1"))
+                .count(),
+            1
+        );
         assert_eq!(lines.len(), 3);
         untrack("job1");
         untrack("job2");

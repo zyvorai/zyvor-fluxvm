@@ -1132,7 +1132,11 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                             body[key] = json!(v);
                         }
                     }
-                    if args.get("allow_container_untrusted").and_then(|v| v.as_bool()) == Some(true) {
+                    if args
+                        .get("allow_container_untrusted")
+                        .and_then(|v| v.as_bool())
+                        == Some(true)
+                    {
                         body["allow_container_untrusted"] = json!(true);
                     }
                     for key in ["template", "name"] {

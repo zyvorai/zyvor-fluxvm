@@ -115,7 +115,9 @@ impl VmManager {
                 );
             }
             let argv = match process {
-                Some(p) if !p.env.is_empty() || p.cwd.is_some() || p.user.is_some() || p.clean_env => {
+                Some(p)
+                    if !p.env.is_empty() || p.cwd.is_some() || p.user.is_some() || p.clean_env =>
+                {
                     bail!(
                         "exec on a native container takes only argv: env, cwd, user and clean_env are not supported (the container's own are used)"
                     );
@@ -123,9 +125,7 @@ impl VmManager {
                 Some(p) => p.argv,
                 None => vec!["/bin/sh".to_string(), "-c".to_string(), command],
             };
-            return self
-                .container_exec(&vm, &m, argv, timeout_seconds)
-                .await;
+            return self.container_exec(&vm, &m, argv, timeout_seconds).await;
         }
         if vm.backend == fluxvm_core::model::BackendKind::Vz {
             return self

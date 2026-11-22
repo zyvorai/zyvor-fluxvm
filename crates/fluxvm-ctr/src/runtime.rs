@@ -32,7 +32,9 @@ impl std::str::FromStr for Runtime {
             "auto" => Ok(Runtime::Auto),
             "container" => Ok(Runtime::Container),
             "vm" => Ok(Runtime::Vm),
-            other => Err(format!("unknown runtime {other:?}: use auto, container or vm")),
+            other => Err(format!(
+                "unknown runtime {other:?}: use auto, container or vm"
+            )),
         }
     }
 }
@@ -132,20 +134,33 @@ pub enum RuntimeError {
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RuntimeError::UntrustedContainer { trust, operator_allows } => {
+            RuntimeError::UntrustedContainer {
+                trust,
+                operator_allows,
+            } => {
                 write!(
                     f,
                     "refusing runtime=container for {t} code. {CONTAINER_ISOLATION}. {VM_ISOLATION}. ",
                     t = trust.as_str()
                 )?;
                 if *operator_allows {
-                    write!(f, "To accept the weaker boundary anyway, pass --allow-container-untrusted (REST: allow_container_untrusted: true); or use --runtime vm")
+                    write!(
+                        f,
+                        "To accept the weaker boundary anyway, pass --allow-container-untrusted (REST: allow_container_untrusted: true); or use --runtime vm"
+                    )
                 } else {
-                    write!(f, "Use --runtime vm, or have the operator set sandbox.container.allow_untrusted = true and then pass --allow-container-untrusted")
+                    write!(
+                        f,
+                        "Use --runtime vm, or have the operator set sandbox.container.allow_untrusted = true and then pass --allow-container-untrusted"
+                    )
                 }
             }
             RuntimeError::Unavailable { runtime, why } => {
-                write!(f, "runtime {} is not available on this host: {why}", runtime.as_str())
+                write!(
+                    f,
+                    "runtime {} is not available on this host: {why}",
+                    runtime.as_str()
+                )
             }
             RuntimeError::NoRuntime { container, vm } => write!(
                 f,
@@ -162,7 +177,11 @@ impl std::error::Error for RuntimeError {}
 /// - `auto` gives `container` to `dev`/`trusted` workloads (fast, cheap) and `vm` to `untrusted`/`agent`.
 /// - `auto` falls back from `container` to `vm` (stronger) but never from `vm` to `container`.
 pub fn resolve(req: &Request, host: &HostSupport) -> Result<Decision, RuntimeError> {
-    let vm_ok = if req.image { &host.vm_image } else { &host.vm_plain };
+    let vm_ok = if req.image {
+        &host.vm_image
+    } else {
+        &host.vm_plain
+    };
     let t = req.trust.as_str();
     let container = |reason: String, warning: Option<String>| Decision {
         runtime: Runtime::Container,
@@ -193,22 +212,34 @@ pub fn resolve(req: &Request, host: &HostSupport) -> Result<Decision, RuntimeErr
                 });
             }
             if let Err(why) = &host.container {
-                return Err(RuntimeError::Unavailable { runtime: Runtime::Container, why: why.clone() });
+                return Err(RuntimeError::Unavailable {
+                    runtime: Runtime::Container,
+                    why: why.clone(),
+                });
             }
             let warning = req.trust.is_untrusted().then(|| {
                 format!("running {t} code in a container on explicit request: the host kernel is the only boundary")
             });
-            Ok(container(format!("requested explicitly (trust={t})"), warning))
+            Ok(container(
+                format!("requested explicitly (trust={t})"),
+                warning,
+            ))
         }
         Runtime::Vm => match vm_ok {
             Ok(()) => Ok(vm(format!("requested explicitly (trust={t})"))),
-            Err(why) => Err(RuntimeError::Unavailable { runtime: Runtime::Vm, why: why.clone() }),
+            Err(why) => Err(RuntimeError::Unavailable {
+                runtime: Runtime::Vm,
+                why: why.clone(),
+            }),
         },
         Runtime::Auto => {
             if !req.image {
                 return match vm_ok {
                     Ok(()) => Ok(vm(format!("auto: no image, so a VM sandbox (trust={t})"))),
-                    Err(why) => Err(RuntimeError::Unavailable { runtime: Runtime::Vm, why: why.clone() }),
+                    Err(why) => Err(RuntimeError::Unavailable {
+                        runtime: Runtime::Vm,
+                        why: why.clone(),
+                    }),
                 };
             }
             if req.trust.is_untrusted() {
@@ -226,13 +257,18 @@ pub fn resolve(req: &Request, host: &HostSupport) -> Result<Decision, RuntimeErr
             }
             match (&host.container, vm_ok) {
                 (Ok(()), _) => Ok(container(
-                    format!("auto: trust={t} gets a native container (fast start, shares the host kernel)"),
+                    format!(
+                        "auto: trust={t} gets a native container (fast start, shares the host kernel)"
+                    ),
                     None,
                 )),
                 (Err(why), Ok(())) => Ok(vm(format!(
                     "auto: trust={t} would get a container, but {why}; using a microVM (stronger)"
                 ))),
-                (Err(c), Err(v)) => Err(RuntimeError::NoRuntime { container: c.clone(), vm: v.clone() }),
+                (Err(c), Err(v)) => Err(RuntimeError::NoRuntime {
+                    container: c.clone(),
+                    vm: v.clone(),
+                }),
             }
         }
     }
@@ -244,10 +280,20 @@ mod tests {
 
     fn host(c: bool, v: bool) -> HostSupport {
         let r = |ok: bool, why: &str| if ok { Ok(()) } else { Err(why.to_string()) };
-        HostSupport { container: r(c, "no userns"), vm_image: r(v, "no oci boot"), vm_plain: r(v, "no kvm") }
+        HostSupport {
+            container: r(c, "no userns"),
+            vm_image: r(v, "no oci boot"),
+            vm_plain: r(v, "no kvm"),
+        }
     }
     fn req(runtime: Runtime, trust: Trust) -> Request {
-        Request { runtime, trust, image: true, allow_container_untrusted: false, operator_allows_untrusted: false }
+        Request {
+            runtime,
+            trust,
+            image: true,
+            allow_container_untrusted: false,
+            operator_allows_untrusted: false,
+        }
     }
 
     #[test]
@@ -285,7 +331,10 @@ mod tests {
             let e = resolve(&req(Runtime::Container, t), &host(true, true)).unwrap_err();
             assert!(matches!(e, RuntimeError::UntrustedContainer { .. }));
             let s = e.to_string();
-            assert!(s.contains("shares the host kernel") && s.contains("own kernel"), "{s}");
+            assert!(
+                s.contains("shares the host kernel") && s.contains("own kernel"),
+                "{s}"
+            );
             assert!(s.contains("sandbox.container.allow_untrusted"), "{s}");
         }
     }
@@ -294,7 +343,10 @@ mod tests {
     fn untrusted_container_needs_both_the_operator_and_the_flag() {
         let mut r = req(Runtime::Container, Trust::Untrusted);
         r.allow_container_untrusted = true;
-        assert!(resolve(&r, &host(true, true)).is_err(), "flag alone is not enough");
+        assert!(
+            resolve(&r, &host(true, true)).is_err(),
+            "flag alone is not enough"
+        );
         r.operator_allows_untrusted = true;
         let d = resolve(&r, &host(true, true)).unwrap();
         assert_eq!(d.runtime, Runtime::Container);
@@ -307,12 +359,18 @@ mod tests {
     #[test]
     fn explicit_runtimes_report_why_they_cannot_run() {
         let e = resolve(&req(Runtime::Container, Trust::Dev), &host(false, true)).unwrap_err();
-        assert_eq!(e.to_string(), "runtime container is not available on this host: no userns");
+        assert_eq!(
+            e.to_string(),
+            "runtime container is not available on this host: no userns"
+        );
         let e = resolve(&req(Runtime::Vm, Trust::Dev), &host(true, false)).unwrap_err();
         assert!(e.to_string().contains("no oci boot"));
         let mut r = req(Runtime::Vm, Trust::Dev);
         r.image = false;
-        assert_eq!(resolve(&r, &host(true, false)).unwrap_err().to_string(), "runtime vm is not available on this host: no kvm");
+        assert_eq!(
+            resolve(&r, &host(true, false)).unwrap_err().to_string(),
+            "runtime vm is not available on this host: no kvm"
+        );
     }
 
     #[test]

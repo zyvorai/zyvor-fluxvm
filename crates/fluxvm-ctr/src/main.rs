@@ -12,7 +12,12 @@ fn main() {
         eprintln!("fluxvm-container-run: {m}");
         std::process::exit(125);
     };
-    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
     // read and write need no spec (they only join the container's namespaces); run and exec do.
     let spec: ContainerSpec = match flag("--spec") {
         None if matches!(args.first().map(String::as_str), Some("read" | "write")) => ContainerSpec::default(),
@@ -28,15 +33,26 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("run") => fluxvm_ctr::launch::run(&spec),
         Some("exec") => {
-            let pid: i32 = flag("--pid").and_then(|p| p.parse().ok()).unwrap_or_else(|| fail("exec needs --pid".into()));
-            let cmd: Vec<String> = args.iter().skip_while(|a| *a != "--").skip(1).cloned().collect();
+            let pid: i32 = flag("--pid")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| fail("exec needs --pid".into()));
+            let cmd: Vec<String> = args
+                .iter()
+                .skip_while(|a| *a != "--")
+                .skip(1)
+                .cloned()
+                .collect();
             fluxvm_ctr::launch::exec_in(&spec, pid, &cmd)
         }
         Some("read") => {
             use std::io::Write;
-            let pid: i32 = flag("--pid").and_then(|p| p.parse().ok()).unwrap_or_else(|| fail("read needs --pid".into()));
+            let pid: i32 = flag("--pid")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| fail("read needs --pid".into()));
             let path = flag("--path").unwrap_or_else(|| fail("read needs --path".into()));
-            let max: u64 = flag("--max").and_then(|p| p.parse().ok()).unwrap_or(64 << 20);
+            let max: u64 = flag("--max")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(64 << 20);
             fluxvm_ctr::launch::read_in(pid, &path, max).and_then(|(mode, data)| {
                 let mut out = std::io::stdout().lock();
                 writeln!(out, "MODE {mode:o}")?;
@@ -46,9 +62,13 @@ fn main() {
         }
         Some("write") => {
             use std::io::Read;
-            let pid: i32 = flag("--pid").and_then(|p| p.parse().ok()).unwrap_or_else(|| fail("write needs --pid".into()));
+            let pid: i32 = flag("--pid")
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| fail("write needs --pid".into()));
             let path = flag("--path").unwrap_or_else(|| fail("write needs --path".into()));
-            let mode = flag("--mode").and_then(|m| u32::from_str_radix(&m, 8).ok()).unwrap_or(0o644);
+            let mode = flag("--mode")
+                .and_then(|m| u32::from_str_radix(&m, 8).ok())
+                .unwrap_or(0o644);
             let mut data = Vec::new();
             if let Err(e) = std::io::stdin().read_to_end(&mut data) {
                 fail(format!("reading stdin: {e}"));

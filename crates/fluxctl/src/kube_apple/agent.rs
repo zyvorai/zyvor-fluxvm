@@ -154,9 +154,16 @@ mod tests {
         for a in ["kube", "apple", "tunnel", "dev", "--foreground"] {
             assert!(p.contains(&format!("<string>{a}</string>")), "{a}");
         }
-        assert!(p.contains("<key>KeepAlive</key><true/>") && p.contains("<key>RunAtLoad</key><true/>"));
+        assert!(
+            p.contains("<key>KeepAlive</key><true/>") && p.contains("<key>RunAtLoad</key><true/>")
+        );
         assert!(!p.to_lowercase().contains("token") && !p.contains("EnvironmentVariables"));
-        let q = render_plist(Path::new("/f"), "dev", Path::new("/l"), Some(Path::new("/a&b")));
+        let q = render_plist(
+            Path::new("/f"),
+            "dev",
+            Path::new("/l"),
+            Some(Path::new("/a&b")),
+        );
         assert!(q.contains("FLUXVM_APPLE_K3S_HOME") && q.contains("/a&amp;b"));
     }
 

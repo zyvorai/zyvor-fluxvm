@@ -341,7 +341,11 @@ impl Drop for TempFile {
 }
 
 /// Verify a local image against the signatures kept when it was pulled or pushed.
-pub(crate) fn verify_local(store: &Store, t: &TrustStore, reference: &str) -> Result<(String, String)> {
+pub(crate) fn verify_local(
+    store: &Store,
+    t: &TrustStore,
+    reference: &str,
+) -> Result<(String, String)> {
     let key = mac_store::normalize(reference)?;
     let (_, e) = store
         .list()?

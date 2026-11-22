@@ -112,7 +112,12 @@ pub fn check_linux(f: &LinuxFacts) -> Vec<Finding> {
         return v;
     }
     if matches!(f.arch.as_str(), "x86_64" | "aarch64" | "arm64") {
-        v.push(finding(Level::Ok, "arch", &format!("{} {}", f.distro, f.arch), ""));
+        v.push(finding(
+            Level::Ok,
+            "arch",
+            &format!("{} {}", f.distro, f.arch),
+            "",
+        ));
     } else {
         v.push(finding(
             Level::Error,
@@ -185,7 +190,10 @@ pub struct JoinSpec {
 /// `JoinSpec` values end up inside a script: only what the shell cannot misread is let through.
 pub fn validate_join(j: &JoinSpec) -> Result<(), String> {
     if !valid_url(&j.central) || !j.central.starts_with("http") {
-        return Err(format!("the central URL {:?} is not an http(s) URL", j.central));
+        return Err(format!(
+            "the central URL {:?} is not an http(s) URL",
+            j.central
+        ));
     }
     if !valid_node_name(&j.name) {
         return Err(format!(
@@ -202,7 +210,10 @@ pub fn validate_join(j: &JoinSpec) -> Result<(), String> {
         return Err(format!("{l:?} is not a key=value label"));
     }
     if !valid_url(&j.installer_url) {
-        return Err(format!("the installer URL {:?} is not an http(s) URL", j.installer_url));
+        return Err(format!(
+            "the installer URL {:?} is not an http(s) URL",
+            j.installer_url
+        ));
     }
     if let Some(h) = &j.installer_sha256
         && !valid_sha256(h)
@@ -402,6 +413,9 @@ mod tests {
         k.with_k3s = true;
         assert_eq!(plan_add(&f, &k)[0].name, "k3s");
         // unknown facts (dry run): everything is listed
-        assert_eq!(plan_add(&LinuxFacts::default(), &spec())[0].stdin, StepIn::Token);
+        assert_eq!(
+            plan_add(&LinuxFacts::default(), &spec())[0].stdin,
+            StepIn::Token
+        );
     }
 }

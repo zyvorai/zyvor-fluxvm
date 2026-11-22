@@ -11,10 +11,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn static_busybox() -> Option<PathBuf> {
-    let p = std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("busybox")).find(|p| p.is_file())?;
+    let p = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join("busybox"))
+        .find(|p| p.is_file())?;
     // A dynamic busybox would need its libraries inside the rootfs.
     let out = Command::new("file").arg("-L").arg(&p).output().ok()?;
-    String::from_utf8_lossy(&out.stdout).contains("statically linked").then_some(p)
+    String::from_utf8_lossy(&out.stdout)
+        .contains("statically linked")
+        .then_some(p)
 }
 
 #[test]
@@ -53,10 +57,17 @@ fn the_launcher_runs_a_container_with_the_documented_restrictions() {
         eprintln!("skipped: this host does not let the launcher create namespaces: {stderr}");
         return;
     }
-    assert_eq!(out.status.code(), Some(7), "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
     assert!(stdout.contains("pid=1"), "{stdout}");
     assert!(stdout.contains("host=fx-test-live"), "{stdout}");
     assert!(stdout.contains("readonly"), "{stdout}");
-    assert!(stdout.contains("NoNewPrivs:\t1") && stdout.contains("Seccomp:\t2"), "{stdout}");
+    assert!(
+        stdout.contains("NoNewPrivs:\t1") && stdout.contains("Seccomp:\t2"),
+        "{stdout}"
+    );
     assert_eq!(std::fs::read_to_string(state.join("exit")).unwrap(), "7");
 }

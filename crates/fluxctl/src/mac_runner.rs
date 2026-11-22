@@ -13,9 +13,7 @@
 
 use crate::mac_fleet::{Conn, Which, jobs, resolve, transport};
 use crate::mac_fleet_remote::Secret;
-use crate::mac_fleet_run::{
-    Clock, JobRun, PlaceFlags, Placer, SystemClock, new_job_id, run_job,
-};
+use crate::mac_fleet_run::{Clock, JobRun, PlaceFlags, Placer, SystemClock, new_job_id, run_job};
 use crate::mac_fleet_sched::{JobSpec, Leases, state_path};
 use crate::mac_fleet_ssh::{Target, Transport};
 use crate::mac_fleet_timed::LocalTransport;
@@ -35,7 +33,12 @@ const SLOTS_PER_MAC: usize = 2;
 #[derive(clap::Args)]
 pub struct RunnerArgs {
     /// `OWNER/REPO` to serve.
-    #[arg(long, value_name = "OWNER/REPO", conflicts_with = "org", required_unless_present = "org")]
+    #[arg(
+        long,
+        value_name = "OWNER/REPO",
+        conflicts_with = "org",
+        required_unless_present = "org"
+    )]
     pub repo: Option<String>,
     /// An organisation to serve (runners join its runner group). Queue depth cannot be read at this level: use `--warm`.
     #[arg(long, value_name = "ORG")]
@@ -145,7 +148,10 @@ pub enum Scope {
 }
 
 fn name_ok(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 100 && s.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+    !s.is_empty()
+        && s.len() <= 100
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
 }
 
 impl Scope {
@@ -205,7 +211,10 @@ pub struct RealGithub {
 
 impl RealGithub {
     pub fn new(api: &str, scope: Scope, group: u64, token: Secret) -> Result<Self> {
-        if !(api.starts_with("https://") && api.bytes().all(|c| c.is_ascii_graphic()) && !api.contains('\'')) {
+        if !(api.starts_with("https://")
+            && api.bytes().all(|c| c.is_ascii_graphic())
+            && !api.contains('\''))
+        {
             bail!("--api-url must be an https:// URL");
         }
         Ok(Self {
@@ -223,7 +232,9 @@ impl RealGithub {
 
     fn req(&self, m: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         // The token is read out only here, into the Authorization header.
-        let t = String::from_utf8_lossy(self.token.expose()).trim().to_owned();
+        let t = String::from_utf8_lossy(self.token.expose())
+            .trim()
+            .to_owned();
         self.http
             .request(m, format!("{}/{path}", self.api))
             .bearer_auth(t)
@@ -242,7 +253,10 @@ impl RealGithub {
 
     fn json(&self, b: reqwest::RequestBuilder, what: &str) -> Result<serde_json::Value> {
         self.handle.block_on(async {
-            let r = b.send().await.map_err(|e| anyhow::anyhow!("{what}: {}", e.without_url()))?;
+            let r = b
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("{what}: {}", e.without_url()))?;
             let status = r.status();
             if !status.is_success() {
                 // The body of an error says what is wrong (bad credentials, missing permission) and carries no secret.
@@ -256,7 +270,9 @@ impl RealGithub {
             if status == reqwest::StatusCode::NO_CONTENT {
                 return Ok(serde_json::Value::Null);
             }
-            r.json().await.map_err(|e| anyhow::anyhow!("{what}: {}", e.without_url()))
+            r.json()
+                .await
+                .map_err(|e| anyhow::anyhow!("{what}: {}", e.without_url()))
         })
     }
 }
@@ -271,13 +287,21 @@ impl Github for RealGithub {
         // Jobs wait in runs that are queued, and in runs already in progress (a later job of the same workflow).
         for status in ["queued", "in_progress"] {
             let runs = self.json(
-                self.req(reqwest::Method::GET, &format!("{base}/actions/runs?status={status}&per_page=50")),
+                self.req(
+                    reqwest::Method::GET,
+                    &format!("{base}/actions/runs?status={status}&per_page=50"),
+                ),
                 "listing workflow runs",
             )?;
             for run in runs["workflow_runs"].as_array().into_iter().flatten() {
-                let Some(id) = run["id"].as_u64() else { continue };
+                let Some(id) = run["id"].as_u64() else {
+                    continue;
+                };
                 let jobs = self.json(
-                    self.req(reqwest::Method::GET, &format!("{base}/actions/runs/{id}/jobs?per_page=100")),
+                    self.req(
+                        reqwest::Method::GET,
+                        &format!("{base}/actions/runs/{id}/jobs?per_page=100"),
+                    ),
                     "listing jobs",
                 )?;
                 for j in jobs["jobs"].as_array().into_iter().flatten() {
@@ -298,19 +322,30 @@ impl Github for RealGithub {
 
     fn busy(&self) -> Result<usize> {
         let v = self.json(
-            self.req(reqwest::Method::GET, &format!("{}/actions/runners?per_page=100", self.scope.path())),
+            self.req(
+                reqwest::Method::GET,
+                &format!("{}/actions/runners?per_page=100", self.scope.path()),
+            ),
             "listing runners",
         )?;
         Ok(v["runners"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|r| r["name"].as_str().is_some_and(|n| n.starts_with(NAME_PREFIX)) && r["busy"].as_bool() == Some(true))
+            .filter(|r| {
+                r["name"]
+                    .as_str()
+                    .is_some_and(|n| n.starts_with(NAME_PREFIX))
+                    && r["busy"].as_bool() == Some(true)
+            })
             .count())
     }
 
     fn runners(&self) -> Result<Vec<RunnerInfo>> {
-        let v = self.get(&format!("{}/actions/runners?per_page=100", self.scope.path()), "listing runners")?;
+        let v = self.get(
+            &format!("{}/actions/runners?per_page=100", self.scope.path()),
+            "listing runners",
+        )?;
         Ok(v["runners"]
             .as_array()
             .into_iter()
@@ -338,7 +373,9 @@ impl Github for RealGithub {
             "creating a just-in-time runner",
         )?;
         Ok(Jit {
-            runner_id: v["runner"]["id"].as_u64().context("GitHub returned no runner id")?,
+            runner_id: v["runner"]["id"]
+                .as_u64()
+                .context("GitHub returned no runner id")?,
             config: Secret::new(
                 v["encoded_jit_config"]
                     .as_str()
@@ -368,7 +405,9 @@ impl Github for RealGithub {
 pub fn plan_spawn(in_flight: usize, busy: usize, queued: usize, warm: usize, cap: usize) -> usize {
     let busy = busy.min(in_flight);
     let want_total = busy + (queued + warm).min(cap.saturating_sub(busy));
-    want_total.saturating_sub(in_flight).min(cap.saturating_sub(in_flight))
+    want_total
+        .saturating_sub(in_flight)
+        .min(cap.saturating_sub(in_flight))
 }
 
 /// The ceiling on guests: Apple allows two macOS guests per Mac; `--max-jobs` can only lower it.
@@ -508,7 +547,11 @@ pub fn supervise(
             let (queued, busy) = match (c.gh.queued(c.labels), c.gh.busy()) {
                 (Ok(q), Ok(b)) => (q, b),
                 (q, b) => {
-                    let e = q.err().or(b.err()).map(|e| format!("{e:#}")).unwrap_or_default();
+                    let e = q
+                        .err()
+                        .or(b.err())
+                        .map(|e| format!("{e:#}"))
+                        .unwrap_or_default();
                     (c.log)(&format!("could not read the queue: {e}"));
                     (None, n)
                 }
@@ -519,7 +562,9 @@ pub fn supervise(
                 spawn = spawn.min(1usize.saturating_sub(started));
             }
             if spawn > 0 {
-                (c.log)(&crate::mac_runner_pool::describe(queued, busy, n, warm, cap, spawn));
+                (c.log)(&crate::mac_runner_pool::describe(
+                    queued, busy, n, warm, cap, spawn,
+                ));
             }
             for _ in 0..spawn {
                 started += 1;
@@ -588,7 +633,9 @@ pub fn read_secret(what: &str, file: Option<&Path>, stdin: bool) -> Result<Secre
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
             s
         }
-        (None, false) => bail!("give the {what} with --token-file FILE (mode 0600) or --token-stdin; never as an argument"),
+        (None, false) => bail!(
+            "give the {what} with --token-file FILE (mode 0600) or --token-stdin; never as an argument"
+        ),
     };
     let t = raw.trim();
     if t.len() < 8 || t.len() > 512 || !t.bytes().all(|c| c.is_ascii_graphic()) {
@@ -622,8 +669,11 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         ),
     };
     let _ = inv;
-    let cap = crate::mac_runner_pool::pool_cap(job_cap(targets.len(), a.max_jobs), a.ephemeral_pool);
-    let warm = a.warm.unwrap_or(if matches!(scope, Scope::Org(_)) { 1 } else { 0 });
+    let cap =
+        crate::mac_runner_pool::pool_cap(job_cap(targets.len(), a.max_jobs), a.ephemeral_pool);
+    let warm = a
+        .warm
+        .unwrap_or(if matches!(scope, Scope::Org(_)) { 1 } else { 0 });
     eprintln!(
         "runner for {} serving {} Mac(s), up to {cap} guest(s) at once (2 per Mac), template {}, labels {}",
         scope.path(),
@@ -637,7 +687,9 @@ pub fn run(a: RunnerArgs) -> Result<()> {
     }
     let token = read_secret("GitHub token", a.token_file.as_deref(), a.token_stdin)?;
     let group = match (&a.runner_group_name, &scope) {
-        (Some(n), Scope::Org(o)) => crate::mac_runner_pool::resolve_group(&a.api_url, o, &token, n)?,
+        (Some(n), Scope::Org(o)) => {
+            crate::mac_runner_pool::resolve_group(&a.api_url, o, &token, n)?
+        }
         (Some(_), _) => bail!("--runner-group-name needs --org"),
         _ => a.runner_group,
     };
@@ -651,12 +703,19 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     let real = RealGithub::new(&a.api_url, scope.clone(), group, token.clone())?;
     let pool;
-    let gh: &dyn Github = if matches!(scope, Scope::Org(_)) && (!explicit.is_empty() || a.queue_scan) {
-        pool = crate::mac_runner_pool::OrgPool::new(real, &a.api_url, token, explicit, a.queue_scan.then_some(a.scan_limit));
-        &pool
-    } else {
-        &real
-    };
+    let gh: &dyn Github =
+        if matches!(scope, Scope::Org(_)) && (!explicit.is_empty() || a.queue_scan) {
+            pool = crate::mac_runner_pool::OrgPool::new(
+                real,
+                &a.api_url,
+                token,
+                explicit,
+                a.queue_scan.then_some(a.scan_limit),
+            );
+            &pool
+        } else {
+            &real
+        };
     let leases = Mutex::new(Leases::default());
     let state = state_path()?;
     let log = |m: &str| eprintln!("{m}");
@@ -680,7 +739,10 @@ pub fn run(a: RunnerArgs) -> Result<()> {
     crate::mac_fleet_lease::install(&state);
     // Ids another process holds a live lease for are theirs, not orphans.
     let claimed = |id: &str| {
-        crate::mac_runner_life::is_live(id) || crate::mac_fleet_lease::claimed(&state, SystemClock.now()).iter().any(|c| c == id)
+        crate::mac_runner_life::is_live(id)
+            || crate::mac_fleet_lease::claimed(&state, SystemClock.now())
+                .iter()
+                .any(|c| c == id)
     };
     if !a.no_sweep {
         for l in crate::mac_runner_life::sweep(gh, tr.as_ref(), &targets, &claimed, false) {
@@ -693,7 +755,11 @@ pub fn run(a: RunnerArgs) -> Result<()> {
             while !done.load(Ordering::SeqCst) {
                 if crate::mac_runner_life::requested() {
                     log("stop requested: deleting guests and unregistering runners");
-                    for l in crate::mac_runner_life::shutdown_cleanup(gh, tr.as_ref(), &crate::mac_runner_life::live_snapshot()) {
+                    for l in crate::mac_runner_life::shutdown_cleanup(
+                        gh,
+                        tr.as_ref(),
+                        &crate::mac_runner_life::live_snapshot(),
+                    ) {
                         log(&l);
                     }
                     break;
@@ -716,7 +782,14 @@ pub fn run(a: RunnerArgs) -> Result<()> {
         return Ok(());
     }
     if a.once && reports.iter().any(|r| !r.ok) {
-        bail!("{}", reports.iter().map(|r| format!("{}: {}", r.runner, r.detail)).collect::<Vec<_>>().join("; "));
+        bail!(
+            "{}",
+            reports
+                .iter()
+                .map(|r| format!("{}: {}", r.runner, r.detail))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
     }
     Ok(())
 }
@@ -724,8 +797,8 @@ pub fn run(a: RunnerArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mac_fleet_ssh::fake::{FakeTransport, ok};
     use crate::mac_fleet_sched::tests::D1;
+    use crate::mac_fleet_ssh::fake::{FakeTransport, ok};
     use std::sync::atomic::AtomicU64;
 
     #[test]
@@ -750,14 +823,29 @@ mod tests {
 
     #[test]
     fn scope_and_labels_are_validated() {
-        assert_eq!(Scope::parse(Some("acme/app"), None).unwrap().path(), "repos/acme/app");
-        assert_eq!(Scope::parse(None, Some("acme")).unwrap().path(), "orgs/acme");
+        assert_eq!(
+            Scope::parse(Some("acme/app"), None).unwrap().path(),
+            "repos/acme/app"
+        );
+        assert_eq!(
+            Scope::parse(None, Some("acme")).unwrap().path(),
+            "orgs/acme"
+        );
         assert!(Scope::parse(Some("acme/app/../x"), None).is_err());
         assert!(Scope::parse(Some("acme"), None).is_err());
         assert!(Scope::parse(Some("a b/c"), None).is_err());
-        assert_eq!(runner_labels(&["fluxvm".into(), "macos".into()]), ["self-hosted", "macOS", "ARM64", "fluxvm"]);
-        assert!(job_matches(&["self-hosted".into(), "macOS".into()], &runner_labels(&[])));
-        assert!(!job_matches(&["self-hosted".into(), "gpu".into()], &runner_labels(&[])));
+        assert_eq!(
+            runner_labels(&["fluxvm".into(), "macos".into()]),
+            ["self-hosted", "macOS", "ARM64", "fluxvm"]
+        );
+        assert!(job_matches(
+            &["self-hosted".into(), "macOS".into()],
+            &runner_labels(&[])
+        ));
+        assert!(!job_matches(
+            &["self-hosted".into(), "gpu".into()],
+            &runner_labels(&[])
+        ));
         assert!(!job_matches(&[], &runner_labels(&[])));
         let b = jit_body("fluxvm-1", 1, &runner_labels(&[]));
         assert_eq!(b["runner_group_id"], 1);
@@ -773,14 +861,24 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
-            let e = read_secret("GitHub token", Some(&p), false).unwrap_err().to_string();
+            let e = read_secret("GitHub token", Some(&p), false)
+                .unwrap_err()
+                .to_string();
             assert!(e.contains("readable by others"), "{e}");
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let s = read_secret("GitHub token", Some(&p), false).unwrap();
         assert_eq!(s.expose(), b"github_pat_abcdef123456");
-        assert!(format!("{s:?}").find("abcdef").is_none(), "Debug never shows it");
-        assert!(read_secret("GitHub token", None, false).unwrap_err().to_string().contains("never as an argument"));
+        assert!(
+            format!("{s:?}").find("abcdef").is_none(),
+            "Debug never shows it"
+        );
+        assert!(
+            read_secret("GitHub token", None, false)
+                .unwrap_err()
+                .to_string()
+                .contains("never as an argument")
+        );
         assert!(read_secret("GitHub token", Some(&p), true).is_err());
     }
 
@@ -807,7 +905,11 @@ mod tests {
     impl Github for FakeGh {
         fn queued(&self, _: &[String]) -> Result<Option<usize>> {
             let mut q = self.queued.lock().unwrap();
-            Ok(Some(if q.len() > 1 { q.remove(0) } else { q.first().copied().unwrap_or(0) }))
+            Ok(Some(if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q.first().copied().unwrap_or(0)
+            }))
         }
         fn busy(&self) -> Result<usize> {
             Ok(self.busy.load(Ordering::SeqCst))
@@ -868,7 +970,9 @@ mod tests {
         let logged = Mutex::new(vec![]);
         let log = |m: &str| logged.lock().unwrap().push(m.to_owned());
         let place = PlaceFlags::parse_for_test();
-        let job = place.job(&format!("reg.example/runner:1@{D1}"), 0, 0).unwrap();
+        let job = place
+            .job(&format!("reg.example/runner:1@{D1}"), 0, 0)
+            .unwrap();
         let labels = runner_labels(&["fluxvm".into()]);
         let state = d.path().join("s.json");
         let ctx = Ctx {
@@ -895,14 +999,30 @@ mod tests {
         assert!(gh.names.lock().unwrap()[0].starts_with("fluxvm-"));
         assert!(gh.labels.lock().unwrap()[0].contains(&"fluxvm".to_owned()));
         let calls = tr.calls_for("mini-1.local");
-        let run = calls.iter().find(|c| c.command.contains("mac run --rm")).unwrap();
+        let run = calls
+            .iter()
+            .find(|c| c.command.contains("mac run --rm"))
+            .unwrap();
         assert_eq!(run.stdin.as_deref(), Some(&b"JITSECRET-100\n"[..]));
         assert!(run.command.contains("-e ACTIONS_RUNNER_INPUT_JITCONFIG"));
         assert!(run.command.contains("'/Users/admin/actions-runner/run.sh'"));
         // the guest is deleted after the job even though the job succeeded
-        assert!(calls.iter().any(|c| c.command.contains("mac rm ") && c.command.contains("fleet-")), "one VM per job, deleted after");
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.command.contains("mac rm ") && c.command.contains("fleet-")),
+            "one VM per job, deleted after"
+        );
         // no log line carries the secret or the token
-        assert!(logged.lock().unwrap().iter().all(|l| !l.contains("JITSECRET")), "{:?}", logged.lock().unwrap());
+        assert!(
+            logged
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|l| !l.contains("JITSECRET")),
+            "{:?}",
+            logged.lock().unwrap()
+        );
     }
 
     #[test]
@@ -926,7 +1046,9 @@ mod tests {
         let log = |m: &str| logged.lock().unwrap().push(m.to_owned());
         let mut place = PlaceFlags::parse_for_test();
         place.queue_timeout = 120;
-        let job = place.job(&format!("reg.example/runner:1@{D1}"), 0, 0).unwrap();
+        let job = place
+            .job(&format!("reg.example/runner:1@{D1}"), 0, 0)
+            .unwrap();
         let labels = runner_labels(&[]);
         let state = d.path().join("s.json");
         let ctx = Ctx {
@@ -946,7 +1068,13 @@ mod tests {
         };
         let reps = supervise(&ctx, 2, 0, true, 5, None);
         assert!(reps[0].ok, "{}", reps[0].detail);
-        assert!(logged.lock().unwrap().iter().any(|l| l.contains("queued") && l.contains("both macOS slots")));
+        assert!(
+            logged
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.contains("queued") && l.contains("both macOS slots"))
+        );
         assert!(clock.now() > 0);
     }
 
@@ -984,6 +1112,10 @@ mod tests {
         let rep = serve_one(&ctx);
         assert!(!rep.ok);
         assert!(rep.detail.contains("no Mac has room"), "{}", rep.detail);
-        assert_eq!(*gh.removed.lock().unwrap(), vec![100], "the unused JIT runner is deleted");
+        assert_eq!(
+            *gh.removed.lock().unwrap(),
+            vec![100],
+            "the unused JIT runner is deleted"
+        );
     }
 }

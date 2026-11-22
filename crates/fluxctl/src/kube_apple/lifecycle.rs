@@ -185,7 +185,11 @@ async fn ensure_vm<H: Host>(h: &H, store: &Store, st: &mut State, node: &str) ->
     let backend = h.backend();
     let spec = script::node_spec_on(
         backend,
-        if backend == crate::vm_net::Backend::Qemu { h.ssh_forward_port(&n.vm_name) } else { 0 },
+        if backend == crate::vm_net::Backend::Qemu {
+            h.ssh_forward_port(&n.vm_name)
+        } else {
+            0
+        },
         &st.params,
         &st.name,
         node,
@@ -223,7 +227,13 @@ async fn bootstrap_node<H: Host>(
     unit: &UnitOpts<'_>,
 ) -> Result<()> {
     let role = unit.role;
-    sh(h, st, node, &script::preflight_script_for(h.backend().guest_arch())).await?;
+    sh(
+        h,
+        st,
+        node,
+        &script::preflight_script_for(h.backend().guest_arch()),
+    )
+    .await?;
     match install {
         Install::Binary { data, sha256 } => {
             h.ssh(
@@ -285,7 +295,11 @@ async fn bootstrap_node<H: Host>(
     Ok(())
 }
 
-pub(super) async fn export_kubeconfig<H: Host>(h: &H, st: &State, path: Option<&Path>) -> Result<PathBuf> {
+pub(super) async fn export_kubeconfig<H: Host>(
+    h: &H,
+    st: &State,
+    path: Option<&Path>,
+) -> Result<PathBuf> {
     server_name(st)?;
     let (_, raw) = sh_server(h, st, &script::kubeconfig_script()).await?;
     if !raw.contains("server:") {
@@ -312,10 +326,14 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
         );
     }
     if req.servers > 1 {
-        h.backend().require_private_network(&format!("--servers {}", req.servers))?;
+        h.backend()
+            .require_private_network(&format!("--servers {}", req.servers))?;
     }
     if req.servers > 1 && req.datastore != Datastore::Etcd {
-        bail!("--servers {} needs embedded etcd (--embedded-etcd)", req.servers);
+        bail!(
+            "--servers {} needs embedded etcd (--embedded-etcd)",
+            req.servers
+        );
     }
     if req.servers > 1 && req.api_port > u16::MAX - 8 {
         bail!("--api-port must leave eight free ports above it for the servers' tunnels");
@@ -323,23 +341,38 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
     req.flags.validate()?;
     let mut tls_sans = req.tls_sans.clone();
     let endpoint = match (req.endpoint, req.servers > 1) {
-        (Some(EndpointKind::KubeVip), false) => bail!("--endpoint kube-vip needs --servers 3 or more"),
+        (Some(EndpointKind::KubeVip), false) => {
+            bail!("--endpoint kube-vip needs --servers 3 or more")
+        }
         (None, false) => None,
-        (None, true) => Some(EndpointCfg { kind: EndpointKind::Proxy, vip: None }),
-        (Some(EndpointKind::Proxy), _) => Some(EndpointCfg { kind: EndpointKind::Proxy, vip: None }),
+        (None, true) => Some(EndpointCfg {
+            kind: EndpointKind::Proxy,
+            vip: None,
+        }),
+        (Some(EndpointKind::Proxy), _) => Some(EndpointCfg {
+            kind: EndpointKind::Proxy,
+            vip: None,
+        }),
         (Some(EndpointKind::KubeVip), true) => {
-            let vip = req
-                .vip
-                .clone()
-                .context("--endpoint kube-vip needs --vip ADDRESS on the private network (10.89.x.y)")?;
+            let vip = req.vip.clone().context(
+                "--endpoint kube-vip needs --vip ADDRESS on the private network (10.89.x.y)",
+            )?;
             if !script_ha::private_vip_ok(&vip) {
                 bail!("--vip {vip:?} must be an address on the private network (10.89.x.y)");
             }
             tls_sans.push(vip.clone());
-            Some(EndpointCfg { kind: EndpointKind::KubeVip, vip: Some(vip) })
+            Some(EndpointCfg {
+                kind: EndpointKind::KubeVip,
+                vip: Some(vip),
+            })
         }
     };
-    if req.vip.is_some() && !matches!(endpoint.as_ref().map(|e| e.kind), Some(EndpointKind::KubeVip)) {
+    if req.vip.is_some()
+        && !matches!(
+            endpoint.as_ref().map(|e| e.kind),
+            Some(EndpointKind::KubeVip)
+        )
+    {
         bail!("--vip is only for --endpoint kube-vip");
     }
     let _lock = store.lock(&req.name)?;
@@ -475,7 +508,11 @@ fn next_hint(st: &State) -> String {
 
 /// Writes the kube-vip static pod on a server when the cluster uses kube-vip.
 async fn install_kube_vip<H: Host>(h: &H, st: &State, node: &str) -> Result<()> {
-    if let Some(EndpointCfg { kind: EndpointKind::KubeVip, vip: Some(vip) }) = &st.endpoint {
+    if let Some(EndpointCfg {
+        kind: EndpointKind::KubeVip,
+        vip: Some(vip),
+    }) = &st.endpoint
+    {
         h.ssh(
             st,
             node,
@@ -586,7 +623,8 @@ async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<Join
         bail!("{:?} is not a valid cluster name", req.cluster);
     }
     if req.external.is_none() {
-        h.backend().require_private_network("adding a node to a local cluster")?;
+        h.backend()
+            .require_private_network("adding a node to a local cluster")?;
     }
     let (mut st, url, token, agent_token) = match &req.external {
         Some((url, file)) => {
@@ -635,7 +673,9 @@ async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<Join
                     "a second server needs embedded etcd; create the cluster with --embedded-etcd"
                 );
             }
-            if req.role == Role::Server && st.servers().iter().filter(|n| n.joined).count() >= usize::from(MAX_SERVERS) {
+            if req.role == Role::Server
+                && st.servers().iter().filter(|n| n.joined).count() >= usize::from(MAX_SERVERS)
+            {
                 bail!("a cluster may have at most {MAX_SERVERS} servers");
             }
             server_name(&st)?;
@@ -659,7 +699,12 @@ async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<Join
             } else {
                 None
             };
-            (st, format!("https://{ip}:{GUEST_API_PORT}"), token, agent_token)
+            (
+                st,
+                format!("https://{ip}:{GUEST_API_PORT}"),
+                token,
+                agent_token,
+            )
         }
     };
     if st.nodes.len() >= MAX_NODES {
@@ -675,7 +720,9 @@ async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<Join
         bail!("{node:?} is not a valid node name");
     }
     // A node that an earlier, interrupted join left in the journal unjoined is picked up again.
-    let retry = st.node(&node).is_some_and(|n| !n.joined && n.role == req.role);
+    let retry = st
+        .node(&node)
+        .is_some_and(|n| !n.joined && n.role == req.role);
     if st.node(&node).is_some() && !retry {
         bail!("{} already has a node named {node}", st.name);
     }

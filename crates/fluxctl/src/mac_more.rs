@@ -603,8 +603,9 @@ pub fn run_client(cmd: MacMore) -> Result<()> {
             let text =
                 serde_json::to_string_pretty(&crate::mac_plus::sbom(&open_store()?, &reference)?)?;
             match output {
-                Some(p) => std::fs::write(&p, text)
-                    .with_context(|| format!("writing {}", p.display()))?,
+                Some(p) => {
+                    std::fs::write(&p, text).with_context(|| format!("writing {}", p.display()))?
+                }
                 None => println!("{text}"),
             }
         }
@@ -983,7 +984,9 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
             let unused = ops::unused_images(&store, &used)?;
             prune_store(&store, &unused, dry_run, force)?;
         }
-        MacMore::Compose { command } => Box::pin(crate::mac_compose::run_daemon(r, command)).await?,
+        MacMore::Compose { command } => {
+            Box::pin(crate::mac_compose::run_daemon(r, command)).await?
+        }
         _ => bail!("not an instance command"),
     }
     Ok(())

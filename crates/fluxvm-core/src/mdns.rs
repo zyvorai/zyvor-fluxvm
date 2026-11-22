@@ -177,7 +177,10 @@ struct Rr {
 fn records(b: &[u8]) -> Option<(Reader<'_>, u16, Vec<Rr>)> {
     let r = Reader { b };
     let flags = r.u16(2)?;
-    let (qd, an) = (r.u16(4)?, r.u16(6)? as usize + r.u16(8)? as usize + r.u16(10)? as usize);
+    let (qd, an) = (
+        r.u16(4)?,
+        r.u16(6)? as usize + r.u16(8)? as usize + r.u16(10)? as usize,
+    );
     let mut pos = 12;
     for _ in 0..qd {
         pos = r.name(pos)?.1 + 4;
@@ -210,7 +213,10 @@ pub fn parse_response(b: &[u8], service: &str) -> Vec<Found> {
         return vec![];
     }
     let mut out = Vec::new();
-    for p in rrs.iter().filter(|x| x.typ == T_PTR && x.name.eq_ignore_ascii_case(service)) {
+    for p in rrs
+        .iter()
+        .filter(|x| x.typ == T_PTR && x.name.eq_ignore_ascii_case(service))
+    {
         let Some((inst_full, _)) = r.name(p.data) else {
             continue;
         };
@@ -222,7 +228,10 @@ pub fn parse_response(b: &[u8], service: &str) -> Vec<Found> {
             instance: instance.to_owned(),
             ..Default::default()
         };
-        for s in rrs.iter().filter(|x| x.name.eq_ignore_ascii_case(&inst_full)) {
+        for s in rrs
+            .iter()
+            .filter(|x| x.name.eq_ignore_ascii_case(&inst_full))
+        {
             if s.typ == T_SRV && s.len >= 7 {
                 f.port = r.u16(s.data + 4).unwrap_or(0);
                 f.host = r.name(s.data + 6).map(|n| n.0).unwrap_or_default();
@@ -245,8 +254,12 @@ pub fn parse_response(b: &[u8], service: &str) -> Vec<Found> {
             .iter()
             .filter(|x| x.typ == T_A && x.len == 4 && x.name.eq_ignore_ascii_case(&f.host))
         {
-            f.addrs
-                .push(Ipv4Addr::new(b[a.data], b[a.data + 1], b[a.data + 2], b[a.data + 3]));
+            f.addrs.push(Ipv4Addr::new(
+                b[a.data],
+                b[a.data + 1],
+                b[a.data + 2],
+                b[a.data + 3],
+            ));
         }
         if f.port != 0 {
             out.push(f);
@@ -402,9 +415,12 @@ mod tests {
             host: "mini-1.local".into(),
             port: 7799,
             addrs: vec![Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(10, 0, 0, 5)],
-            txt: [("v".to_owned(), "1".to_owned()), ("scheme".to_owned(), "http".to_owned())]
-                .into_iter()
-                .collect(),
+            txt: [
+                ("v".to_owned(), "1".to_owned()),
+                ("scheme".to_owned(), "http".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
         }
     }
 
@@ -425,7 +441,10 @@ mod tests {
         let q = build_query(PAIR_SERVICE);
         assert_eq!(query_for(&q, PAIR_SERVICE), Some(0));
         assert_eq!(query_for(&q, "_other._tcp.local"), None);
-        assert_eq!(query_for(&build_response(&svc(), PAIR_SERVICE, 1, 0), PAIR_SERVICE), None);
+        assert_eq!(
+            query_for(&build_response(&svc(), PAIR_SERVICE, 1, 0), PAIR_SERVICE),
+            None
+        );
         assert!(parse_response(&q, PAIR_SERVICE).is_empty());
     }
 
@@ -457,7 +476,10 @@ mod tests {
             port: 1,
             ..Default::default()
         };
-        assert_eq!(FakeBrowser(vec![f.clone()]).browse(PAIR_SERVICE, Duration::ZERO), vec![f]);
+        assert_eq!(
+            FakeBrowser(vec![f.clone()]).browse(PAIR_SERVICE, Duration::ZERO),
+            vec![f]
+        );
     }
 
     #[test]

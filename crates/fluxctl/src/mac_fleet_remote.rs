@@ -278,7 +278,10 @@ impl Facts {
             self.headless_check(n)
                 .and_then(|c| c["status"].as_str().map(str::to_owned))
         };
-        match (status("console session").as_deref(), status("screen lock").as_deref()) {
+        match (
+            status("console session").as_deref(),
+            status("screen lock").as_deref(),
+        ) {
             (Some("fail"), _) => "login window",
             (_, Some("fail")) => "locked",
             (_, Some("ok")) => "unlocked",
@@ -320,7 +323,12 @@ pub struct Finding {
     pub fix: String,
 }
 
-pub(crate) fn fnd(level: Level, id: &'static str, msg: impl Into<String>, fix: impl Into<String>) -> Finding {
+pub(crate) fn fnd(
+    level: Level,
+    id: &'static str,
+    msg: impl Into<String>,
+    fix: impl Into<String>,
+) -> Finding {
     Finding {
         level,
         id,

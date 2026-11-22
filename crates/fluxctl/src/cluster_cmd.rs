@@ -148,7 +148,12 @@ pub fn from_findings(findings: &[rem::Finding]) -> Vec<RawCheck> {
 }
 
 /// One Mac of a fleet, from what its probe printed. Pure: the ssh call is made by the caller.
-pub fn fleet_facts(target: &Target, facts: &Facts, sf: &SchedFacts, wanted: Option<&str>) -> NodeFacts {
+pub fn fleet_facts(
+    target: &Target,
+    facts: &Facts,
+    sf: &SchedFacts,
+    wanted: Option<&str>,
+) -> NodeFacts {
     let mut n = NodeFacts {
         name: target.name.clone(),
         platform: Platform::Mac,
@@ -203,7 +208,12 @@ pub fn probe_fleet_host(t: &dyn Transport, target: &Target, wanted: Option<&str>
             "the probe failed: {}",
             o.stderr.lines().last().unwrap_or("no output")
         )),
-        Ok(o) => fleet_facts(target, &rem::parse_facts(&o.stdout), &parse_sched_facts(&o.stdout), wanted),
+        Ok(o) => fleet_facts(
+            target,
+            &rem::parse_facts(&o.stdout),
+            &parse_sched_facts(&o.stdout),
+            wanted,
+        ),
     }
 }
 
@@ -249,7 +259,10 @@ pub async fn gather_local(env: &Env) -> NodeFacts {
         );
         let mut raws = from_vz("vz", &md::evaluate(&facts));
         // The store directory is the one thing here that `fix` may create.
-        for r in raws.iter_mut().filter(|r| r.name.contains("store location") && r.severity != Severity::Ok) {
+        for r in raws
+            .iter_mut()
+            .filter(|r| r.name.contains("store location") && r.severity != Severity::Ok)
+        {
             if !store.exists() {
                 r.path = Some(store.display().to_string());
             }
@@ -261,14 +274,21 @@ pub async fn gather_local(env: &Env) -> NodeFacts {
             &crate::mac_host::user(),
             crate::mac_host::keepawake_loaded(),
         );
-        f.checks.extend(from_vz("host", &crate::mac_host::headless_checks(&hf)));
+        f.checks
+            .extend(from_vz("host", &crate::mac_host::headless_checks(&hf)));
     }
     if daemon_ok {
         if let Ok(vms) = env.remote.call(reqwest::Method::GET, "/v1/vms", None).await {
-            let cpus = std::thread::available_parallelism().ok().and_then(|n| u32::try_from(n.get()).ok());
+            let cpus = std::thread::available_parallelism()
+                .ok()
+                .and_then(|n| u32::try_from(n.get()).ok());
             health::apply_vm_list(&mut f, &vms, cpus);
         }
-        if let Ok(m) = env.remote.call(reqwest::Method::GET, "/v1/host/memory", None).await {
+        if let Ok(m) = env
+            .remote
+            .call(reqwest::Method::GET, "/v1/host/memory", None)
+            .await
+        {
             f.mem_total_mib = m["mem_total_mib"].as_u64();
             f.mem_free_mib = m["mem_available_mib"].as_u64();
         }
@@ -277,7 +297,12 @@ pub async fn gather_local(env: &Env) -> NodeFacts {
 }
 
 /// Every machine to report on: this one (unless `no_local`) and the Macs of the inventory.
-pub async fn gather(env: &Env, inventory: Option<&Path>, no_local: bool, conn: &Conn) -> Result<Vec<NodeFacts>> {
+pub async fn gather(
+    env: &Env,
+    inventory: Option<&Path>,
+    no_local: bool,
+    conn: &Conn,
+) -> Result<Vec<NodeFacts>> {
     let mut nodes = vec![];
     if !no_local {
         nodes.push(gather_local(env).await);
@@ -294,7 +319,9 @@ pub async fn gather(env: &Env, inventory: Option<&Path>, no_local: bool, conn: &
         let wanted = inv.version.clone();
         let jobs = conn.jobs.max(1);
         let tr_ref: &dyn Transport = tr.as_ref();
-        nodes.extend(par_map(&targets, jobs, |t| probe_fleet_host(tr_ref, t, wanted.as_deref())));
+        nodes.extend(par_map(&targets, jobs, |t| {
+            probe_fleet_host(tr_ref, t, wanted.as_deref())
+        }));
     }
     Ok(nodes)
 }
@@ -310,14 +337,21 @@ pub fn gateway_items_for_known_clusters(home: &Path) -> Vec<Item> {
         .flatten()
         .filter_map(|e| {
             let f = e.file_name().to_string_lossy().into_owned();
-            f.strip_prefix("fluxvm-")?.strip_suffix(".yaml").map(str::to_owned)
+            f.strip_prefix("fluxvm-")?
+                .strip_suffix(".yaml")
+                .map(str::to_owned)
         })
         .collect();
     names.sort();
     let mut items = vec![];
     for name in names.into_iter().take(5) {
-        let sel = Selection { cluster: Some(name.clone()), kube_context: None };
-        let Ok(prefix) = sel.prefix(Some(home)) else { continue };
+        let sel = Selection {
+            cluster: Some(name.clone()),
+            kube_context: None,
+        };
+        let Ok(prefix) = sel.prefix(Some(home)) else {
+            continue;
+        };
         if let Some(facts) = Cluster::new(prefix, &SystemKubectl).facts(&name) {
             items.extend(health::gateway_items(&facts));
         }
@@ -326,8 +360,12 @@ pub fn gateway_items_for_known_clusters(home: &Path) -> Vec<Item> {
 }
 
 async fn gateway_items_now() -> Vec<Item> {
-    let Ok(home) = crate::docker_host::home() else { return vec![] };
-    tokio::task::spawn_blocking(move || gateway_items_for_known_clusters(&home)).await.unwrap_or_default()
+    let Ok(home) = crate::docker_host::home() else {
+        return vec![];
+    };
+    tokio::task::spawn_blocking(move || gateway_items_for_known_clusters(&home))
+        .await
+        .unwrap_or_default()
 }
 
 // ---- rendering --------------------------------------------------------------------------------------------------------
@@ -342,7 +380,11 @@ fn light(s: Severity, color: bool) -> String {
         Severity::Warn => ("yellow", "33"),
         Severity::Fail => ("red", "31"),
     };
-    if color { format!("\x1b[{code}m● {word}\x1b[0m") } else { format!("({word})") }
+    if color {
+        format!("\x1b[{code}m● {word}\x1b[0m")
+    } else {
+        format!("({word})")
+    }
 }
 
 fn fix_line(f: &Fix, machine: &str) -> String {
@@ -383,12 +425,20 @@ pub fn render_status(h: &ClusterHealth, verbose: bool, color: bool) -> String {
     }
     for m in &h.machines {
         let tag = if m.local { " (this machine)" } else { "" };
-        o.push_str(&format!("{} {}{tag}: {}\n", light(m.light, color), m.name, m.headline));
+        o.push_str(&format!(
+            "{} {}{tag}: {}\n",
+            light(m.light, color),
+            m.name,
+            m.headline
+        ));
         o.push_str(&format!("      {}\n", m.capacity.summary));
         let mut extra = vec![format!("last backup: {}", m.last_backup)];
         if let Some(v) = &m.version {
             extra.push(match &m.update {
-                Some(u) => format!("FluxVM {v} (update to {} available: `fluxctl mac-fleet upgrade`)", u.wanted),
+                Some(u) => format!(
+                    "FluxVM {v} (update to {} available: `fluxctl mac-fleet upgrade`)",
+                    u.wanted
+                ),
                 None => format!("FluxVM {v}"),
             });
         }
@@ -455,7 +505,8 @@ pub fn sudo_allowed(f: &Fix) -> bool {
         && !f.needs_login
         && !f.safe
         && f.command.as_deref().is_some_and(|c| {
-            SUDO_ALLOW.iter().any(|p| c.starts_with(p)) && !c.contains(['&', ';', '|', '`', '$', '>', '<', '\n'])
+            SUDO_ALLOW.iter().any(|p| c.starts_with(p))
+                && !c.contains(['&', ';', '|', '`', '$', '>', '<', '\n'])
         })
 }
 
@@ -467,17 +518,32 @@ pub fn plan(h: &ClusterHealth) -> Vec<Planned> {
         let (disposition, why) = if fix.safe && local {
             (Disposition::Apply, None)
         } else if fix.safe {
-            (Disposition::Manual, Some(format!("it is on {}, not on this machine: run it there", i.machine)))
+            (
+                Disposition::Manual,
+                Some(format!(
+                    "it is on {}, not on this machine: run it there",
+                    i.machine
+                )),
+            )
         } else if sudo_allowed(fix) && local {
             (Disposition::Sudo, None)
         } else if fix.changes_security {
-            (Disposition::Manual, Some("a security setting: FluxVM never changes it".into()))
+            (
+                Disposition::Manual,
+                Some("a security setting: FluxVM never changes it".into()),
+            )
         } else if fix.needs_sudo {
-            (Disposition::Manual, Some("needs sudo and is not on the short list `--sudo` may run".into()))
+            (
+                Disposition::Manual,
+                Some("needs sudo and is not on the short list `--sudo` may run".into()),
+            )
         } else if fix.needs_login {
             (Disposition::Manual, Some("needs a person to log in".into()))
         } else {
-            (Disposition::Manual, Some("FluxVM cannot be sure this is safe to do by itself".into()))
+            (
+                Disposition::Manual,
+                Some("FluxVM cannot be sure this is safe to do by itself".into()),
+            )
         };
         out.push(Planned {
             item: i.id.clone(),
@@ -545,15 +611,22 @@ impl Applier for RealApplier {
     }
     fn pull_image(&self, reference: &str) -> Result<String> {
         let exe = crate::stable_exe::stable_exe().context("locating fluxctl")?;
-        let out = std::process::Command::new(exe).args(["mac", "pull", reference]).output()?;
+        let out = std::process::Command::new(exe)
+            .args(["mac", "pull", reference])
+            .output()?;
         if !out.status.success() {
-            bail!("pull failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "pull failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(format!("pulled {reference}"))
     }
     fn run_sudo(&self, command: &str) -> Result<String> {
         // Terminal attached so sudo can ask for the password itself.
-        let st = std::process::Command::new("sh").args(["-c", command]).status()?;
+        let st = std::process::Command::new("sh")
+            .args(["-c", command])
+            .status()?;
         if !st.success() {
             bail!("`{command}` exited with {st}");
         }
@@ -575,11 +648,16 @@ pub fn apply(plan: &[Planned], allow_sudo: bool, a: &dyn Applier) -> Vec<Applied
     let mut out = vec![];
     for p in plan {
         let (what, res) = match (&p.disposition, &p.action) {
-            (Disposition::Apply, Some(FixAction::StartService)) => ("start the FluxVM service".to_owned(), a.start_service()),
-            (Disposition::Apply, Some(FixAction::CreateDir { path })) => {
-                (format!("create directory {path}"), a.create_dir(Path::new(path)))
+            (Disposition::Apply, Some(FixAction::StartService)) => {
+                ("start the FluxVM service".to_owned(), a.start_service())
             }
-            (Disposition::Apply, Some(FixAction::PullImage { reference })) => (format!("pull image {reference}"), a.pull_image(reference)),
+            (Disposition::Apply, Some(FixAction::CreateDir { path })) => (
+                format!("create directory {path}"),
+                a.create_dir(Path::new(path)),
+            ),
+            (Disposition::Apply, Some(FixAction::PullImage { reference })) => {
+                (format!("pull image {reference}"), a.pull_image(reference))
+            }
             (Disposition::Sudo, _) if allow_sudo => {
                 let c = p.command.clone().unwrap_or_default();
                 (format!("run `{c}`"), a.run_sudo(&c))
@@ -605,13 +683,24 @@ pub fn apply(plan: &[Planned], allow_sudo: bool, a: &dyn Applier) -> Vec<Applied
 /// state directory is not writable (a root-owned daemon).
 pub fn journal_path(state_dir: &Path) -> PathBuf {
     let primary = state_dir.join("health");
-    if std::fs::create_dir_all(&primary).is_ok() && primary.metadata().is_ok_and(|m| !m.permissions().readonly()) {
+    if std::fs::create_dir_all(&primary).is_ok()
+        && primary
+            .metadata()
+            .is_ok_and(|m| !m.permissions().readonly())
+    {
         let p = primary.join("fix-log.jsonl");
-        if std::fs::OpenOptions::new().create(true).append(true).open(&p).is_ok() {
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+            .is_ok()
+        {
             return p;
         }
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
     home.join(".config/fluxvm/fix-log.jsonl")
 }
 
@@ -622,7 +711,10 @@ pub fn record(path: &Path, applied: &[Applied]) -> Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     for a in applied {
         writeln!(f, "{}", serde_json::to_string(a)?)?;
     }
@@ -633,7 +725,10 @@ pub fn render_plan(plan: &[Planned], allow_sudo: bool, dry: bool) -> String {
     let mut o = String::new();
     let will: Vec<&Planned> = plan
         .iter()
-        .filter(|p| p.disposition == Disposition::Apply || (p.disposition == Disposition::Sudo && allow_sudo))
+        .filter(|p| {
+            p.disposition == Disposition::Apply
+                || (p.disposition == Disposition::Sudo && allow_sudo)
+        })
         .collect();
     if will.is_empty() {
         o.push_str("Nothing FluxVM can safely fix by itself.\n");
@@ -641,10 +736,16 @@ pub fn render_plan(plan: &[Planned], allow_sudo: bool, dry: bool) -> String {
         o.push_str(if dry { "Would do:\n" } else { "Will do:\n" });
         for p in &will {
             o.push_str(&format!("  [{}] {}\n", p.machine, p.message));
-            o.push_str(&format!("      {}\n", p.command.as_deref().or(p.steps.as_deref()).unwrap_or("")));
+            o.push_str(&format!(
+                "      {}\n",
+                p.command.as_deref().or(p.steps.as_deref()).unwrap_or("")
+            ));
         }
     }
-    let manual: Vec<&Planned> = plan.iter().filter(|p| !will.iter().any(|w| w.item == p.item)).collect();
+    let manual: Vec<&Planned> = plan
+        .iter()
+        .filter(|p| !will.iter().any(|w| w.item == p.item))
+        .collect();
     if !manual.is_empty() {
         o.push_str("\nFor you to do:\n");
         for p in manual {
@@ -693,12 +794,17 @@ pub async fn run_fix(a: &FixArgs, env: &Env, state_dir: &Path) -> Result<i32> {
     let nodes = gather(env, a.inventory.as_deref(), false, &conn).await?;
     let h = health::assess_with(&nodes, gateway_items_now().await, now());
     let p = plan(&h);
-    let will_change = p
-        .iter()
-        .any(|x| x.disposition == Disposition::Apply || (x.disposition == Disposition::Sudo && a.sudo));
+    let will_change = p.iter().any(|x| {
+        x.disposition == Disposition::Apply || (x.disposition == Disposition::Sudo && a.sudo)
+    });
     if a.dry_run || !will_change {
         if a.json {
-            println!("{}", serde_json::to_string_pretty(&json!({"schema": health::SCHEMA, "dry_run": a.dry_run, "plan": p, "applied": []}))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({"schema": health::SCHEMA, "dry_run": a.dry_run, "plan": p, "applied": []})
+                )?
+            );
         } else {
             print!("{}", render_plan(&p, a.sudo, a.dry_run));
         }
@@ -723,24 +829,45 @@ pub async fn run_fix(a: &FixArgs, env: &Env, state_dir: &Path) -> Result<i32> {
     let applied = apply(&p, a.sudo, &RealApplier);
     let log = journal_path(state_dir);
     if let Err(e) = record(&log, &applied) {
-        eprintln!("warning: could not write the change log {}: {e:#}", log.display());
+        eprintln!(
+            "warning: could not write the change log {}: {e:#}",
+            log.display()
+        );
     }
     // Look again, so the answer is the state the user is left with.
-    let after = health::assess_with(&gather(env, a.inventory.as_deref(), false, &conn).await?, gateway_items_now().await, now());
+    let after = health::assess_with(
+        &gather(env, a.inventory.as_deref(), false, &conn).await?,
+        gateway_items_now().await,
+        now(),
+    );
     if a.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({"schema": health::SCHEMA, "dry_run": false, "plan": p, "applied": applied, "after": after, "log": log}))?
+            serde_json::to_string_pretty(
+                &json!({"schema": health::SCHEMA, "dry_run": false, "plan": p, "applied": applied, "after": after, "log": log})
+            )?
         );
     } else {
         println!("\nWhat I changed:");
         for x in &applied {
-            println!("  {} [{}] {}{}", if x.ok { "done  " } else { "FAILED" }, x.machine, x.what, if x.ok { String::new() } else { format!(": {}", x.output) });
+            println!(
+                "  {} [{}] {}{}",
+                if x.ok { "done  " } else { "FAILED" },
+                x.machine,
+                x.what,
+                if x.ok {
+                    String::new()
+                } else {
+                    format!(": {}", x.output)
+                }
+            );
         }
         println!("  (recorded in {})\n", log.display());
         print!("{}", render_status(&after, false, color_on()));
     }
-    Ok(i32::from(after.light == Severity::Fail || applied.iter().any(|x| !x.ok)))
+    Ok(i32::from(
+        after.light == Severity::Fail || applied.iter().any(|x| !x.ok),
+    ))
 }
 
 /// `--json` documents for scripts: the schema of both commands is `health::SCHEMA`.
@@ -763,7 +890,10 @@ mod tests {
             Ok("started".into())
         }
         fn create_dir(&self, p: &Path) -> Result<String> {
-            self.0.lock().unwrap().push(format!("mkdir {}", p.display()));
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("mkdir {}", p.display()));
             Ok("made".into())
         }
         fn pull_image(&self, r: &str) -> Result<String> {
@@ -808,19 +938,47 @@ mod tests {
         };
         missing.fix = None;
         a.checks.push(missing);
-        a.checks.push(RawCheck { source: "host".into(), name: "FileVault (host)".into(), severity: Severity::Warn, detail: "on".into(), ..Default::default() });
+        a.checks.push(RawCheck {
+            source: "host".into(),
+            name: "FileVault (host)".into(),
+            severity: Severity::Warn,
+            detail: "on".into(),
+            ..Default::default()
+        });
         let mut b = healthy_mac("mini-02", false);
         b.daemon_up = Some(false);
-        let mut l = NodeFacts { name: "box".into(), platform: Platform::Linux, reachable: true, daemon_up: Some(true), ..Default::default() };
-        l.checks.push(RawCheck { source: "doctor".into(), name: "ip forwarding".into(), severity: Severity::Warn, detail: "0".into(), ..Default::default() });
-        l.checks.push(RawCheck { source: "doctor".into(), name: "kvm".into(), severity: Severity::Fail, detail: "no".into(), ..Default::default() });
+        let mut l = NodeFacts {
+            name: "box".into(),
+            platform: Platform::Linux,
+            reachable: true,
+            daemon_up: Some(true),
+            ..Default::default()
+        };
+        l.checks.push(RawCheck {
+            source: "doctor".into(),
+            name: "ip forwarding".into(),
+            severity: Severity::Warn,
+            detail: "0".into(),
+            ..Default::default()
+        });
+        l.checks.push(RawCheck {
+            source: "doctor".into(),
+            name: "kvm".into(),
+            severity: Severity::Fail,
+            detail: "no".into(),
+            ..Default::default()
+        });
         health::assess(&[a, b, l], 1_800_000_000)
     }
 
     #[test]
     fn the_plan_separates_safe_sudo_and_manual() {
         let p = plan(&broken_cluster());
-        let get = |item: &str| p.iter().find(|x| x.item.contains(item)).unwrap_or_else(|| panic!("{item} in {p:?}"));
+        let get = |item: &str| {
+            p.iter()
+                .find(|x| x.item.contains(item))
+                .unwrap_or_else(|| panic!("{item} in {p:?}"))
+        };
         assert_eq!(get("mini-01/daemon_down").disposition, Disposition::Apply);
         assert_eq!(get("mini-01/store_problem").disposition, Disposition::Apply);
         // a safe fix on another machine is never applied from here
@@ -828,9 +986,16 @@ mod tests {
         assert_eq!(remote.disposition, Disposition::Manual);
         assert!(remote.why_manual.as_ref().unwrap().contains("mini-02"));
         // security settings are never applied, with or without --sudo
-        assert_eq!(get("mini-01/security_setting").disposition, Disposition::Manual);
+        assert_eq!(
+            get("mini-01/security_setting").disposition,
+            Disposition::Manual
+        );
         // the additive sudo fix is on the list, the group change is not
-        assert_eq!(get("box/ip_forward").disposition, Disposition::Manual, "box is not local here");
+        assert_eq!(
+            get("box/ip_forward").disposition,
+            Disposition::Manual,
+            "box is not local here"
+        );
     }
 
     #[test]
@@ -843,12 +1008,19 @@ mod tests {
         let p = plan(&h);
         let rec = Rec::default();
         let applied = apply(&p, false, &rec);
-        assert!(applied.is_empty() || applied.iter().all(|a| !a.what.contains("sudo")), "{applied:?}");
+        assert!(
+            applied.is_empty() || applied.iter().all(|a| !a.what.contains("sudo")),
+            "{applied:?}"
+        );
         assert!(rec.0.lock().unwrap().iter().all(|c| !c.starts_with("sudo")));
         let rec = Rec::default();
         let applied = apply(&p, true, &rec);
         let ran = rec.0.lock().unwrap().clone();
-        assert!(ran.iter().any(|c| c == "sudo sudo sysctl -w net.ipv4.ip_forward=1"), "{ran:?}");
+        assert!(
+            ran.iter()
+                .any(|c| c == "sudo sudo sysctl -w net.ipv4.ip_forward=1"),
+            "{ran:?}"
+        );
         // kvm needs `usermod` + a login: not on the list
         assert!(!ran.iter().any(|c| c.contains("usermod")));
         assert!(applied.iter().all(|a| a.ok));
@@ -863,14 +1035,22 @@ mod tests {
         let ran = rec.0.lock().unwrap().clone();
         let mut sorted = ran.clone();
         sorted.sort();
-        assert_eq!(sorted, vec!["mkdir /tmp/fluxvm-store".to_string(), "start".to_string()], "{ran:?}");
+        assert_eq!(
+            sorted,
+            vec!["mkdir /tmp/fluxvm-store".to_string(), "start".to_string()],
+            "{ran:?}"
+        );
         assert_eq!(applied.len(), 2);
         assert!(!ran.iter().any(|c| c.contains("FileVault")));
     }
 
     #[test]
     fn sudo_allow_list_is_narrow_and_rejects_shell_tricks() {
-        let f = |c: &str| Fix { command: Some(c.into()), needs_sudo: true, ..Default::default() };
+        let f = |c: &str| Fix {
+            command: Some(c.into()),
+            needs_sudo: true,
+            ..Default::default()
+        };
         assert!(sudo_allowed(&f("sudo systemctl start fluxvm")));
         assert!(sudo_allowed(&f("sudo modprobe tun vhost_net")));
         assert!(!sudo_allowed(&f("sudo systemctl start fluxvm; rm -rf /")));
@@ -949,7 +1129,10 @@ mod tests {
         assert!(t.contains("fluxctl explain DAEMON_DOWN"));
         let healthy = health::assess(&[healthy_mac("m", true)], 1);
         let t = render_status(&healthy, false, false);
-        assert!(t.contains("m is healthy") && t.contains("Next: Nothing to do"), "{t}");
+        assert!(
+            t.contains("m is healthy") && t.contains("Next: Nothing to do"),
+            "{t}"
+        );
     }
 
     const PROBE_OK: &str = "os=Darwin\narch=arm64\nmacos=15.2\nuser=ci\nconsole_user=ci\ndisk_free_gib=40\nfluxctl_version=0.4.20\ndaemon_loaded=yes\ndaemon_healthy=yes\nncpu=10\nmemsize=17179869184\npower=ac\nvms_json={\"items\":[{\"status\":\"running\",\"request\":{\"vcpus\":4,\"memory_mib\":8192,\"apple\":{\"guest_os\":\"macos\"}}},{\"status\":\"running\",\"request\":{\"vcpus\":2,\"memory_mib\":4096,\"apple\":{\"guest_os\":\"macos\"}}}]}\n";
@@ -960,11 +1143,20 @@ mod tests {
         let tr = FakeTransport::new(|_, _| ok(PROBE_OK));
         let n = probe_fleet_host(&tr, &t, Some("0.4.21"));
         assert!(n.reachable && n.installed == Some(true));
-        assert_eq!((n.macos_in_use, n.vms_total, n.disk_free_gib), (Some(2), Some(2), Some(40)));
+        assert_eq!(
+            (n.macos_in_use, n.vms_total, n.disk_free_gib),
+            (Some(2), Some(2), Some(40))
+        );
         assert_eq!(n.cpus_free, Some(4));
         let h = health::assess(&[n], 1_800_000_000);
         let m = &h.machines[0];
-        assert!(m.items.iter().any(|i| i.message == "2 of 2 macOS slots are in use on mini-01"), "{:?}", m.items);
+        assert!(
+            m.items
+                .iter()
+                .any(|i| i.message == "2 of 2 macOS slots are in use on mini-01"),
+            "{:?}",
+            m.items
+        );
         assert_eq!(m.update.as_ref().unwrap().wanted, "0.4.21");
         assert_eq!(m.last_backup, "not reported");
     }
@@ -972,21 +1164,34 @@ mod tests {
     #[test]
     fn an_unreachable_mac_is_a_finding_with_the_ssh_reason() {
         let t = Target::parse("ci@mini-09").unwrap();
-        let tr = FakeTransport::new(|_, _| failed(255, "ssh: connect to host mini-09 port 22: Connection timed out"));
+        let tr = FakeTransport::new(|_, _| {
+            failed(
+                255,
+                "ssh: connect to host mini-09 port 22: Connection timed out",
+            )
+        });
         let n = probe_fleet_host(&tr, &t, None);
         assert!(!n.reachable);
         let h = health::assess(&[n], 1);
         assert_eq!(h.light, Severity::Fail);
-        assert_eq!(h.machines[0].items[0].explain.as_deref(), Some("HOST_UNREACHABLE"));
+        assert_eq!(
+            h.machines[0].items[0].explain.as_deref(),
+            Some("HOST_UNREACHABLE")
+        );
     }
 
     #[test]
     fn a_stopped_fleet_daemon_is_a_manual_item_here() {
         let t = Target::parse("ci@mini-01").unwrap();
-        let tr = FakeTransport::new(|_, _| ok(&PROBE_OK.replace("daemon_healthy=yes", "daemon_healthy=no")));
+        let tr = FakeTransport::new(|_, _| {
+            ok(&PROBE_OK.replace("daemon_healthy=yes", "daemon_healthy=no"))
+        });
         let h = health::assess(&[probe_fleet_host(&tr, &t, None)], 1);
         let p = plan(&h);
-        assert!(p.iter().any(|x| x.item.contains("daemon_down") && x.disposition == Disposition::Manual));
+        assert!(
+            p.iter()
+                .any(|x| x.item.contains("daemon_down") && x.disposition == Disposition::Manual)
+        );
     }
 
     #[test]

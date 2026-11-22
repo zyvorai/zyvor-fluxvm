@@ -7,11 +7,11 @@
 //! there over ssh. No guest is created from here and no daemon is reached from here. Every ssh call has a deadline.
 
 use crate::mac_fleet::{
-    Conn, HostResult, StepResult, Which, blank, fail, finish, jobs, last_lines, par_map, render_table,
-    resolve, transport,
+    Conn, HostResult, StepResult, Which, blank, fail, finish, jobs, last_lines, par_map,
+    render_table, resolve, transport,
 };
 use crate::mac_fleet_remote::{
-    PRELUDE, Secret, parse_facts, probe_script, remove_script, remote, scrub, sh_quote,
+    PRELUDE, Secret, parse_facts, probe_script, remote, remove_script, scrub, sh_quote,
 };
 use crate::mac_fleet_sched::*;
 use crate::mac_fleet_ssh::{Target, Transport, explain_ssh_failure};
@@ -313,7 +313,11 @@ pub fn view_host(tr: &dyn Transport, target: &Target, timeout: Duration) -> Host
             target,
             format!("the probe failed: {}", last_lines(&o.stderr, 2)),
         ),
-        Ok(o) => HostView::from_facts(target, &parse_facts(&o.stdout), &parse_sched_facts(&o.stdout)),
+        Ok(o) => HostView::from_facts(
+            target,
+            &parse_facts(&o.stdout),
+            &parse_sched_facts(&o.stdout),
+        ),
     }
 }
 
@@ -402,7 +406,8 @@ impl Placer<'_> {
                         (self.log)(&format!("queued: {}", note.replace("\n  ", "; ")));
                         last_note = note;
                     }
-                    self.clock.sleep(self.poll_secs.min(queue_timeout - waited).max(1));
+                    self.clock
+                        .sleep(self.poll_secs.min(queue_timeout - waited).max(1));
                 }
             }
         }
@@ -438,7 +443,9 @@ impl JobRun {
 }
 
 fn safe_word(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+    !s.is_empty()
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
 }
 
 /// The script that runs the job on a Mac: `fluxctl mac run --rm` there, so the Mac's own daemon creates the guest.
@@ -447,7 +454,9 @@ pub fn run_job_script(j: &JobRun) -> Result<String> {
         bail!("bad job id {:?}", j.id);
     }
     if let Some(e) = &j.secret_env
-        && !(e.bytes().all(|c| c.is_ascii_uppercase() || c == b'_' || c.is_ascii_digit())
+        && !(e
+            .bytes()
+            .all(|c| c.is_ascii_uppercase() || c == b'_' || c.is_ascii_digit())
             && !e.is_empty())
     {
         bail!("bad environment variable name {e:?}");
@@ -534,7 +543,8 @@ pub fn run_job(
         }
         Ok(o) => {
             out.code = o.code;
-            out.timed_out = o.code == crate::mac_fleet_timed::TIMED_OUT && o.stderr.contains("timed out after");
+            out.timed_out =
+                o.code == crate::mac_fleet_timed::TIMED_OUT && o.stderr.contains("timed out after");
             out.stdout = scrub(&o.stdout, secret);
             out.stderr = scrub(&o.stderr, secret);
         }
@@ -551,9 +561,14 @@ pub fn delete_instance(tr: &dyn Transport, target: &Target, name: &str) -> bool 
         "{PRELUDE}[ -n \"$FLUXCTL\" ] && \"$FLUXCTL\" mac rm {} 2>&1\n",
         sh_quote(name)
     );
-    tr.run_timed(target, &remote(&script), None, Some(Duration::from_secs(120)))
-        .map(|o| o.ok())
-        .unwrap_or(false)
+    tr.run_timed(
+        target,
+        &remote(&script),
+        None,
+        Some(Duration::from_secs(120)),
+    )
+    .map(|o| o.ok())
+    .unwrap_or(false)
 }
 
 fn lease_id() -> String {
@@ -561,7 +576,11 @@ fn lease_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:x}{:x}", n & 0xffff_ffff_ffff, std::process::id() & 0xffff)
+    format!(
+        "{:x}{:x}",
+        n & 0xffff_ffff_ffff,
+        std::process::id() & 0xffff
+    )
 }
 
 pub fn new_job_id() -> String {
@@ -652,7 +671,11 @@ pub fn set_drain(
     let mut st = FleetState::load(state_path)?;
     let mut lines = vec![];
     for n in names {
-        let changed = if drain { st.drain(n, now) } else { st.resume(n) };
+        let changed = if drain {
+            st.drain(n, now)
+        } else {
+            st.resume(n)
+        };
         lines.push(match (drain, changed) {
             (true, true) => format!("{n}: drained; running jobs finish, no new job is placed"),
             (true, false) => format!("{n}: already drained"),
@@ -688,8 +711,12 @@ pub struct RegistryAuth {
 
 impl RegistryAuth {
     pub fn from_env() -> Option<Self> {
-        let u = std::env::var("FLUXVM_REGISTRY_USER").ok().filter(|s| !s.is_empty())?;
-        let p = std::env::var("FLUXVM_REGISTRY_PASSWORD").ok().filter(|s| !s.is_empty())?;
+        let u = std::env::var("FLUXVM_REGISTRY_USER")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let p = std::env::var("FLUXVM_REGISTRY_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())?;
         Some(Self {
             user: Secret::new(u.into_bytes()),
             password: Secret::new(p.into_bytes()),
@@ -710,23 +737,37 @@ impl RegistryAuth {
 }
 
 pub fn images_script() -> String {
-    format!("{PRELUDE}[ -n \"$FLUXCTL\" ] || {{ echo 'fluxctl is not installed on this Mac' >&2; exit 127; }}\n\"$FLUXCTL\" mac images --json\n")
+    format!(
+        "{PRELUDE}[ -n \"$FLUXCTL\" ] || {{ echo 'fluxctl is not installed on this Mac' >&2; exit 127; }}\n\"$FLUXCTL\" mac images --json\n"
+    )
 }
 
 pub fn pull_script(template: &TemplateRef, auth: bool) -> String {
-    let mut s = format!("{PRELUDE}[ -n \"$FLUXCTL\" ] || {{ echo 'fluxctl is not installed on this Mac' >&2; exit 127; }}\n");
+    let mut s = format!(
+        "{PRELUDE}[ -n \"$FLUXCTL\" ] || {{ echo 'fluxctl is not installed on this Mac' >&2; exit 127; }}\n"
+    );
     if auth {
         s.push_str("IFS= read -r FLUXVM_REGISTRY_USER\nIFS= read -r FLUXVM_REGISTRY_PASSWORD\nexport FLUXVM_REGISTRY_USER FLUXVM_REGISTRY_PASSWORD\n");
     }
-    s.push_str(&format!("\"$FLUXCTL\" mac pull {}\n", sh_quote(&template.name)));
+    s.push_str(&format!(
+        "\"$FLUXCTL\" mac pull {}\n",
+        sh_quote(&template.name)
+    ));
     s
 }
 
-fn held(tr: &dyn Transport, t: &Target, timeout: Duration) -> std::result::Result<Vec<HeldTemplate>, String> {
+fn held(
+    tr: &dyn Transport,
+    t: &Target,
+    timeout: Duration,
+) -> std::result::Result<Vec<HeldTemplate>, String> {
     match tr.run_timed(t, &remote(&images_script()), None, Some(timeout)) {
         Err(e) => Err(format!("{e:#}")),
         Ok(o) if o.ssh_failed() => Err(explain_ssh_failure(t, &o.stderr)),
-        Ok(o) if !o.ok() => Err(format!("mac images failed: {}", last_lines(&format!("{}\n{}", o.stdout, o.stderr), 2))),
+        Ok(o) if !o.ok() => Err(format!(
+            "mac images failed: {}",
+            last_lines(&format!("{}\n{}", o.stdout, o.stderr), 2)
+        )),
         Ok(o) => Ok(parse_images_json(&o.stdout)),
     }
 }
@@ -755,7 +796,8 @@ pub fn distribute_host(
         Err(e) => return fail(r, e),
     };
     if holds(&before, template) == Holds::Yes {
-        r.steps.push(step("check", true, format!("already holds {template}")));
+        r.steps
+            .push(step("check", true, format!("already holds {template}")));
         r.ok = true;
         return r;
     }
@@ -781,14 +823,16 @@ pub fn distribute_host(
         r.steps.push(step("pull", false, text.clone()));
         return fail(r, format!("pull failed: {text}"));
     }
-    r.steps.push(step("pull", true, clean(&last_lines(&o.stdout, 1))));
+    r.steps
+        .push(step("pull", true, clean(&last_lines(&o.stdout, 1))));
     let after = match held(tr, target, Duration::from_secs(60)) {
         Ok(h) => h,
         Err(e) => return fail(r, format!("pulled, but could not verify: {e}")),
     };
     match holds(&after, template) {
         Holds::Yes => {
-            r.steps.push(step("verify", true, format!("{} is {want}", template.name)));
+            r.steps
+                .push(step("verify", true, format!("{} is {want}", template.name)));
             r.ok = true;
             r
         }
@@ -802,7 +846,10 @@ pub fn distribute_host(
                 ),
             )
         }
-        Holds::No => fail(r, format!("pulled, but {} is not in the store", template.name)),
+        Holds::No => fail(
+            r,
+            format!("pulled, but {} is not in the store", template.name),
+        ),
     }
 }
 
@@ -810,7 +857,11 @@ pub fn render_templates(views: &[HostView]) -> String {
     let mut rows = vec![];
     for v in views {
         if let Some(u) = &v.unavailable {
-            rows.push(vec![v.label.clone(), "-".into(), format!("unavailable: {u}")]);
+            rows.push(vec![
+                v.label.clone(),
+                "-".into(),
+                format!("unavailable: {u}"),
+            ]);
         } else if !v.templates_known {
             rows.push(vec![v.label.clone(), "-".into(), "(could not list)".into()]);
         } else if v.templates.is_empty() {
@@ -820,7 +871,11 @@ pub fn render_templates(views: &[HostView]) -> String {
             rows.push(vec![
                 v.label.clone(),
                 t.reference.clone(),
-                if t.digest.is_empty() { "local".into() } else { t.digest.clone() },
+                if t.digest.is_empty() {
+                    "local".into()
+                } else {
+                    t.digest.clone()
+                },
             ]);
         }
     }
@@ -833,7 +888,12 @@ pub fn render_templates(views: &[HostView]) -> String {
 /// install; VM images and data stay). The caller records which Macs `apply` saw, so the next `apply` can tell.
 pub fn prune_host(tr: &dyn Transport, target: &Target) -> HostResult {
     let r = blank(target);
-    let o = match tr.run_timed(target, &remote(&probe_script()), None, Some(Duration::from_secs(30))) {
+    let o = match tr.run_timed(
+        target,
+        &remote(&probe_script()),
+        None,
+        Some(Duration::from_secs(30)),
+    ) {
         Err(e) => return fail(r, format!("{e:#}")),
         Ok(o) if o.ssh_failed() => return fail(r, explain_ssh_failure(target, &o.stderr)),
         Ok(o) => o,
@@ -881,7 +941,11 @@ pub fn after_apply(
     let mut keep: Vec<AppliedHost> = targets.iter().map(AppliedHost::from_target).collect();
     let mut failed = 0;
     if !left.is_empty() {
-        let names = left.iter().map(|l| l.name.as_str()).collect::<Vec<_>>().join(", ");
+        let names = left
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         if !prune {
             eprintln!(
                 "{} Mac(s) left the inventory and were not touched: {names} (apply --prune removes FluxVM from them)",
@@ -901,7 +965,9 @@ pub fn after_apply(
                 }
             }
             if failed > 0 {
-                eprintln!("{failed} Mac(s) could not be pruned; they stay on the list for the next `apply --prune`");
+                eprintln!(
+                    "{failed} Mac(s) could not be pruned; they stay on the list for the next `apply --prune`"
+                );
             }
         }
     }
@@ -923,11 +989,18 @@ pub fn run_cmd(a: RunArgs) -> Result<()> {
         Some(m) => crate::mac_config::parse_memory_mib(m)?,
         None => 0,
     };
-    let job = a.place.job(&a.template, u32::from(a.cpus.unwrap_or(0)), memory_mib)?;
+    let job = a
+        .place
+        .job(&a.template, u32::from(a.cpus.unwrap_or(0)), memory_mib)?;
     let tr = transport(&a.conn, inv.as_ref());
     if a.conn.dry_run {
         println!("# dry run: only the read-only look at each Mac is shown; the job is not placed");
-        let _ = snapshot(tr.as_ref(), &targets, 1, Duration::from_secs(a.place.probe_timeout));
+        let _ = snapshot(
+            tr.as_ref(),
+            &targets,
+            1,
+            Duration::from_secs(a.place.probe_timeout),
+        );
         if let Some(d) = tr.as_dry() {
             for l in d.lines.lock().unwrap().iter() {
                 println!("{l}");
@@ -972,7 +1045,11 @@ pub fn drain_cmd(a: DrainArgs, drain: bool) -> Result<()> {
     let (targets, _) = resolve(&a.which, &a.conn)?;
     let names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
     if a.conn.dry_run {
-        println!("# dry run: would {} {}", if drain { "drain" } else { "resume" }, names.join(", "));
+        println!(
+            "# dry run: would {} {}",
+            if drain { "drain" } else { "resume" },
+            names.join(", ")
+        );
         return Ok(());
     }
     for l in set_drain(&p, &names, drain, SystemClock.now())? {
@@ -986,7 +1063,12 @@ pub fn templates_cmd(c: TemplatesCommand) -> Result<()> {
         TemplatesCommand::Ls(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
             let tr = transport(&a.conn, inv.as_ref());
-            let views = snapshot(tr.as_ref(), &targets, jobs(&a.conn), Duration::from_secs(30));
+            let views = snapshot(
+                tr.as_ref(),
+                &targets,
+                jobs(&a.conn),
+                Duration::from_secs(30),
+            );
             if a.conn.dry_run {
                 if let Some(d) = tr.as_dry() {
                     for l in d.lines.lock().unwrap().iter() {
@@ -1013,7 +1095,13 @@ pub fn templates_cmd(c: TemplatesCommand) -> Result<()> {
             let auth = RegistryAuth::from_env();
             let tr = transport(&a.conn, inv.as_ref());
             let rs = par_map(&targets, jobs(&a.conn), |h| {
-                distribute_host(tr.as_ref(), h, &t, auth.as_ref(), Duration::from_secs(a.pull_timeout))
+                distribute_host(
+                    tr.as_ref(),
+                    h,
+                    &t,
+                    auth.as_ref(),
+                    Duration::from_secs(a.pull_timeout),
+                )
             });
             if a.conn.dry_run {
                 if let Some(d) = tr.as_dry() {
@@ -1116,12 +1204,17 @@ mod tests {
         let log = |_: &str| {};
         let state = d.path().join("s.json");
         let p = placer(&tr, &targets, &leases, &state, &clock, &log);
-        let job = PlaceFlags::parse_for_test().job(&pinned(), 4, 8192).unwrap();
+        let job = PlaceFlags::parse_for_test()
+            .job(&pinned(), 4, 8192)
+            .unwrap();
         let placed = p.place("j1", &job, 0).unwrap();
         assert_eq!(placed.target.host, "c.local");
         // the lease keeps the second macOS slot of c while the first job starts
         let placed2 = p.place("j2", &job, 0);
-        assert!(placed2.is_err(), "c is now at 2/2 and a is full, b lacks the template");
+        assert!(
+            placed2.is_err(),
+            "c is now at 2/2 and a is full, b lacks the template"
+        );
     }
 
     #[test]
@@ -1140,7 +1233,9 @@ mod tests {
         let log = |m: &str| logged.lock().unwrap().push(m.to_owned());
         let state = d.path().join("s.json");
         let p = placer(&tr, &targets, &leases, &state, &clock, &log);
-        let job = PlaceFlags::parse_for_test().job(&pinned(), 4, 8192).unwrap();
+        let job = PlaceFlags::parse_for_test()
+            .job(&pinned(), 4, 8192)
+            .unwrap();
         let placed = p.place("j1", &job, 60).unwrap();
         assert_eq!(placed.target.host, "a.local");
         assert!(clock.now() >= 20, "it slept between looks: {}", clock.now());
@@ -1225,7 +1320,14 @@ mod tests {
             wait: 60,
             secret_env: None,
         };
-        let o = run_job(&tr, &tgt("a.local"), &j, None, Duration::from_secs(5), false);
+        let o = run_job(
+            &tr,
+            &tgt("a.local"),
+            &j,
+            None,
+            Duration::from_secs(5),
+            false,
+        );
         assert!(o.timed_out && !o.ok());
         assert_eq!(o.stdout, "partial\n");
         let calls = tr.calls_for("a.local");
@@ -1247,7 +1349,17 @@ mod tests {
             wait: 60,
             secret_env: None,
         };
-        assert!(run_job(&tr, &tgt("a.local"), &j, None, Duration::from_secs(5), false).ok());
+        assert!(
+            run_job(
+                &tr,
+                &tgt("a.local"),
+                &j,
+                None,
+                Duration::from_secs(5),
+                false
+            )
+            .ok()
+        );
         assert_eq!(tr.calls_for("a.local").len(), 1);
         assert!(run_job(&tr, &tgt("a.local"), &j, None, Duration::from_secs(5), true).ok());
         assert_eq!(tr.calls_for("a.local").len(), 3);
@@ -1270,13 +1382,23 @@ mod tests {
             secret_env: Some("JIT".into()),
         };
         let s = Secret::new(b"hunter2-token\n".to_vec());
-        let o = run_job(&tr, &tgt("a.local"), &j, Some(&s), Duration::from_secs(5), false);
+        let o = run_job(
+            &tr,
+            &tgt("a.local"),
+            &j,
+            Some(&s),
+            Duration::from_secs(5),
+            false,
+        );
         let c = &tr.calls_for("a.local")[0];
         assert_eq!(c.stdin.as_deref(), Some(&b"hunter2-token\n"[..]));
         assert!(!o.stdout.contains("hunter2-token"), "{}", o.stdout);
     }
 
-    fn distribute_fake(after: &'static str, pulled: &'static std::sync::atomic::AtomicBool) -> FakeTransport {
+    fn distribute_fake(
+        after: &'static str,
+        pulled: &'static std::sync::atomic::AtomicBool,
+    ) -> FakeTransport {
         FakeTransport::new(move |_, c| {
             if c.contains("mac pull") {
                 pulled.store(true, Ordering::SeqCst);
@@ -1292,17 +1414,29 @@ mod tests {
     #[test]
     fn distribute_pulls_then_verifies_the_digest_and_sends_credentials_on_stdin() {
         static PULLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let good: &'static str = Box::leak(format!("[{{\"reference\":\"reg.example/xcode:15\",\"digest\":\"{D1}\"}}]").into_boxed_str());
+        let good: &'static str = Box::leak(
+            format!("[{{\"reference\":\"reg.example/xcode:15\",\"digest\":\"{D1}\"}}]")
+                .into_boxed_str(),
+        );
         let tr = distribute_fake(good, &PULLED);
         let auth = RegistryAuth {
             user: Secret::new(b"robot".to_vec()),
             password: Secret::new(b"p4ssw0rd-x".to_vec()),
         };
         let t = TemplateRef::parse(&pinned()).unwrap();
-        let r = distribute_host(&tr, &tgt("a.local"), &t, Some(&auth), Duration::from_secs(10));
+        let r = distribute_host(
+            &tr,
+            &tgt("a.local"),
+            &t,
+            Some(&auth),
+            Duration::from_secs(10),
+        );
         assert!(r.ok, "{r:?}");
         let calls = tr.calls_for("a.local");
-        let pull = calls.iter().find(|c| c.command.contains("mac pull")).unwrap();
+        let pull = calls
+            .iter()
+            .find(|c| c.command.contains("mac pull"))
+            .unwrap();
         assert_eq!(pull.stdin.as_deref(), Some(&b"robot\np4ssw0rd-x\n"[..]));
         assert!(!pull.command.contains("p4ssw0rd-x") && !pull.command.contains("robot"));
     }
@@ -1310,12 +1444,18 @@ mod tests {
     #[test]
     fn distribute_reports_a_digest_mismatch_and_skips_a_mac_that_already_has_it() {
         static PULLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let bad: &'static str = Box::leak(format!("[{{\"reference\":\"reg.example/xcode:15\",\"digest\":\"{D2}\"}}]").into_boxed_str());
+        let bad: &'static str = Box::leak(
+            format!("[{{\"reference\":\"reg.example/xcode:15\",\"digest\":\"{D2}\"}}]")
+                .into_boxed_str(),
+        );
         let tr = distribute_fake(bad, &PULLED);
         let t = TemplateRef::parse(&pinned()).unwrap();
         let r = distribute_host(&tr, &tgt("a.local"), &t, None, Duration::from_secs(10));
         assert!(!r.ok);
-        assert!(r.error.unwrap().contains("digest mismatch"), "names both digests");
+        assert!(
+            r.error.unwrap().contains("digest mismatch"),
+            "names both digests"
+        );
         // already present: no pull
         let have = format!("[{{\"reference\":\"reg.example/xcode:15\",\"digest\":\"{D1}\"}}]");
         let tr2 = FakeTransport::new(move |_, _| ok(&have));
@@ -1337,7 +1477,10 @@ mod tests {
         let mut st = FleetState::default();
         st.applied.insert(
             "/inv.yaml".into(),
-            [&keep, &gone, &busy].iter().map(|t| AppliedHost::from_target(t)).collect(),
+            [&keep, &gone, &busy]
+                .iter()
+                .map(|t| AppliedHost::from_target(t))
+                .collect(),
         );
         st.save(&state).unwrap();
         let tr = FakeTransport::new(|t, c| {
@@ -1351,18 +1494,48 @@ mod tests {
         });
         let conn = test_conn();
         // without --prune: nothing is sent, the Mac is only mentioned, and stays remembered
-        after_apply(&conn, &tr, "/inv.yaml", std::slice::from_ref(&keep), false, &state).unwrap();
+        after_apply(
+            &conn,
+            &tr,
+            "/inv.yaml",
+            std::slice::from_ref(&keep),
+            false,
+            &state,
+        )
+        .unwrap();
         assert!(tr.calls.lock().unwrap().is_empty());
         let st = FleetState::load(&state).unwrap();
         assert_eq!(st.applied["/inv.yaml"].len(), 3);
         // with --prune: gone is removed, busy is refused and stays on the list
-        let e = after_apply(&conn, &tr, "/inv.yaml", std::slice::from_ref(&keep), true, &state).unwrap_err();
+        let e = after_apply(
+            &conn,
+            &tr,
+            "/inv.yaml",
+            std::slice::from_ref(&keep),
+            true,
+            &state,
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("1 Mac"), "{e}");
-        assert!(tr.calls_for("keep.local").is_empty(), "inventory hosts are never pruned");
-        assert!(tr.calls_for("gone.local").iter().any(|c| c.command.contains("bootout") || c.command.contains("rm -rf")));
-        assert!(!tr.calls_for("busy.local").iter().any(|c| c.command.contains("rm -rf")));
+        assert!(
+            tr.calls_for("keep.local").is_empty(),
+            "inventory hosts are never pruned"
+        );
+        assert!(
+            tr.calls_for("gone.local")
+                .iter()
+                .any(|c| c.command.contains("bootout") || c.command.contains("rm -rf"))
+        );
+        assert!(
+            !tr.calls_for("busy.local")
+                .iter()
+                .any(|c| c.command.contains("rm -rf"))
+        );
         let st = FleetState::load(&state).unwrap();
-        let hosts: Vec<_> = st.applied["/inv.yaml"].iter().map(|h| h.host.as_str()).collect();
+        let hosts: Vec<_> = st.applied["/inv.yaml"]
+            .iter()
+            .map(|h| h.host.as_str())
+            .collect();
         assert_eq!(hosts, ["keep.local", "busy.local"]);
     }
 

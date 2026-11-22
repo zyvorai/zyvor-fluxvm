@@ -71,12 +71,19 @@ fn paths() -> Option<(PathBuf, PathBuf)> {
     if !enabled() {
         return None;
     }
-    SHARED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|s| (s.file.clone(), s.lock.clone()))
+    SHARED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|s| (s.file.clone(), s.lock.clone()))
 }
 
 pub fn files_for(state: &Path) -> (PathBuf, PathBuf) {
     let d = state.parent().map(Path::to_path_buf).unwrap_or_default();
-    (d.join("mac-fleet-leases.json"), d.join("mac-fleet-leases.lock"))
+    (
+        d.join("mac-fleet-leases.json"),
+        d.join("mac-fleet-leases.lock"),
+    )
 }
 
 /// Turn sharing on for this process (the state file's directory holds the lease files). A no-op when
@@ -91,7 +98,11 @@ pub fn install(state: &Path) {
 
 fn install_at(state: &Path) {
     let (file, lock) = files_for(state);
-    *SHARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Shared { file, lock, foreign: vec![] });
+    *SHARED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Shared {
+        file,
+        lock,
+        foreign: vec![],
+    });
     #[cfg(test)]
     ENABLED.with(|e| e.set(true));
 }
@@ -155,7 +166,10 @@ fn lock_file(p: &Path) -> Result<File> {
 
 fn imported_job(r: &Rec) -> JobSpec {
     JobSpec {
-        template: TemplateRef { name: String::new(), digest: None },
+        template: TemplateRef {
+            name: String::new(),
+            digest: None,
+        },
         cpus: r.cpus,
         memory_mib: r.memory_mib,
         disk_gib: 0,
@@ -167,7 +181,9 @@ fn imported_job(r: &Rec) -> JobSpec {
 
 /// Lock and pull the other processes' live leases into `leases`. `None` when sharing is off.
 pub fn begin(leases: &mut Leases, now: u64) -> Result<Option<Guard>> {
-    let Some((file, lock_path)) = paths() else { return Ok(None) };
+    let Some((file, lock_path)) = paths() else {
+        return Ok(None);
+    };
     let lock = lock_file(&lock_path)?;
     let mut doc = read_doc(&file);
     doc.leases.retain(|r| r.expires > now && pid_alive(r.pid));
@@ -185,9 +201,17 @@ pub fn begin(leases: &mut Leases, now: u64) -> Result<Option<Guard>> {
 }
 
 /// Write this process's new lease (if the decision placed one) and unlock.
-pub fn commit(guard: Option<Guard>, placed: Option<(&str, &str, &JobSpec)>, now: u64) -> Result<()> {
-    let Some(mut guard) = guard else { return Ok(()) };
-    let Some((file, _)) = paths() else { return Ok(()) };
+pub fn commit(
+    guard: Option<Guard>,
+    placed: Option<(&str, &str, &JobSpec)>,
+    now: u64,
+) -> Result<()> {
+    let Some(mut guard) = guard else {
+        return Ok(());
+    };
+    let Some((file, _)) = paths() else {
+        return Ok(());
+    };
     if let Some((id, host, job)) = placed {
         guard.doc.leases.retain(|r| r.id != id);
         guard.doc.leases.push(Rec {
@@ -204,7 +228,9 @@ pub fn commit(guard: Option<Guard>, placed: Option<(&str, &str, &JobSpec)>, now:
 
 /// Drop this process's lease `id` from the file.
 pub fn forget(id: &str) {
-    let Some((file, lock_path)) = paths() else { return };
+    let Some((file, lock_path)) = paths() else {
+        return;
+    };
     if let Ok(_lock) = lock_file(&lock_path) {
         let mut doc = read_doc(&file);
         doc.leases.retain(|r| r.id != id);
@@ -235,7 +261,14 @@ mod tests {
     use super::*;
 
     fn job() -> JobSpec {
-        imported_job(&Rec { id: String::new(), host: String::new(), cpus: 4, memory_mib: 8192, expires: 0, pid: 0 })
+        imported_job(&Rec {
+            id: String::new(),
+            host: String::new(),
+            cpus: 4,
+            memory_mib: 8192,
+            expires: 0,
+            pid: 0,
+        })
     }
 
     #[test]
@@ -254,20 +287,37 @@ mod tests {
         let (file, _) = files_for(&state);
         let mut doc = read_doc(&file);
         let other = unsafe { libc::getppid() } as u32;
-        doc.leases.push(Rec { id: "b1".into(), host: "lt-mac-1".into(), cpus: 4, memory_mib: 8192, expires: 100 + LEASE_TTL_SECS, pid: other });
+        doc.leases.push(Rec {
+            id: "b1".into(),
+            host: "lt-mac-1".into(),
+            cpus: 4,
+            memory_mib: 8192,
+            expires: 100 + LEASE_TTL_SECS,
+            pid: other,
+        });
         write_doc(&file, &doc).unwrap();
         // A looks again: both are counted, once each.
         let g = begin(&mut a, 101).unwrap();
         assert_eq!(a.usage("lt-mac-1", 101).macos, 2);
         commit(g, None, 101).unwrap();
         let g = begin(&mut a, 102).unwrap();
-        assert_eq!(a.usage("lt-mac-1", 102).macos, 2, "imports are replaced, not piled up");
+        assert_eq!(
+            a.usage("lt-mac-1", 102).macos,
+            2,
+            "imports are replaced, not piled up"
+        );
         commit(g, None, 102).unwrap();
         assert_eq!(live(&state, 102).len(), 2);
         // Releasing removes it from the file for everybody.
         a.release("a1");
         forget("a1");
-        assert_eq!(live(&state, 102).iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["b1"]);
+        assert_eq!(
+            live(&state, 102)
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b1"]
+        );
         uninstall();
     }
 
@@ -280,8 +330,22 @@ mod tests {
         let (file, _) = files_for(&state);
         let dead = FileDoc {
             leases: vec![
-                Rec { id: "dead".into(), host: "lt-m".into(), cpus: 0, memory_mib: 0, expires: 1000, pid: 0x7ffffff0 },
-                Rec { id: "old".into(), host: "lt-m".into(), cpus: 0, memory_mib: 0, expires: 50, pid: unsafe { libc::getppid() } as u32 },
+                Rec {
+                    id: "dead".into(),
+                    host: "lt-m".into(),
+                    cpus: 0,
+                    memory_mib: 0,
+                    expires: 1000,
+                    pid: 0x7ffffff0,
+                },
+                Rec {
+                    id: "old".into(),
+                    host: "lt-m".into(),
+                    cpus: 0,
+                    memory_mib: 0,
+                    expires: 50,
+                    pid: unsafe { libc::getppid() } as u32,
+                },
             ],
         };
         write_doc(&file, &dead).unwrap();

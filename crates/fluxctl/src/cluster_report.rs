@@ -73,7 +73,10 @@ pub struct Health {
 
 impl Passport {
     pub fn health(&self) -> Health {
-        let mut h = Health { total: self.machines.len(), ..Default::default() };
+        let mut h = Health {
+            total: self.machines.len(),
+            ..Default::default()
+        };
         for m in &self.machines {
             match m.status.as_str() {
                 "online" => h.online += 1,
@@ -88,7 +91,12 @@ impl Passport {
     pub fn versions(&self) -> Vec<(String, usize)> {
         let mut v: std::collections::BTreeMap<String, usize> = Default::default();
         for m in &self.machines {
-            *v.entry(if m.agent_version.is_empty() { "unknown".into() } else { m.agent_version.clone() }).or_default() += 1;
+            *v.entry(if m.agent_version.is_empty() {
+                "unknown".into()
+            } else {
+                m.agent_version.clone()
+            })
+            .or_default() += 1;
         }
         v.into_iter().collect()
     }
@@ -114,7 +122,12 @@ pub fn machines_from(v: &serde_json::Value) -> Vec<Machine> {
                     let mac = !n["apple"].is_null();
                     Machine {
                         name: n["name"].as_str().unwrap_or("?").to_owned(),
-                        role: if mac { "Mac (macOS VMs, Docker, k3s)" } else { "Linux (VMs)" }.to_owned(),
+                        role: if mac {
+                            "Mac (macOS VMs, Docker, k3s)"
+                        } else {
+                            "Linux (VMs)"
+                        }
+                        .to_owned(),
                         vcpus: n["vcpus_total"].as_u64().unwrap_or(0),
                         memory_gib: n["memory_mib_total"].as_u64().unwrap_or(0) / 1024,
                         vms: n["vm_count"].as_u64().unwrap_or(0),
@@ -131,9 +144,33 @@ pub fn machines_from(v: &serde_json::Value) -> Vec<Machine> {
 /// Redacts anything shaped like a secret. Applied to every format, last.
 pub fn scrub(text: &str) -> String {
     const PREFIXES: &[&str] = &[
-        "fvnc_", "fvjt_", "fvt_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xoxb-", "xoxp-", "AKIA", "eyJ", "glpat-",
+        "fvnc_",
+        "fvjt_",
+        "fvt_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "sk-",
+        "xoxb-",
+        "xoxp-",
+        "AKIA",
+        "eyJ",
+        "glpat-",
     ];
-    const KEYS: &[&str] = &["password", "passwd", "secret", "token", "apikey", "api_key", "api-key", "credential", "authorization"];
+    const KEYS: &[&str] = &[
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "apikey",
+        "api_key",
+        "api-key",
+        "credential",
+        "authorization",
+    ];
     let is_word = |c: char| c.is_ascii_alphanumeric() || "_-.+/=".contains(c);
     let mut out = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
@@ -150,15 +187,22 @@ pub fn scrub(text: &str) -> String {
         }
         let word: String = chars[start..i].iter().collect();
         let lower = word.to_lowercase();
-        let secret_shaped = PREFIXES.iter().any(|p| word.starts_with(p) && word.len() >= p.len() + 8)
+        let secret_shaped = PREFIXES
+            .iter()
+            .any(|p| word.starts_with(p) && word.len() >= p.len() + 8)
             || (word.len() >= 40 && word.chars().all(|c| c.is_ascii_hexdigit()))
-            || (word.len() >= 32 && word.chars().filter(|c| c.is_ascii_digit()).count() >= 4 && word.chars().any(|c| c.is_ascii_uppercase()) && word.chars().any(|c| c.is_ascii_lowercase()));
+            || (word.len() >= 32
+                && word.chars().filter(|c| c.is_ascii_digit()).count() >= 4
+                && word.chars().any(|c| c.is_ascii_uppercase())
+                && word.chars().any(|c| c.is_ascii_lowercase()));
         // key=value and key: value where the key names a secret: the value goes.
         let key_value = KEYS.iter().find_map(|k| {
             let l = lower.as_str();
             l.find(k).and_then(|at| {
                 let after = &word[at + k.len()..];
-                after.strip_prefix('=').map(|v| (word.len() - v.len(), v.is_empty()))
+                after
+                    .strip_prefix('=')
+                    .map(|v| (word.len() - v.len(), v.is_empty()))
             })
         });
         if secret_shaped {
@@ -182,12 +226,27 @@ pub fn scrub(text: &str) -> String {
 
 /// `Bearer xyz`, `password: xyz`, `token xyz`: the word after one of these is a secret.
 fn prev_key_word(out: &str) -> Option<&'static str> {
-    const TRIGGERS: &[&str] = &["bearer", "password:", "passwd:", "secret:", "token:", "password=", "secret=", "token=", "apikey:", "authorization:"];
+    const TRIGGERS: &[&str] = &[
+        "bearer",
+        "password:",
+        "passwd:",
+        "secret:",
+        "token:",
+        "password=",
+        "secret=",
+        "token=",
+        "apikey:",
+        "authorization:",
+    ];
     let t = out.trim_end_matches([' ', '\t']);
     if t.len() == out.len() {
         return None;
     }
-    let lw = t.rsplit(|c: char| c.is_whitespace()).next().unwrap_or("").to_lowercase();
+    let lw = t
+        .rsplit(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     TRIGGERS.iter().find(|k| lw.ends_with(*k)).copied()
 }
 
@@ -198,7 +257,9 @@ fn strip_userinfo(s: &str) -> String {
     while let Some(i) = rest.find("://") {
         out.push_str(&rest[..i + 3]);
         rest = &rest[i + 3..];
-        let end = rest.find(|c: char| c.is_whitespace() || c == '/' || c == '"' || c == '<' || c == ')').unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '/' || c == '"' || c == '<' || c == ')')
+            .unwrap_or(rest.len());
         let authority = &rest[..end];
         match authority.rfind('@') {
             Some(at) => out.push_str(&authority[at + 1..]),
@@ -211,13 +272,24 @@ fn strip_userinfo(s: &str) -> String {
 }
 
 fn esc(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// The static sections, shared by every format: (title, lines). `server` is the address people should use.
 fn sections(p: &Passport) -> Vec<(&'static str, Vec<String>)> {
-    let server = if p.server.is_empty() { "SERVER-ADDRESS".to_owned() } else { p.server.clone() };
-    let sd = if p.state_dir.is_empty() { "/var/lib/fluxvm-agent".to_owned() } else { p.state_dir.clone() };
+    let server = if p.server.is_empty() {
+        "SERVER-ADDRESS".to_owned()
+    } else {
+        p.server.clone()
+    };
+    let sd = if p.state_dir.is_empty() {
+        "/var/lib/fluxvm-agent".to_owned()
+    } else {
+        p.state_dir.clone()
+    };
     vec![
         (
             "How to add a machine",
@@ -275,7 +347,16 @@ pub fn render_md(p: &Passport) -> String {
     let h = p.health();
     let mut s = String::new();
     s.push_str("# Cluster passport\n\n");
-    s.push_str(&format!("Generated {} by fluxctl {}. Server: {}\n\n", p.generated_at, p.fluxctl_version, if p.server.is_empty() { "(not set)" } else { &p.server }));
+    s.push_str(&format!(
+        "Generated {} by fluxctl {}. Server: {}\n\n",
+        p.generated_at,
+        p.fluxctl_version,
+        if p.server.is_empty() {
+            "(not set)"
+        } else {
+            &p.server
+        }
+    ));
     s.push_str("This document contains no passwords, tokens or keys.\n\n");
     s.push_str("## Summary\n\n");
     if let Some(n) = &p.server_note {
@@ -291,11 +372,28 @@ pub fn render_md(p: &Passport) -> String {
     } else {
         s.push_str("| Name | Role | CPUs | Memory | VMs | Version | Status | Last seen |\n|---|---|---|---|---|---|---|---|\n");
         for m in &p.machines {
-            s.push_str(&format!("| {} | {} | {} | {} GiB | {} | {} | {} | {} |\n", m.name, m.role, m.vcpus, m.memory_gib, m.vms, if m.agent_version.is_empty() { "unknown" } else { &m.agent_version }, m.status, m.last_seen));
+            s.push_str(&format!(
+                "| {} | {} | {} | {} GiB | {} | {} | {} | {} |\n",
+                m.name,
+                m.role,
+                m.vcpus,
+                m.memory_gib,
+                m.vms,
+                if m.agent_version.is_empty() {
+                    "unknown"
+                } else {
+                    &m.agent_version
+                },
+                m.status,
+                m.last_seen
+            ));
         }
     }
     s.push_str("\n## Versions\n\n");
-    s.push_str(&format!("- fluxctl on the machine that made this report: {}\n", p.fluxctl_version));
+    s.push_str(&format!(
+        "- fluxctl on the machine that made this report: {}\n",
+        p.fluxctl_version
+    ));
     for (v, n) in p.versions() {
         s.push_str(&format!("- node agent {v}: {n} machine(s)\n"));
     }
@@ -332,7 +430,9 @@ pub fn render_md(p: &Passport) -> String {
 
 pub fn render_html(p: &Passport) -> String {
     let h = p.health();
-    let mut s = String::from("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Cluster passport</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#1b1f23}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d0d7de;padding:.3rem .6rem;text-align:left}th{background:#f6f8fa}pre{background:#f6f8fa;padding:.6rem;overflow:auto}.offline{color:#b42318}.online{color:#067647}</style></head><body>\n");
+    let mut s = String::from(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Cluster passport</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#1b1f23}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d0d7de;padding:.3rem .6rem;text-align:left}th{background:#f6f8fa}pre{background:#f6f8fa;padding:.6rem;overflow:auto}.offline{color:#b42318}.online{color:#067647}</style></head><body>\n",
+    );
     s.push_str("<h1>Cluster passport</h1>\n");
     s.push_str(&format!("<p>Generated {} by fluxctl {}. Server: {}</p>\n<p><em>This document contains no passwords, tokens or keys.</em></p>\n", esc(&p.generated_at), esc(&p.fluxctl_version), esc(&p.server)));
     s.push_str("<h2>Summary</h2>\n");
@@ -386,7 +486,14 @@ pub fn render_html(p: &Passport) -> String {
         }
         s.push_str("</ul>\n");
     }
-    s.push_str(&format!("<h2>Contacts and notes</h2>\n<pre>{}</pre>\n</body></html>\n", esc(if p.notes.trim().is_empty() { "(Nothing yet: ~/.config/fluxvm/passport-notes.md appears here.)" } else { p.notes.trim() })));
+    s.push_str(&format!(
+        "<h2>Contacts and notes</h2>\n<pre>{}</pre>\n</body></html>\n",
+        esc(if p.notes.trim().is_empty() {
+            "(Nothing yet: ~/.config/fluxvm/passport-notes.md appears here.)"
+        } else {
+            p.notes.trim()
+        })
+    ));
     s
 }
 
@@ -418,7 +525,12 @@ fn now_rfc3339() -> String {
 
 fn recipe_names(home: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(home.join(".config/fluxvm/recipes"))
-        .map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().into_string().ok()).collect())
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
         .unwrap_or_default();
     v.sort();
     v
@@ -426,10 +538,19 @@ fn recipe_names(home: &Path) -> Vec<String> {
 
 /// Gathers what the report needs. A server that cannot be reached still yields a report, with a note saying so.
 pub async fn gather(a: &ReportArgs) -> Passport {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let notes_path = a.notes_file.clone().unwrap_or_else(|| home.join(".config/fluxvm/passport-notes.md"));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let notes_path = a
+        .notes_file
+        .clone()
+        .unwrap_or_else(|| home.join(".config/fluxvm/passport-notes.md"));
     let notes = std::fs::read_to_string(&notes_path).unwrap_or_default();
-    let server = a.server.server.clone().unwrap_or_else(|| "http://127.0.0.1:7799".into());
+    let server = a
+        .server
+        .server
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:7799".into());
     let mut p = Passport {
         generated_at: now_rfc3339(),
         fluxctl_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -443,7 +564,9 @@ pub async fn gather(a: &ReportArgs) -> Passport {
         state_dir: String::new(),
     };
     // On the server itself the address other machines use is the LAN one, not 127.0.0.1.
-    if p.server.contains("127.0.0.1") && let Some(ip) = fluxvm_core::mdns::local_ipv4() {
+    if p.server.contains("127.0.0.1")
+        && let Some(ip) = fluxvm_core::mdns::local_ipv4()
+    {
         p.server = p.server.replace("127.0.0.1", &ip.to_string());
     }
     let nodes = crate::cluster_pair::admin_get(&a.server, "/fleet/nodes").await;
@@ -455,7 +578,11 @@ pub async fn gather(a: &ReportArgs) -> Passport {
                 p.pairing_on = pv["enabled"].as_bool();
             }
         }
-        Err(e) => p.server_note = Some(format!("The server could not be asked ({e:#}); the machine list is empty. Run this on the server, or pass --server and --token-file.")),
+        Err(e) => {
+            p.server_note = Some(format!(
+                "The server could not be asked ({e:#}); the machine list is empty. Run this on the server, or pass --server and --token-file."
+            ))
+        }
     }
     p
 }
@@ -467,8 +594,13 @@ pub fn respond(head: &str, port: u16, render: &dyn Fn(&str) -> String) -> Vec<u8
     let first = lines.next().unwrap_or("");
     let mut it = first.split_whitespace();
     let (method, path) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
-    let host = lines.find_map(|l| l.strip_prefix("Host:").or_else(|| l.strip_prefix("host:"))).map(str::trim).unwrap_or("");
-    let ok_host = [format!("127.0.0.1:{port}"), format!("localhost:{port}")].iter().any(|h| h == host);
+    let host = lines
+        .find_map(|l| l.strip_prefix("Host:").or_else(|| l.strip_prefix("host:")))
+        .map(str::trim)
+        .unwrap_or("");
+    let ok_host = [format!("127.0.0.1:{port}"), format!("localhost:{port}")]
+        .iter()
+        .any(|h| h == host);
     let reply = |code: &str, ctype: &str, body: &str| {
         format!("HTTP/1.1 {code}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
     };
@@ -489,12 +621,21 @@ pub fn respond(head: &str, port: u16, render: &dyn Fn(&str) -> String) -> Vec<u8
 pub async fn run(a: ReportArgs) -> Result<()> {
     if a.serve {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let l = tokio::net::TcpListener::bind(("127.0.0.1", a.port)).await.with_context(|| format!("port {} is busy; use --port", a.port))?;
-        println!("Cluster passport (read-only): http://127.0.0.1:{}/   Ctrl-C to stop", a.port);
+        let l = tokio::net::TcpListener::bind(("127.0.0.1", a.port))
+            .await
+            .with_context(|| format!("port {} is busy; use --port", a.port))?;
+        println!(
+            "Cluster passport (read-only): http://127.0.0.1:{}/   Ctrl-C to stop",
+            a.port
+        );
         loop {
             let (mut s, _) = l.accept().await?;
             let mut buf = vec![0u8; 4096];
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf)).await.ok().and_then(|r| r.ok()).unwrap_or(0);
+            let n = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut buf))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(0);
             let head = String::from_utf8_lossy(&buf[..n]).into_owned();
             // Rendering is a fresh look at the cluster each time; the formats are cheap, the gather is the cost.
             let p = gather(&a).await;
@@ -508,7 +649,11 @@ pub async fn run(a: ReportArgs) -> Result<()> {
     match &a.out {
         Some(f) => {
             std::fs::write(f, &text).with_context(|| format!("writing {}", f.display()))?;
-            println!("Wrote {} ({} machine(s)). It contains no passwords or tokens.", f.display(), p.machines.len());
+            println!(
+                "Wrote {} ({} machine(s)). It contains no passwords or tokens.",
+                f.display(),
+                p.machines.len()
+            );
         }
         None => print!("{text}"),
     }
@@ -526,8 +671,26 @@ mod tests {
             server: "http://192.168.1.20:7799".into(),
             server_note: None,
             machines: vec![
-                Machine { name: "mini-1".into(), role: "Mac (macOS VMs, Docker, k3s)".into(), vcpus: 10, memory_gib: 32, vms: 2, agent_version: "0.4.21".into(), status: "online".into(), last_seen: "2026-11-21T09:59:50Z".into() },
-                Machine { name: "box-1".into(), role: "Linux (VMs)".into(), vcpus: 8, memory_gib: 16, vms: 0, agent_version: "0.4.20".into(), status: "offline".into(), last_seen: "2026-11-20T10:00:00Z".into() },
+                Machine {
+                    name: "mini-1".into(),
+                    role: "Mac (macOS VMs, Docker, k3s)".into(),
+                    vcpus: 10,
+                    memory_gib: 32,
+                    vms: 2,
+                    agent_version: "0.4.21".into(),
+                    status: "online".into(),
+                    last_seen: "2026-11-21T09:59:50Z".into(),
+                },
+                Machine {
+                    name: "box-1".into(),
+                    role: "Linux (VMs)".into(),
+                    vcpus: 8,
+                    memory_gib: 16,
+                    vms: 0,
+                    agent_version: "0.4.20".into(),
+                    status: "offline".into(),
+                    last_seen: "2026-11-20T10:00:00Z".into(),
+                },
             ],
             pending_requests: 1,
             pairing_on: Some(true),
@@ -538,12 +701,19 @@ mod tests {
     }
 
     fn golden(name: &str, got: &str) {
-        let path = format!("{}/src/recipes_golden/passport.{name}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!(
+            "{}/src/recipes_golden/passport.{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
             std::fs::write(&path, got).unwrap();
         }
-        assert_eq!(got, std::fs::read_to_string(&path).unwrap_or_default(), "golden {path}; UPDATE_GOLDEN=1 to accept");
+        assert_eq!(
+            got,
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "golden {path}; UPDATE_GOLDEN=1 to accept"
+        );
     }
 
     #[test]
@@ -560,7 +730,17 @@ mod tests {
     #[test]
     fn it_has_every_section_a_person_needs() {
         let md = render(&passport(), "md").unwrap();
-        for s in ["Machines and roles", "Versions", "How to add a machine", "fluxctl cluster pair", "How to back up and restore", "How to undo", "Where the logs are", "Contacts and notes", "Call Ana"] {
+        for s in [
+            "Machines and roles",
+            "Versions",
+            "How to add a machine",
+            "fluxctl cluster pair",
+            "How to back up and restore",
+            "How to undo",
+            "Where the logs are",
+            "Contacts and notes",
+            "Call Ana",
+        ] {
             assert!(md.contains(s), "missing {s}");
         }
         assert!(md.contains("Different versions are running"));
@@ -584,7 +764,16 @@ mod tests {
         let mut p = passport();
         p.notes = format!(
             "Admin token: {}\njoin token {}\nGitHub: {}\nPAT {}\npassword={}\nsecret: {}\nBearer {}\nhash {}\nwifi password: {}\nurl https://admin:{}@nas.local/x",
-            SECRETS[0], SECRETS[1], SECRETS[2], SECRETS[3], SECRETS[4], SECRETS[5], SECRETS[6], SECRETS[7], SECRETS[8], SECRETS[4]
+            SECRETS[0],
+            SECRETS[1],
+            SECRETS[2],
+            SECRETS[3],
+            SECRETS[4],
+            SECRETS[5],
+            SECRETS[6],
+            SECRETS[7],
+            SECRETS[8],
+            SECRETS[4]
         );
         p.server_note = Some(format!("token={}", SECRETS[1]));
         p.machines[0].name = format!("mini-{}", SECRETS[2]);
@@ -615,7 +804,10 @@ mod tests {
     fn the_report_struct_has_no_field_that_could_hold_a_secret() {
         let j = serde_json::to_string(&passport()).unwrap().to_lowercase();
         for banned in ["token", "password", "credential", "secret", "private"] {
-            assert!(!j.contains(&format!("\"{banned}")), "a field named like {banned}");
+            assert!(
+                !j.contains(&format!("\"{banned}")),
+                "a field named like {banned}"
+            );
         }
     }
 
@@ -637,7 +829,10 @@ mod tests {
             {"name": "d1", "healthy": false},
         ]});
         let m = machines_from(&v);
-        assert_eq!(m.iter().map(|m| m.status.as_str()).collect::<Vec<_>>(), ["online", "outdated", "cordoned", "offline"]);
+        assert_eq!(
+            m.iter().map(|m| m.status.as_str()).collect::<Vec<_>>(),
+            ["online", "outdated", "cordoned", "offline"]
+        );
         assert!(m[0].role.starts_with("Mac") && m[1].role.starts_with("Linux"));
         assert_eq!(m[0].memory_gib, 32);
     }
@@ -647,10 +842,15 @@ mod tests {
         let r = |f: &str| format!("<{f}>");
         let get = |req: &str| String::from_utf8(respond(req, 7801, &r)).unwrap();
         assert!(get("GET / HTTP/1.1\r\nHost: 127.0.0.1:7801\r\n\r\n").starts_with("HTTP/1.1 200"));
-        assert!(get("GET /report.json HTTP/1.1\r\nHost: localhost:7801\r\n\r\n").contains("<json>"));
+        assert!(
+            get("GET /report.json HTTP/1.1\r\nHost: localhost:7801\r\n\r\n").contains("<json>")
+        );
         assert!(get("POST / HTTP/1.1\r\nHost: 127.0.0.1:7801\r\n\r\n").starts_with("HTTP/1.1 405"));
         assert!(get("GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n").starts_with("HTTP/1.1 403"));
-        assert!(get("GET /etc/passwd HTTP/1.1\r\nHost: 127.0.0.1:7801\r\n\r\n").starts_with("HTTP/1.1 404"));
+        assert!(
+            get("GET /etc/passwd HTTP/1.1\r\nHost: 127.0.0.1:7801\r\n\r\n")
+                .starts_with("HTTP/1.1 404")
+        );
         assert!(get("").starts_with("HTTP/1.1 405"));
     }
 }

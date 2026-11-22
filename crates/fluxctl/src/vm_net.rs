@@ -28,7 +28,11 @@ pub enum Backend {
 impl Backend {
     /// The backend this host runs VMs with.
     pub fn host() -> Self {
-        if cfg!(target_os = "macos") { Backend::Vz } else { Backend::Qemu }
+        if cfg!(target_os = "macos") {
+            Backend::Vz
+        } else {
+            Backend::Qemu
+        }
     }
 
     pub fn name(self) -> &'static str {
@@ -48,11 +52,19 @@ impl Backend {
 
     /// The name the k3s release gives the binary for this architecture, and its checksum file.
     pub fn k3s_binary(self) -> &'static str {
-        if self.guest_arch() == "aarch64" { "k3s-arm64" } else { "k3s" }
+        if self.guest_arch() == "aarch64" {
+            "k3s-arm64"
+        } else {
+            "k3s"
+        }
     }
 
     pub fn k3s_sums_file(self) -> &'static str {
-        if self.guest_arch() == "aarch64" { "sha256sum-arm64.txt" } else { "sha256sum-amd64.txt" }
+        if self.guest_arch() == "aarch64" {
+            "sha256sum-arm64.txt"
+        } else {
+            "sha256sum-amd64.txt"
+        }
     }
 
     /// A private network that joins several VMs (workers, extra servers).
@@ -77,7 +89,10 @@ impl Backend {
 
     pub fn require_rosetta(self) -> Result<()> {
         if !self.has_rosetta() {
-            bail!("--rosetta is for macOS guests on Apple silicon (vz); this host uses {}", self.name());
+            bail!(
+                "--rosetta is for macOS guests on Apple silicon (vz); this host uses {}",
+                self.name()
+            );
         }
         Ok(())
     }
@@ -86,7 +101,9 @@ impl Backend {
 /// The first port at or after the VM name's stable slot (so a rerun computes the same spec) for which `free` says yes.
 pub fn pick_ssh_port(vm_name: &str, free: &dyn Fn(u16) -> bool) -> Option<u16> {
     let start = crate::stack::ssh_forward_port(vm_name) - PORT_LO;
-    (0..PORT_COUNT).map(|i| PORT_LO + (start + i) % PORT_COUNT).find(|p| free(*p))
+    (0..PORT_COUNT)
+        .map(|i| PORT_LO + (start + i) % PORT_COUNT)
+        .find(|p| free(*p))
 }
 
 /// True when nothing listens on 127.0.0.1:`port` now.
@@ -96,7 +113,11 @@ pub fn loopback_port_free(port: u16) -> bool {
 
 /// Reads a port back out of a VM request, the other half of [`network_spec`].
 pub fn recorded_ssh_port(request: &Value) -> Option<u16> {
-    crate::run::loopback_ssh_endpoint(request)?.rsplit(':').next()?.parse().ok()
+    crate::run::loopback_ssh_endpoint(request)?
+        .rsplit(':')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// The `network` member of a VM request. `ssh_port` is only used under `Qemu`.
@@ -111,7 +132,8 @@ pub fn network_spec(backend: Backend, mut forwards: Vec<Value>, ssh_port: u16) -
 pub fn host_network_spec(vm_name: &str, forwards: Vec<Value>) -> Value {
     let backend = Backend::host();
     let port = if backend == Backend::Qemu {
-        pick_ssh_port(vm_name, &loopback_port_free).unwrap_or_else(|| crate::stack::ssh_forward_port(vm_name))
+        pick_ssh_port(vm_name, &loopback_port_free)
+            .unwrap_or_else(|| crate::stack::ssh_forward_port(vm_name))
     } else {
         0
     };
@@ -130,13 +152,26 @@ mod tests {
 
     #[test]
     fn qemu_gets_a_loopback_only_ssh_forward_the_endpoint_finder_reads_back() {
-        let n = network_spec(Backend::Qemu, vec![json!({"host_port": 8080, "guest_port": 80})], 22123);
-        assert_eq!(n["forwards"][1], json!({"host_port": 22123, "guest_port": 22, "host_addr": "127.0.0.1"}));
+        let n = network_spec(
+            Backend::Qemu,
+            vec![json!({"host_port": 8080, "guest_port": 80})],
+            22123,
+        );
+        assert_eq!(
+            n["forwards"][1],
+            json!({"host_port": 22123, "guest_port": 22, "host_addr": "127.0.0.1"})
+        );
         assert_eq!(n["forwards"][0]["guest_port"], 80);
         let req = json!({"network": n});
-        assert_eq!(crate::run::loopback_ssh_endpoint(&req).as_deref(), Some("127.0.0.1:22123"));
+        assert_eq!(
+            crate::run::loopback_ssh_endpoint(&req).as_deref(),
+            Some("127.0.0.1:22123")
+        );
         assert_eq!(recorded_ssh_port(&req), Some(22123));
-        assert_eq!(recorded_ssh_port(&json!({"network": network_spec(Backend::Vz, vec![], 0)})), None);
+        assert_eq!(
+            recorded_ssh_port(&json!({"network": network_spec(Backend::Vz, vec![], 0)})),
+            None
+        );
     }
 
     #[test]
@@ -169,8 +204,17 @@ mod tests {
         assert_eq!(Backend::Vz.guest_arch(), "aarch64");
         assert!(Backend::Vz.require_private_network("workers").is_ok());
         assert!(Backend::Vz.require_rosetta().is_ok());
-        let e = Backend::Qemu.require_private_network("--servers 3").unwrap_err().to_string();
+        let e = Backend::Qemu
+            .require_private_network("--servers 3")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("--servers 3") && e.contains("vz"), "{e}");
-        assert!(Backend::Qemu.require_rosetta().unwrap_err().to_string().contains("--rosetta"));
+        assert!(
+            Backend::Qemu
+                .require_rosetta()
+                .unwrap_err()
+                .to_string()
+                .contains("--rosetta")
+        );
     }
 }

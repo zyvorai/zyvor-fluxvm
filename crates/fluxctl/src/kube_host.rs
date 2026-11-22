@@ -460,7 +460,16 @@ pub fn node_spec(
     shares: Vec<Value>,
 ) -> Value {
     let network = crate::vm_net::host_network_spec(node, vec![]);
-    node_spec_on(crate::vm_net::Backend::host(), network, o, role, node, user, key, shares)
+    node_spec_on(
+        crate::vm_net::Backend::host(),
+        network,
+        o,
+        role,
+        node,
+        user,
+        key,
+        shares,
+    )
 }
 
 /// [`node_spec`] for a given backend, with the `network` member given (see `vm_net`).

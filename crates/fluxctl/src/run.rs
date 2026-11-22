@@ -553,7 +553,10 @@ pub(crate) fn wait_budget() -> Duration {
 }
 
 fn wait_budget_for(env: Option<&str>, backend: crate::vm_net::Backend) -> Duration {
-    if let Some(secs) = env.and_then(|v| v.trim().parse::<u64>().ok()).filter(|s| *s > 0) {
+    if let Some(secs) = env
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+    {
         return Duration::from_secs(secs);
     }
     match backend {
@@ -822,12 +825,27 @@ mod tests {
     fn the_wait_budget_follows_the_backend_and_the_override() {
         use crate::vm_net::Backend;
         assert_eq!(wait_budget_for(None, Backend::Vz), Duration::from_secs(180));
-        assert_eq!(wait_budget_for(None, Backend::Qemu), Duration::from_secs(1800));
-        assert_eq!(wait_budget_for(Some("90"), Backend::Qemu), Duration::from_secs(90));
-        assert_eq!(wait_budget_for(Some(" 600 "), Backend::Vz), Duration::from_secs(600));
+        assert_eq!(
+            wait_budget_for(None, Backend::Qemu),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            wait_budget_for(Some("90"), Backend::Qemu),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            wait_budget_for(Some(" 600 "), Backend::Vz),
+            Duration::from_secs(600)
+        );
         // Nonsense or zero falls back to the backend default.
-        assert_eq!(wait_budget_for(Some("soon"), Backend::Qemu), Duration::from_secs(1800));
-        assert_eq!(wait_budget_for(Some("0"), Backend::Vz), Duration::from_secs(180));
+        assert_eq!(
+            wait_budget_for(Some("soon"), Backend::Qemu),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            wait_budget_for(Some("0"), Backend::Vz),
+            Duration::from_secs(180)
+        );
     }
 
     use super::*;

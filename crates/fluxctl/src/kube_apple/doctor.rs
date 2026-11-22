@@ -28,8 +28,18 @@ pub struct Finding {
     pub fix: String,
 }
 
-fn f(name: &'static str, level: Level, detail: impl Into<String>, fix: impl Into<String>) -> Finding {
-    Finding { name, level, detail: detail.into(), fix: fix.into() }
+fn f(
+    name: &'static str,
+    level: Level,
+    detail: impl Into<String>,
+    fix: impl Into<String>,
+) -> Finding {
+    Finding {
+        name,
+        level,
+        detail: detail.into(),
+        fix: fix.into(),
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -87,24 +97,56 @@ pub fn verdicts(x: &Facts) -> Vec<Finding> {
                 format!("fluxctl kube apple create {c} --servers {} --embedded-etcd ... (the same command resumes)", x.servers_wanted),
             ));
         } else {
-            v.push(f("servers", Level::Ok, format!("{} servers", x.servers_joined), ""));
+            v.push(f(
+                "servers",
+                Level::Ok,
+                format!("{} servers", x.servers_joined),
+                "",
+            ));
         }
         if x.servers_joined % 2 == 0 {
             v.push(f(
                 "server-count",
                 Level::Warn,
-                format!("{} servers: an even number tolerates no more failures than {}", x.servers_joined, x.servers_joined - 1),
+                format!(
+                    "{} servers: an even number tolerates no more failures than {}",
+                    x.servers_joined,
+                    x.servers_joined - 1
+                ),
                 "use 3 or 5 servers",
             ));
         }
         match x.servers_ready {
-            None => v.push(f("quorum", Level::Fail, "no server could be asked", format!("fluxctl kube apple start {c}"))),
+            None => v.push(f(
+                "quorum",
+                Level::Fail,
+                "no server could be asked",
+                format!("fluxctl kube apple start {c}"),
+            )),
             Some(r) => {
                 let need = sha::majority(x.servers_joined);
                 if r < need {
-                    v.push(f("quorum", Level::Fail, format!("{r} of {} servers Ready, etcd needs {need}", x.servers_joined), format!("fluxctl kube apple start {c}; fluxctl kube apple logs {c} --node NODE")));
+                    v.push(f(
+                        "quorum",
+                        Level::Fail,
+                        format!(
+                            "{r} of {} servers Ready, etcd needs {need}",
+                            x.servers_joined
+                        ),
+                        format!(
+                            "fluxctl kube apple start {c}; fluxctl kube apple logs {c} --node NODE"
+                        ),
+                    ));
                 } else if r < x.servers_joined {
-                    v.push(f("quorum", Level::Warn, format!("{r} of {} servers Ready: one more failure loses quorum", x.servers_joined), format!("fluxctl kube apple status {c}")));
+                    v.push(f(
+                        "quorum",
+                        Level::Warn,
+                        format!(
+                            "{r} of {} servers Ready: one more failure loses quorum",
+                            x.servers_joined
+                        ),
+                        format!("fluxctl kube apple status {c}"),
+                    ));
                 } else {
                     v.push(f("quorum", Level::Ok, format!("all {r} servers Ready"), ""));
                 }
@@ -115,15 +157,33 @@ pub fn verdicts(x: &Facts) -> Vec<Finding> {
     if x.vms_not_running.is_empty() {
         v.push(f("vms", Level::Ok, "every node's VM is running", ""));
     } else {
-        v.push(f("vms", Level::Fail, format!("not running: {}", x.vms_not_running.join(", ")), format!("fluxctl kube apple start {c}; or `recover {c}` if a VM is gone")));
+        v.push(f(
+            "vms",
+            Level::Fail,
+            format!("not running: {}", x.vms_not_running.join(", ")),
+            format!("fluxctl kube apple start {c}; or `recover {c}` if a VM is gone"),
+        ));
     }
     // flags
     if !x.unreadable_units.is_empty() {
-        v.push(f("server-flags", Level::Warn, format!("could not read the unit of: {}", x.unreadable_units.join(", ")), "fluxctl kube apple status"));
+        v.push(f(
+            "server-flags",
+            Level::Warn,
+            format!(
+                "could not read the unit of: {}",
+                x.unreadable_units.join(", ")
+            ),
+            "fluxctl kube apple status",
+        ));
     }
     if x.flag_drift.is_empty() {
         if x.servers_joined > 1 {
-            v.push(f("server-flags", Level::Ok, "every server runs the shared flags the journal records", ""));
+            v.push(f(
+                "server-flags",
+                Level::Ok,
+                "every server runs the shared flags the journal records",
+                "",
+            ));
         }
     } else {
         v.push(f("server-flags", Level::Fail, x.flag_drift.join("; "), "make the unit on that server match, then restart k3s there; k3s needs these flags equal on every server"));
@@ -133,14 +193,27 @@ pub fn verdicts(x: &Facts) -> Vec<Finding> {
         match e.kind {
             EndpointKind::Proxy => {
                 if x.tunnel_up {
-                    v.push(f("endpoint", Level::Ok, "the forwarder answers on 127.0.0.1", ""));
+                    v.push(f(
+                        "endpoint",
+                        Level::Ok,
+                        "the forwarder answers on 127.0.0.1",
+                        "",
+                    ));
                 } else {
                     v.push(f("endpoint", Level::Warn, "nothing answers on the API port: the forwarder is not running", format!("fluxctl kube apple tunnel {c} --install-agent (keeps it up), or `tunnel {c}`")));
                 }
             }
             EndpointKind::KubeVip => {
                 if x.kube_vip_missing.is_empty() {
-                    v.push(f("endpoint", Level::Ok, format!("kube-vip manifest on every server (address {})", e.vip.as_deref().unwrap_or("unknown")), ""));
+                    v.push(f(
+                        "endpoint",
+                        Level::Ok,
+                        format!(
+                            "kube-vip manifest on every server (address {})",
+                            e.vip.as_deref().unwrap_or("unknown")
+                        ),
+                        "",
+                    ));
                 } else {
                     v.push(f("endpoint", Level::Fail, format!("no kube-vip manifest on: {}", x.kube_vip_missing.join(", ")), format!("fluxctl kube apple join {c} --role server  (or write the manifest again)")));
                 }
@@ -148,23 +221,57 @@ pub fn verdicts(x: &Facts) -> Vec<Finding> {
         }
     }
     match x.agent {
-        Some((true, true)) => v.push(f("tunnel-agent", Level::Ok, "the LaunchAgent keeps the tunnel up", "")),
-        Some((true, false)) => v.push(f("tunnel-agent", Level::Fail, "the LaunchAgent is installed but not loaded", format!("fluxctl kube apple tunnel {c} --install-agent"))),
-        Some((false, _)) => v.push(f("tunnel-agent", Level::Warn, "no LaunchAgent: the tunnel ends with the terminal or a reboot", format!("fluxctl kube apple tunnel {c} --install-agent"))),
+        Some((true, true)) => v.push(f(
+            "tunnel-agent",
+            Level::Ok,
+            "the LaunchAgent keeps the tunnel up",
+            "",
+        )),
+        Some((true, false)) => v.push(f(
+            "tunnel-agent",
+            Level::Fail,
+            "the LaunchAgent is installed but not loaded",
+            format!("fluxctl kube apple tunnel {c} --install-agent"),
+        )),
+        Some((false, _)) => v.push(f(
+            "tunnel-agent",
+            Level::Warn,
+            "no LaunchAgent: the tunnel ends with the terminal or a reboot",
+            format!("fluxctl kube apple tunnel {c} --install-agent"),
+        )),
         None => {}
     }
     v.push(if x.kubeconfig {
         f("kubeconfig", Level::Ok, "present", "")
     } else {
-        f("kubeconfig", Level::Warn, "the kubeconfig file is missing", format!("fluxctl kube apple kubeconfig {c}"))
+        f(
+            "kubeconfig",
+            Level::Warn,
+            "the kubeconfig file is missing",
+            format!("fluxctl kube apple kubeconfig {c}"),
+        )
     });
     // snapshots (embedded etcd only)
     if x.datastore == Some(Datastore::Etcd) {
         match (&x.snapshot_policy, x.snapshot_age) {
-            (None, _) => v.push(f("snapshot-schedule", Level::Warn, "no schedule of your own: k3s's default (every 12 hours, keep 5, local) applies", format!("fluxctl kube apple snapshot schedule {c} --cron '0 */6 * * *' --retention 20"))),
+            (None, _) => v.push(f(
+                "snapshot-schedule",
+                Level::Warn,
+                "no schedule of your own: k3s's default (every 12 hours, keep 5, local) applies",
+                format!(
+                    "fluxctl kube apple snapshot schedule {c} --cron '0 */6 * * *' --retention 20"
+                ),
+            )),
             (Some(p), _) => {
-                let dest = p.s3.as_ref().map_or("local only".to_owned(), |s| format!("local and s3://{}", s.bucket));
-                v.push(f("snapshot-schedule", Level::Ok, format!("{} keep {} ({dest})", p.cron, p.retention), ""));
+                let dest = p.s3.as_ref().map_or("local only".to_owned(), |s| {
+                    format!("local and s3://{}", s.bucket)
+                });
+                v.push(f(
+                    "snapshot-schedule",
+                    Level::Ok,
+                    format!("{} keep {} ({dest})", p.cron, p.retention),
+                    "",
+                ));
                 if p.s3.is_none() {
                     v.push(f("snapshot-offsite", Level::Warn, "snapshots stay on the servers' disks: losing the VMs loses them", format!("fluxctl kube apple snapshot schedule {c} ... --s3-bucket B --s3-endpoint E, or `snapshot pull`")));
                 }
@@ -172,19 +279,63 @@ pub fn verdicts(x: &Facts) -> Vec<Finding> {
         }
         match x.snapshot_age {
             None => {}
-            Some(None) => v.push(f("snapshot-age", Level::Warn, "no snapshot exists yet", format!("fluxctl kube apple snapshot save {c}"))),
-            Some(Some(a)) if a > 7 * 24 * HOUR => v.push(f("snapshot-age", Level::Fail, format!("the newest snapshot is {} days old", a / (24 * HOUR)), format!("fluxctl kube apple snapshot save {c}; check `snapshot ls {c}` and the schedule"))),
-            Some(Some(a)) if a > 36 * HOUR => v.push(f("snapshot-age", Level::Warn, format!("the newest snapshot is {} hours old", a / HOUR), format!("fluxctl kube apple snapshot ls {c}"))),
-            Some(Some(a)) => v.push(f("snapshot-age", Level::Ok, format!("newest snapshot {} hour(s) old", a / HOUR), "")),
+            Some(None) => v.push(f(
+                "snapshot-age",
+                Level::Warn,
+                "no snapshot exists yet",
+                format!("fluxctl kube apple snapshot save {c}"),
+            )),
+            Some(Some(a)) if a > 7 * 24 * HOUR => v.push(f(
+                "snapshot-age",
+                Level::Fail,
+                format!("the newest snapshot is {} days old", a / (24 * HOUR)),
+                format!(
+                    "fluxctl kube apple snapshot save {c}; check `snapshot ls {c}` and the schedule"
+                ),
+            )),
+            Some(Some(a)) if a > 36 * HOUR => v.push(f(
+                "snapshot-age",
+                Level::Warn,
+                format!("the newest snapshot is {} hours old", a / HOUR),
+                format!("fluxctl kube apple snapshot ls {c}"),
+            )),
+            Some(Some(a)) => v.push(f(
+                "snapshot-age",
+                Level::Ok,
+                format!("newest snapshot {} hour(s) old", a / HOUR),
+                "",
+            )),
         }
     }
     // secrets
-    for (what, days) in [("agent", x.agent_secret_days), ("server", x.server_secret_days)] {
-        let name: &'static str = if what == "agent" { "agent-secret" } else { "server-secret" };
+    for (what, days) in [
+        ("agent", x.agent_secret_days),
+        ("server", x.server_secret_days),
+    ] {
+        let name: &'static str = if what == "agent" {
+            "agent-secret"
+        } else {
+            "server-secret"
+        };
         match days {
-            None => v.push(f(name, Level::Ok, format!("the {what} token was never rotated (it is the one made at creation)"), format!("fluxctl kube apple token rotate {c} --{what}"))),
-            Some(d) if d > 180 => v.push(f(name, Level::Warn, format!("the {what} token was rotated {d} days ago"), format!("fluxctl kube apple token rotate {c} --{what}"))),
-            Some(d) => v.push(f(name, Level::Ok, format!("the {what} token was rotated {d} days ago"), "")),
+            None => v.push(f(
+                name,
+                Level::Ok,
+                format!("the {what} token was never rotated (it is the one made at creation)"),
+                format!("fluxctl kube apple token rotate {c} --{what}"),
+            )),
+            Some(d) if d > 180 => v.push(f(
+                name,
+                Level::Warn,
+                format!("the {what} token was rotated {d} days ago"),
+                format!("fluxctl kube apple token rotate {c} --{what}"),
+            )),
+            Some(d) => v.push(f(
+                name,
+                Level::Ok,
+                format!("the {what} token was rotated {d} days ago"),
+                "",
+            )),
         }
     }
     v
@@ -201,15 +352,23 @@ pub async fn doctor<H: Host>(h: &H, store: &Store, name: &str) -> Result<DoctorR
         tunnel_up: h.tunnel_up(&st),
         kubeconfig: h.kubeconfig_exists(&st),
         snapshot_policy: st.snapshots.clone(),
-        agent: h
-            .tunnel_agent_status(&st)
-            .ok()
-            .map(|s| (s["installed"].as_bool().unwrap_or(false), s["loaded"].as_bool().unwrap_or(false))),
+        agent: h.tunnel_agent_status(&st).ok().map(|s| {
+            (
+                s["installed"].as_bool().unwrap_or(false),
+                s["loaded"].as_bool().unwrap_or(false),
+            )
+        }),
         ..Default::default()
     };
     let now = h.stamp();
-    x.agent_secret_days = st.agent_secret_rotated.as_deref().and_then(|s| days_since(s, &now));
-    x.server_secret_days = st.server_secret_rotated.as_deref().and_then(|s| days_since(s, &now));
+    x.agent_secret_days = st
+        .agent_secret_rotated
+        .as_deref()
+        .and_then(|s| days_since(s, &now));
+    x.server_secret_days = st
+        .server_secret_rotated
+        .as_deref()
+        .and_then(|s| days_since(s, &now));
     for n in &st.nodes {
         match h.find_vm(&n.vm_name).await? {
             Some(v) if v.status == "running" => {}
@@ -227,19 +386,39 @@ pub async fn doctor<H: Host>(h: &H, store: &Store, name: &str) -> Result<DoctorR
                 .count(),
         );
     }
-    let live: Vec<String> = st.servers().iter().filter(|s| up(&s.name)).map(|s| s.name.clone()).collect();
+    let live: Vec<String> = st
+        .servers()
+        .iter()
+        .filter(|s| up(&s.name))
+        .map(|s| s.name.clone())
+        .collect();
     for s in &live {
-        match sh(h, &st, s, &sha::unit_probe_script(Role::Server)).await.ok().and_then(|t| sha::parse_unit_flags(&t)) {
-            Some(u) => x.flag_drift.extend(sha::flags_drift(&st.flags, s, &u.shared)),
+        match sh(h, &st, s, &sha::unit_probe_script(Role::Server))
+            .await
+            .ok()
+            .and_then(|t| sha::parse_unit_flags(&t))
+        {
+            Some(u) => x
+                .flag_drift
+                .extend(sha::flags_drift(&st.flags, s, &u.shared)),
             None => x.unreadable_units.push(s.clone()),
         }
-        if matches!(st.endpoint.as_ref().map(|e| e.kind), Some(EndpointKind::KubeVip))
-            && sh(h, &st, s, &sha::kube_vip_probe_script()).await.ok().and_then(|o| sha::parse_kube_vip_probe(&o)).is_none()
+        if matches!(
+            st.endpoint.as_ref().map(|e| e.kind),
+            Some(EndpointKind::KubeVip)
+        ) && sh(h, &st, s, &sha::kube_vip_probe_script())
+            .await
+            .ok()
+            .and_then(|o| sha::parse_kube_vip_probe(&o))
+            .is_none()
         {
             x.kube_vip_missing.push(s.clone());
         }
         if st.datastore == Datastore::Etcd {
-            let age = sh(h, &st, s, &sha::snapshot_age_script()).await.ok().map(|o| sha::parse_snapshot_age(&o));
+            let age = sh(h, &st, s, &sha::snapshot_age_script())
+                .await
+                .ok()
+                .map(|o| sha::parse_snapshot_age(&o));
             x.snapshot_age = match (x.snapshot_age, age) {
                 (Some(Some(a)), Some(Some(b))) => Some(Some(a.min(b))),
                 (Some(Some(a)), _) | (_, Some(Some(a))) => Some(Some(a)),
@@ -249,7 +428,11 @@ pub async fn doctor<H: Host>(h: &H, store: &Store, name: &str) -> Result<DoctorR
         }
     }
     let findings = verdicts(&x);
-    Ok(DoctorReport { cluster: name.to_owned(), ok: findings.iter().all(|f| f.level != Level::Fail), findings })
+    Ok(DoctorReport {
+        cluster: name.to_owned(),
+        ok: findings.iter().all(|f| f.level != Level::Fail),
+        findings,
+    })
 }
 
 /// The text `fluxctl kube apple doctor` prints.
@@ -280,7 +463,10 @@ mod tests {
             servers_wanted: 3,
             servers_joined: 3,
             servers_ready: Some(3),
-            endpoint: Some(EndpointCfg { kind: EndpointKind::Proxy, vip: None }),
+            endpoint: Some(EndpointCfg {
+                kind: EndpointKind::Proxy,
+                vip: None,
+            }),
             tunnel_up: true,
             agent: Some((true, true)),
             kubeconfig: true,
@@ -288,7 +474,12 @@ mod tests {
                 cron: "0 */6 * * *".into(),
                 retention: 10,
                 compress: true,
-                s3: Some(S3Target { endpoint: "s3.example".into(), bucket: "snaps".into(), region: None, folder: None }),
+                s3: Some(S3Target {
+                    endpoint: "s3.example".into(),
+                    bucket: "snaps".into(),
+                    region: None,
+                    folder: None,
+                }),
             }),
             snapshot_age: Some(Some(3 * HOUR)),
             agent_secret_days: Some(10),
@@ -298,7 +489,10 @@ mod tests {
     }
 
     fn level_of(v: &[Finding], name: &str) -> Level {
-        v.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} missing in {v:#?}")).level
+        v.iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("{name} missing in {v:#?}"))
+            .level
     }
 
     #[test]
@@ -330,7 +524,13 @@ mod tests {
         x.flag_drift = vec!["dev-s2: --cluster-cidr is \"x\", the cluster has \"y\"".into()];
         let v = verdicts(&x);
         assert_eq!(level_of(&v, "server-flags"), Level::Fail);
-        assert!(v.iter().find(|f| f.name == "server-flags").unwrap().fix.contains("equal"));
+        assert!(
+            v.iter()
+                .find(|f| f.name == "server-flags")
+                .unwrap()
+                .fix
+                .contains("equal")
+        );
     }
 
     #[test]
@@ -343,7 +543,10 @@ mod tests {
         assert_eq!(level_of(&v, "tunnel-agent"), Level::Warn);
         x.agent = Some((true, false));
         assert_eq!(level_of(&verdicts(&x), "tunnel-agent"), Level::Fail);
-        x.endpoint = Some(EndpointCfg { kind: EndpointKind::KubeVip, vip: Some("10.89.0.250".into()) });
+        x.endpoint = Some(EndpointCfg {
+            kind: EndpointKind::KubeVip,
+            vip: Some("10.89.0.250".into()),
+        });
         x.kube_vip_missing = vec!["dev-s3".into()];
         assert_eq!(level_of(&verdicts(&x), "endpoint"), Level::Fail);
     }
@@ -381,7 +584,11 @@ mod tests {
     fn render_shows_the_fix_only_for_problems() {
         let mut x = healthy();
         x.kubeconfig = false;
-        let r = DoctorReport { cluster: "dev".into(), ok: true, findings: verdicts(&x) };
+        let r = DoctorReport {
+            cluster: "dev".into(),
+            ok: true,
+            findings: verdicts(&x),
+        };
         let t = render(&r);
         assert!(t.contains("warn  kubeconfig"));
         assert_eq!(t.matches("fix:").count(), 1, "{t}");

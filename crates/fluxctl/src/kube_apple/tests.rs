@@ -467,10 +467,7 @@ impl Host for Fake {
                 vec![]
             }
             "unit" => {
-                if let Some(line) = script
-                    .lines()
-                    .find_map(|l| l.strip_prefix("ExecStart="))
-                {
+                if let Some(line) = script.lines().find_map(|l| l.strip_prefix("ExecStart=")) {
                     self.exec.borrow_mut().insert(node.into(), line.into());
                 }
                 let mut nodes = self.nodes.borrow_mut();

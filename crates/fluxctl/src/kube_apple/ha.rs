@@ -222,7 +222,10 @@ mod tests {
     async fn skips_a_refusing_backend_and_a_backend_that_closes_at_once() {
         let p = proxy_to(vec![refused().await, closer().await, echo().await]).await;
         for _ in 0..4 {
-            assert!(roundtrip(p).await, "every connection must reach the live backend");
+            assert!(
+                roundtrip(p).await,
+                "every connection must reach the live backend"
+            );
         }
     }
 

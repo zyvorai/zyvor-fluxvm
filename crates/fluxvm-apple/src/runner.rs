@@ -500,7 +500,9 @@ fn guarded_restore_state(req: &CreateVmRequest, workspace: &Path) -> Result<Opti
             std::env::var("FLUXVM_RESTORE_ON_OS_UPDATE").ok().as_deref(),
         );
         if policy == hh::OnBuildMismatch::Refuse {
-            bail!("{msg}; refusing to restore (FLUXVM_RESTORE_ON_OS_UPDATE=refuse). Take a new snapshot on this build");
+            bail!(
+                "{msg}; refusing to restore (FLUXVM_RESTORE_ON_OS_UPDATE=refuse). Take a new snapshot on this build"
+            );
         }
         tracing::warn!("{msg}; booting cold from the snapshot's disk instead of restoring memory");
         return Ok(None);
@@ -531,7 +533,10 @@ pub fn export_checkpoint(parent: &Path, tag: &str, dest: &Path, dest_tag: &str) 
     }
     let dst = snapshot_dir(dest, dest_tag);
     fs::create_dir_all(&dst).with_context(|| format!("creating {}", dst.display()))?;
-    for name in [STATE_FILE, crate::host_health::HOST_BUILD_FILE].iter().chain(SNAPSHOT_FILES.iter()) {
+    for name in [STATE_FILE, crate::host_health::HOST_BUILD_FILE]
+        .iter()
+        .chain(SNAPSHOT_FILES.iter())
+    {
         let from = src.join(name);
         if from.is_file() {
             clone_file(&from, &dst.join(name))?;
@@ -558,7 +563,10 @@ pub fn prepare_fork_child(parent: &Path, tag: &str, child: &Path) -> Result<Path
     }
     let dst = snapshot_dir(child, tag);
     fs::create_dir_all(&dst).with_context(|| format!("creating {}", dst.display()))?;
-    for name in [STATE_FILE, crate::host_health::HOST_BUILD_FILE].iter().chain(SNAPSHOT_FILES.iter()) {
+    for name in [STATE_FILE, crate::host_health::HOST_BUILD_FILE]
+        .iter()
+        .chain(SNAPSHOT_FILES.iter())
+    {
         let from = src.join(name);
         if from.is_file() {
             clone_file(&from, &dst.join(name))?;

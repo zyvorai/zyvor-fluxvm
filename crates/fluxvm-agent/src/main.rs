@@ -236,7 +236,13 @@ fn announce_pairing(
         .unwrap_or_else(|| "fluxvm".into());
     let host_label: String = host
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let instance = name
         .unwrap_or_else(|| host.clone())
@@ -255,7 +261,10 @@ fn announce_pairing(
         addrs: vec![ip],
         txt: [
             ("v".to_owned(), "1".to_owned()),
-            ("scheme".to_owned(), if tls { "https" } else { "http" }.to_owned()),
+            (
+                "scheme".to_owned(),
+                if tls { "https" } else { "http" }.to_owned(),
+            ),
         ]
         .into_iter()
         .collect(),

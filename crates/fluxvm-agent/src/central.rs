@@ -45,11 +45,11 @@ mod tunnel;
 mod vols;
 
 pub use enroll::{NodeAuth, set_node_auth};
-pub use pair::set_pairing;
 pub use ha_rt::HaHandle;
 pub use metrics::{
     DEFAULT_INTERVAL as DEFAULT_METRICS_INTERVAL, MetricsSettings, configure as configure_metrics,
 };
+pub use pair::set_pairing;
 pub use signup::{MailConfig, configure_mail, configure_stripe};
 pub use sso::{SsoArgs, SsoConfig};
 

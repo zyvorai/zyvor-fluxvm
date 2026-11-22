@@ -30,7 +30,9 @@ pub fn list_script(verb: &str, all: bool, filters: &[String]) -> Result<String> 
     if !matches!(verb, "ps" | "images") {
         bail!("not a listing: {verb}");
     }
-    let mut s = format!("{PRELUDE}[ -n \"$FLUXCTL\" ] || {{ echo 'fluxctl is not installed on this Mac' >&2; exit 127; }}\n");
+    let mut s = format!(
+        "{PRELUDE}[ -n \"$FLUXCTL\" ] || {{ echo 'fluxctl is not installed on this Mac' >&2; exit 127; }}\n"
+    );
     s.push_str(&format!("exec \"$FLUXCTL\" mac {verb} --json"));
     if all {
         s.push_str(" -a");
@@ -51,12 +53,21 @@ pub fn collect(
     timeout: Duration,
 ) -> Vec<(HostStatus, Vec<Value>)> {
     par_map(targets, jobs, |t| {
-        let mut hs = HostStatus { host: t.label(), name: t.name.clone(), ok: false, error: None };
+        let mut hs = HostStatus {
+            host: t.label(),
+            name: t.name.clone(),
+            ok: false,
+            error: None,
+        };
         match tr.run_timed(t, &remote(script), None, Some(timeout)) {
             Err(e) => hs.error = Some(format!("{e:#}")),
             Ok(o) if o.ssh_failed() => hs.error = Some(explain_ssh_failure(t, &o.stderr)),
             Ok(o) if !o.ok() => {
-                hs.error = Some(format!("exit status {}: {}", o.code, o.stderr.trim().lines().last().unwrap_or("")))
+                hs.error = Some(format!(
+                    "exit status {}: {}",
+                    o.code,
+                    o.stderr.trim().lines().last().unwrap_or("")
+                ))
             }
             Ok(o) => match serde_json::from_str::<Value>(o.stdout.trim()) {
                 Ok(Value::Array(rows)) => {
@@ -112,7 +123,14 @@ pub fn render_ps(results: &[(HostStatus, Vec<Value>)]) -> String {
         .iter()
         .flat_map(|(h, rs)| {
             rs.iter().map(|r| {
-                vec![h.name.clone(), s(&r["name"]), s(&r["image"]), s(&r["status"]), s(&r["ip"]), s(&r["created"])]
+                vec![
+                    h.name.clone(),
+                    s(&r["name"]),
+                    s(&r["image"]),
+                    s(&r["status"]),
+                    s(&r["ip"]),
+                    s(&r["created"]),
+                ]
             })
         })
         .collect();
@@ -138,7 +156,11 @@ pub fn render_images(results: &[(HostStatus, Vec<Value>)]) -> String {
                 vec![
                     h.name.clone(),
                     s(&r["reference"]),
-                    if d.is_empty() { "local".into() } else { d.chars().take(19).collect() },
+                    if d.is_empty() {
+                        "local".into()
+                    } else {
+                        d.chars().take(19).collect()
+                    },
                     size(r["size_bytes"].as_u64()),
                 ]
             })
@@ -159,14 +181,34 @@ fn conn() -> Conn {
     W::parse_from(["fluxctl"]).c
 }
 
-fn run(verb: &str, inventory: &PathBuf, json_out: bool, all: bool, filters: &[String]) -> Result<()> {
+fn run(
+    verb: &str,
+    inventory: &PathBuf,
+    json_out: bool,
+    all: bool,
+    filters: &[String],
+) -> Result<()> {
     let c = conn();
-    let which = Which { hosts: vec![], inventory: Some(inventory.clone()), all: true };
+    let which = Which {
+        hosts: vec![],
+        inventory: Some(inventory.clone()),
+        all: true,
+    };
     let (targets, inv) = resolve(&which, &c)?;
     let tr = transport(&c, inv.as_ref());
     let script = list_script(verb, all, filters)?;
-    let res = collect(tr.as_ref(), &targets, c.jobs, &script, Duration::from_secs(60));
-    let doc = if verb == "ps" { ps_document(&res) } else { images_document(&res) };
+    let res = collect(
+        tr.as_ref(),
+        &targets,
+        c.jobs,
+        &script,
+        Duration::from_secs(60),
+    );
+    let doc = if verb == "ps" {
+        ps_document(&res)
+    } else {
+        images_document(&res)
+    };
     if json_out {
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else if verb == "ps" {
@@ -188,7 +230,11 @@ pub fn ps_fleet(inventory: &PathBuf, json_out: bool, o: &crate::mac_more::PsOpts
     run("ps", inventory, json_out, o.all, &o.filter)
 }
 
-pub fn images_fleet(inventory: &PathBuf, json_out: bool, e: &crate::mac_plus::ImagesExtra) -> Result<()> {
+pub fn images_fleet(
+    inventory: &PathBuf,
+    json_out: bool,
+    e: &crate::mac_plus::ImagesExtra,
+) -> Result<()> {
     run("images", inventory, json_out, e.all, &e.filter)
 }
 
@@ -198,13 +244,20 @@ mod tests {
     use crate::mac_fleet_ssh::fake::{FakeTransport, failed, ok};
 
     fn targets() -> Vec<Target> {
-        vec![Target::parse("admin@a.local").unwrap(), Target::parse("admin@b.local").unwrap(), Target::parse("admin@c.local").unwrap()]
+        vec![
+            Target::parse("admin@a.local").unwrap(),
+            Target::parse("admin@b.local").unwrap(),
+            Target::parse("admin@c.local").unwrap(),
+        ]
     }
 
     #[test]
     fn the_script_passes_filters_quoted_and_only_for_known_verbs() {
         let s = list_script("ps", true, &["label=a b".into(), "name=$(x)".into()]).unwrap();
-        assert!(s.contains("mac ps --json -a -f 'label=a b' -f 'name=$(x)'"), "{s}");
+        assert!(
+            s.contains("mac ps --json -a -f 'label=a b' -f 'name=$(x)'"),
+            "{s}"
+        );
         assert!(list_script("rm", false, &[]).is_err());
     }
 
@@ -213,16 +266,27 @@ mod tests {
         let tr = FakeTransport::new(|t, c| {
             assert!(c.contains("mac ps --json"));
             match t.host.as_str() {
-                "a.local" => ok(r#"[{"name":"fleet-1","image":"reg/x:1","status":"running","ip":"192.168.64.2","created":"2026-11-21","vm":{"id":"raw"}}]"#),
+                "a.local" => ok(
+                    r#"[{"name":"fleet-1","image":"reg/x:1","status":"running","ip":"192.168.64.2","created":"2026-11-21","vm":{"id":"raw"}}]"#,
+                ),
                 "b.local" => ok("[]"),
                 _ => failed(255, "Connection refused"),
             }
         });
-        let res = collect(&tr, &targets(), 3, &list_script("ps", false, &[]).unwrap(), Duration::from_secs(5));
+        let res = collect(
+            &tr,
+            &targets(),
+            3,
+            &list_script("ps", false, &[]).unwrap(),
+            Duration::from_secs(5),
+        );
         let doc = ps_document(&res);
         assert_eq!(doc["instances"].as_array().unwrap().len(), 1);
         assert_eq!(doc["instances"][0]["host"], "a");
-        assert!(doc["instances"][0].get("vm").is_none(), "the raw record is not passed through");
+        assert!(
+            doc["instances"][0].get("vm").is_none(),
+            "the raw record is not passed through"
+        );
         let hosts = doc["hosts"].as_array().unwrap();
         assert_eq!(hosts.iter().filter(|h| h["ok"] == false).count(), 1);
         assert!(hosts[2]["error"].as_str().unwrap().contains("Remote Login"));
@@ -233,17 +297,36 @@ mod tests {
 
     #[test]
     fn images_are_aggregated_with_digests_and_sizes() {
-        let tr = FakeTransport::new(|_, _| ok(r#"[{"reference":"reg/x:1","digest":"sha256:0123456789abcdef0123","size_bytes":3221225472},{"reference":"local","digest":""}]"#));
-        let res = collect(&tr, &targets()[..1], 1, &list_script("images", false, &[]).unwrap(), Duration::from_secs(5));
+        let tr = FakeTransport::new(|_, _| {
+            ok(
+                r#"[{"reference":"reg/x:1","digest":"sha256:0123456789abcdef0123","size_bytes":3221225472},{"reference":"local","digest":""}]"#,
+            )
+        });
+        let res = collect(
+            &tr,
+            &targets()[..1],
+            1,
+            &list_script("images", false, &[]).unwrap(),
+            Duration::from_secs(5),
+        );
         let t = render_images(&res);
-        assert!(t.contains("3.0G") && t.contains("local") && t.contains("sha256:0123456789ab"), "{t}");
+        assert!(
+            t.contains("3.0G") && t.contains("local") && t.contains("sha256:0123456789ab"),
+            "{t}"
+        );
         assert_eq!(images_document(&res)["images"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn a_reply_that_is_not_a_list_is_an_error_row() {
         let tr = FakeTransport::new(|_, _| ok("hello"));
-        let res = collect(&tr, &targets()[..1], 1, &list_script("ps", false, &[]).unwrap(), Duration::from_secs(5));
+        let res = collect(
+            &tr,
+            &targets()[..1],
+            1,
+            &list_script("ps", false, &[]).unwrap(),
+            Duration::from_secs(5),
+        );
         assert!(!res[0].0.ok && res[0].0.error.as_deref().unwrap().contains("JSON"));
     }
 }

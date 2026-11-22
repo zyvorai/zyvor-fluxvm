@@ -150,7 +150,10 @@ pub fn run(source: &str, disk_gib: u64, user: &str) -> Result<()> {
         "--disk-gib must be at least {MIN_DISK_GIB}"
     );
     ensure!(
-        !user.is_empty() && user.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        !user.is_empty()
+            && user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
         "--user must be a simple account name"
     );
     if source != "latest" {
@@ -181,12 +184,22 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a.ipsw");
         std::fs::write(&p, b"PKtiny").unwrap();
-        assert!(check_file(&p).unwrap_err().to_string().contains("several GB"));
+        assert!(
+            check_file(&p)
+                .unwrap_err()
+                .to_string()
+                .contains("several GB")
+        );
         assert!(check_file(&d.path().join("nope.ipsw")).is_err());
         assert!(check_file(d.path()).is_err());
         let f = std::fs::File::create(&p).unwrap();
         f.set_len((1 << 30) + 10).unwrap();
-        assert!(check_file(&p).unwrap_err().to_string().contains("not a zip"));
+        assert!(
+            check_file(&p)
+                .unwrap_err()
+                .to_string()
+                .contains("not a zip")
+        );
     }
 
     #[test]
@@ -208,7 +221,10 @@ mod tests {
         assert!(ph[2].what.contains("installer"));
         assert_eq!(ph.last().unwrap().support, Support::Missing);
         let t = render("/a/b.ipsw", 80, "ci");
-        assert!(t.contains("1. [have] use the restore image /a/b.ipsw"), "{t}");
+        assert!(
+            t.contains("1. [have] use the restore image /a/b.ipsw"),
+            "{t}"
+        );
         assert!(t.contains("[MISSING]") && t.contains("106 GB"), "{t}");
     }
 

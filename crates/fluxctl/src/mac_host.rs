@@ -627,7 +627,9 @@ pub fn render_status(f: &HostFacts) -> String {
     row(
         "automatic macOS updates",
         match f.auto_macos_updates {
-            Some(true) => "ON: an update can reboot this Mac unattended and invalidate saved VM state".into(),
+            Some(true) => {
+                "ON: an update can reboot this Mac unattended and invalidate saved VM state".into()
+            }
             Some(false) => "off".into(),
             None => "not set (macOS default)".into(),
         },
@@ -1353,12 +1355,22 @@ mod tests {
     fn pending_automatic_updates_warn() {
         assert_eq!(parse_auto_updates("1\n"), Some(true));
         assert_eq!(parse_auto_updates("0"), Some(false));
-        assert_eq!(parse_auto_updates("The domain/default pair does not exist"), None);
+        assert_eq!(
+            parse_auto_updates("The domain/default pair does not exist"),
+            None
+        );
         let mut f = HostFacts::default();
-        assert!(headless_checks(&f).iter().all(|c| c.name != "automatic macOS updates"));
+        assert!(
+            headless_checks(&f)
+                .iter()
+                .all(|c| c.name != "automatic macOS updates")
+        );
         f.auto_macos_updates = Some(true);
         let c = headless_checks(&f);
-        let w = c.iter().find(|c| c.name == "automatic macOS updates").unwrap();
+        let w = c
+            .iter()
+            .find(|c| c.name == "automatic macOS updates")
+            .unwrap();
         assert_eq!(w.status, Status::Warn);
         assert!(render_status(&f).contains("ON:"));
         assert_eq!(status_json(&f)["auto_install_macos_updates"], true);

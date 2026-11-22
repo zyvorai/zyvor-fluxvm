@@ -624,14 +624,35 @@ mod tests {
 
     #[test]
     fn the_linux_spec_has_a_loopback_ssh_forward_and_no_private_switch() {
-        let s = node_spec_on(Backend::Qemu, 22345, &params(), "dev", "dev", "sus", "ssh-ed25519 USER", &key());
+        let s = node_spec_on(
+            Backend::Qemu,
+            22345,
+            &params(),
+            "dev",
+            "dev",
+            "sus",
+            "ssh-ed25519 USER",
+            &key(),
+        );
         assert_eq!(s["network"]["forwards"][0]["host_port"], 22345);
         assert_eq!(s["network"]["forwards"][0]["guest_port"], 22);
         assert_eq!(s["network"]["forwards"][0]["host_addr"], "127.0.0.1");
         assert_eq!(s["apple"], serde_json::json!({}));
-        assert_eq!(crate::run::loopback_ssh_endpoint(&s).as_deref(), Some("127.0.0.1:22345"));
+        assert_eq!(
+            crate::run::loopback_ssh_endpoint(&s).as_deref(),
+            Some("127.0.0.1:22345")
+        );
         // the Mac spec is unchanged
-        let m = node_spec_on(Backend::Vz, 0, &params(), "dev", "dev", "sus", "ssh-ed25519 USER", &key());
+        let m = node_spec_on(
+            Backend::Vz,
+            0,
+            &params(),
+            "dev",
+            "dev",
+            "sus",
+            "ssh-ed25519 USER",
+            &key(),
+        );
         assert_eq!(m["network"]["forwards"], serde_json::json!([]));
         assert_eq!(m["apple"]["networks"][0]["name"], "dev");
     }
@@ -714,7 +735,10 @@ mod tests {
         let sc = install_unit_script(&o);
         assert!(sc.contains("ip -4 route get 1.1.1.1"), "{sc}");
         assert!(!sc.contains("10\\.89"), "{sc}");
-        assert!(sc.contains("--node-ip $PRIV --flannel-iface $IFACE"), "{sc}");
+        assert!(
+            sc.contains("--node-ip $PRIV --flannel-iface $IFACE"),
+            "{sc}"
+        );
         o.private_net = true;
         let sc = install_unit_script(&o);
         assert!(sc.contains("10\\.89") && !sc.contains("route get"), "{sc}");

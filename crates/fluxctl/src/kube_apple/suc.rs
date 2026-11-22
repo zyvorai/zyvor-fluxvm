@@ -25,7 +25,8 @@ pub fn channel_ok(c: &str) -> bool {
     !c.is_empty()
         && c.len() <= 32
         && c.as_bytes()[0].is_ascii_alphanumeric()
-        && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        && c.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
 }
 
 pub fn channel_url(c: &str) -> String {
@@ -43,7 +44,12 @@ pub fn resolve_script(channel: &str) -> String {
 
 /// `https://github.com/k3s-io/k3s/releases/tag/v1.31.5%2Bk3s1` -> `v1.31.5+k3s1`.
 pub fn parse_resolved(redirect: &str) -> Option<String> {
-    let tag = redirect.trim().rsplit('/').next()?.replace("%2B", "+").replace("%2b", "+");
+    let tag = redirect
+        .trim()
+        .rsplit('/')
+        .next()?
+        .replace("%2B", "+")
+        .replace("%2b", "+");
     parse_version(&tag).map(|_| tag)
 }
 
@@ -93,37 +99,73 @@ pub struct ChannelReport {
     pub note: String,
 }
 
-pub async fn upgrade_channel<R: Remote>(r: &R, st: &State, req: &ChannelReq) -> Result<ChannelReport> {
+pub async fn upgrade_channel<R: Remote>(
+    r: &R,
+    st: &State,
+    req: &ChannelReq,
+) -> Result<ChannelReport> {
     if st.external_url.is_some() {
         bail!("upgrade the nodes of a cluster that another Mac owns from that Mac");
     }
     if !channel_ok(&req.channel) {
-        bail!("--channel {:?} must be stable, latest, testing or a minor such as v1.31", req.channel);
+        bail!(
+            "--channel {:?} must be stable, latest, testing or a minor such as v1.31",
+            req.channel
+        );
     }
     let backup_name = format!("pre-suc-{}", r.stamp());
     if st.datastore == Datastore::Sqlite && !req.no_backup {
-        bail!("this cluster uses SQLite, which cannot be copied while running: take `fluxctl kube apple backup {}` first, then repeat with --no-backup", st.name);
+        bail!(
+            "this cluster uses SQLite, which cannot be copied while running: take `fluxctl kube apple backup {}` first, then repeat with --no-backup",
+            st.name
+        );
     }
     // health first: do not start a rolling upgrade on a cluster that is already unwell
     let nodes = script::parse_nodes(&r.run_server(&script::nodes_json_script(), None).await?)?;
-    let sick: Vec<&str> = nodes.iter().filter(|n| !n.ready).map(|n| n.name.as_str()).collect();
+    let sick: Vec<&str> = nodes
+        .iter()
+        .filter(|n| !n.ready)
+        .map(|n| n.name.as_str())
+        .collect();
     if !sick.is_empty() {
-        bail!("not every node is Ready ({}); fix that before upgrading", sick.join(", "));
+        bail!(
+            "not every node is Ready ({}); fix that before upgrading",
+            sick.join(", ")
+        );
     }
-    let server = r.servers().first().cloned().ok_or_else(|| anyhow::anyhow!("no server in this record"))?;
-    let from = script::parse_version_line(&r.run(&server, &script::version_script(K3S_BIN), None).await?)
-        .ok_or_else(|| anyhow::anyhow!("cannot read the server's k3s version"))?;
+    let server = r
+        .servers()
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no server in this record"))?;
+    let from = script::parse_version_line(
+        &r.run(&server, &script::version_script(K3S_BIN), None)
+            .await?,
+    )
+    .ok_or_else(|| anyhow::anyhow!("cannot read the server's k3s version"))?;
     let to = parse_resolved(&r.run(&server, &resolve_script(&req.channel), None).await?)
-        .ok_or_else(|| anyhow::anyhow!("the update service did not say which release {:?} points at", req.channel))?;
-    let mut rep = ChannelReport { channel: req.channel.clone(), from: from.clone(), to: to.clone(), ..Default::default() };
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the update service did not say which release {:?} points at",
+                req.channel
+            )
+        })?;
+    let mut rep = ChannelReport {
+        channel: req.channel.clone(),
+        from: from.clone(),
+        to: to.clone(),
+        ..Default::default()
+    };
     if parse_version(&to) == parse_version(&from) {
         rep.up_to_date = true;
-        rep.note = "the channel's release is the version already running; nothing was changed".into();
+        rep.note =
+            "the channel's release is the version already running; nothing was changed".into();
         return Ok(rep);
     }
     upgrade_allowed(&from, &to, req.allow_downgrade)?;
     if st.datastore == Datastore::Etcd && !req.no_backup {
-        r.run(&server, &script::snapshot_save_script(&backup_name), None).await?;
+        r.run(&server, &script::snapshot_save_script(&backup_name), None)
+            .await?;
         rep.backup = Some(backup_name);
     }
     apply_pin(r, &pins::SUC_CRD, PinSrc::Download).await?;
@@ -144,7 +186,10 @@ pub async fn upgrade_channel<R: Remote>(r: &R, st: &State, req: &ChannelReq) -> 
         Some(plans_yaml(&req.channel, req.drain).as_bytes()),
     )
     .await?;
-    rep.watch = format!("fluxctl kube apple status {}   (or kubectl -n {NAMESPACE} get plans,jobs; the controller upgrades servers one at a time, then agents)", st.name);
+    rep.watch = format!(
+        "fluxctl kube apple status {}   (or kubectl -n {NAMESPACE} get plans,jobs; the controller upgrades servers one at a time, then agents)",
+        st.name
+    );
     rep.note = "the upgrade now runs inside the cluster and takes a while; the journal's recorded k3s version is not updated".into();
     Ok(rep)
 }
@@ -163,7 +208,12 @@ mod tests {
     }
 
     fn req() -> ChannelReq {
-        ChannelReq { channel: "stable".into(), allow_downgrade: false, no_backup: false, drain: false }
+        ChannelReq {
+            channel: "stable".into(),
+            allow_downgrade: false,
+            no_backup: false,
+            drain: false,
+        }
     }
 
     const NODES: &str = r#"{"items":[{"metadata":{"name":"c-s1"},"status":{"conditions":[{"type":"Ready","status":"True"}],"nodeInfo":{"kubeletVersion":"v1.31.4+k3s1"}}}]}"#;
@@ -184,13 +234,23 @@ mod tests {
         for bad in ["", "Stable", "a b", "../x", "x;y", "-x", &"a".repeat(40)] {
             assert!(!channel_ok(bad), "{bad}");
         }
-        assert_eq!(channel_url("v1.31"), "https://update.k3s.io/v1-release/channels/v1.31");
+        assert_eq!(
+            channel_url("v1.31"),
+            "https://update.k3s.io/v1-release/channels/v1.31"
+        );
     }
 
     #[test]
     fn resolves_the_redirect() {
-        assert_eq!(parse_resolved("https://github.com/k3s-io/k3s/releases/tag/v1.31.5%2Bk3s1\n").as_deref(), Some("v1.31.5+k3s1"));
-        assert_eq!(parse_resolved("https://x/tag/v1.31.5+k3s1").as_deref(), Some("v1.31.5+k3s1"));
+        assert_eq!(
+            parse_resolved("https://github.com/k3s-io/k3s/releases/tag/v1.31.5%2Bk3s1\n")
+                .as_deref(),
+            Some("v1.31.5+k3s1")
+        );
+        assert_eq!(
+            parse_resolved("https://x/tag/v1.31.5+k3s1").as_deref(),
+            Some("v1.31.5+k3s1")
+        );
         assert!(parse_resolved("").is_none());
         assert!(parse_resolved("https://x/tag/nonsense").is_none());
     }
@@ -218,34 +278,83 @@ spec:\n  concurrency: 1\n  cordon: true\n  nodeSelector:\n    matchExpressions:\
 
     #[tokio::test]
     async fn installs_the_pinned_controller_then_the_plans_after_a_snapshot() {
-        let r = fake("v1.31.4+k3s1", "https://github.com/k3s-io/k3s/releases/tag/v1.32.0%2Bk3s1");
+        let r = fake(
+            "v1.31.4+k3s1",
+            "https://github.com/k3s-io/k3s/releases/tag/v1.32.0%2Bk3s1",
+        );
         let rep = upgrade_channel(&r, &st("etcd"), &req()).await.unwrap();
-        assert_eq!((rep.from.as_str(), rep.to.as_str()), ("v1.31.4+k3s1", "v1.32.0+k3s1"));
+        assert_eq!(
+            (rep.from.as_str(), rep.to.as_str()),
+            ("v1.31.4+k3s1", "v1.32.0+k3s1")
+        );
         assert_eq!(rep.backup.as_deref(), Some("pre-suc-20261122-120000"));
         let log = r.log.borrow();
-        let find = |needle: &str| log.iter().position(|(_, s, _)| s.contains(needle)).unwrap_or_else(|| panic!("{needle}"));
+        let find = |needle: &str| {
+            log.iter()
+                .position(|(_, s, _)| s.contains(needle))
+                .unwrap_or_else(|| panic!("{needle}"))
+        };
         let snap = find("etcd-snapshot save --name pre-suc-20261122-120000");
         let crd = find(pins::SUC_CRD.sha256);
         let ctl = find(pins::SUC.sha256);
         let plans = find("suc-plans");
-        assert!(snap < crd && crd < find("suc-wait-crd") && find("suc-wait-crd") < ctl && ctl < find("suc-rollout") && find("suc-rollout") < plans);
+        assert!(
+            snap < crd
+                && crd < find("suc-wait-crd")
+                && find("suc-wait-crd") < ctl
+                && ctl < find("suc-rollout")
+                && find("suc-rollout") < plans
+        );
         assert!(log[plans].2.as_deref().unwrap().contains("channels/stable"));
     }
 
     #[tokio::test]
     async fn refuses_downgrades_skips_and_unwell_clusters_before_installing() {
         let r = fake("v1.32.0+k3s1", "https://x/tag/v1.31.5%2Bk3s1");
-        assert!(upgrade_channel(&r, &st("etcd"), &req()).await.unwrap_err().to_string().contains("older than"));
+        assert!(
+            upgrade_channel(&r, &st("etcd"), &req())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("older than")
+        );
         let r = fake("v1.30.1+k3s1", "https://x/tag/v1.32.0%2Bk3s1");
-        assert!(upgrade_channel(&r, &st("etcd"), &req()).await.unwrap_err().to_string().contains("skips a minor"));
-        for r in [fake("v1.32.0+k3s1", "https://x/tag/v1.31.5%2Bk3s1"), fake("v1.30.1+k3s1", "https://x/tag/v1.32.0%2Bk3s1")] {
+        assert!(
+            upgrade_channel(&r, &st("etcd"), &req())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("skips a minor")
+        );
+        for r in [
+            fake("v1.32.0+k3s1", "https://x/tag/v1.31.5%2Bk3s1"),
+            fake("v1.30.1+k3s1", "https://x/tag/v1.32.0%2Bk3s1"),
+        ] {
             let _ = upgrade_channel(&r, &st("etcd"), &req()).await;
-            assert!(!r.log.borrow().iter().any(|(_, s, _)| s.contains("kubectl apply")), "nothing installed");
-            assert!(!r.log.borrow().iter().any(|(_, s, _)| s.contains("etcd-snapshot save")), "no snapshot for a refused upgrade");
+            assert!(
+                !r.log
+                    .borrow()
+                    .iter()
+                    .any(|(_, s, _)| s.contains("kubectl apply")),
+                "nothing installed"
+            );
+            assert!(
+                !r.log
+                    .borrow()
+                    .iter()
+                    .any(|(_, s, _)| s.contains("etcd-snapshot save")),
+                "no snapshot for a refused upgrade"
+            );
         }
         let r2 = FakeRemote::cluster(1, 0);
         r2.answer("get nodes -o json", &NODES.replace("\"True\"", "\"False\""));
-        assert!(upgrade_channel(&r2, &st("etcd"), &req()).await.unwrap_err().to_string().contains("not every node is Ready"));
+        assert!(
+            upgrade_channel(&r2, &st("etcd"), &req())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not every node is Ready")
+        );
     }
 
     #[tokio::test]
@@ -253,9 +362,20 @@ spec:\n  concurrency: 1\n  cordon: true\n  nodeSelector:\n    matchExpressions:\
         let r = fake("v1.31.4+k3s1", "https://x/tag/v1.31.4%2Bk3s1");
         let rep = upgrade_channel(&r, &st("etcd"), &req()).await.unwrap();
         assert!(rep.up_to_date);
-        assert!(!r.log.borrow().iter().any(|(_, s, _)| s.contains("kubectl apply")));
+        assert!(
+            !r.log
+                .borrow()
+                .iter()
+                .any(|(_, s, _)| s.contains("kubectl apply"))
+        );
         let r = fake("v1.31.4+k3s1", "https://x/tag/v1.32.0%2Bk3s1");
-        assert!(upgrade_channel(&r, &st("sqlite"), &req()).await.unwrap_err().to_string().contains("--no-backup"));
+        assert!(
+            upgrade_channel(&r, &st("sqlite"), &req())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("--no-backup")
+        );
         assert!(r.log.borrow().is_empty());
         let mut q = req();
         q.no_backup = true;
