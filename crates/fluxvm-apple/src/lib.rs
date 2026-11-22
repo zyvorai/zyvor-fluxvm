@@ -501,6 +501,11 @@ pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
     if dir.exists() {
         bail!("snapshot {tag:?} already exists for this VM");
     }
+    // Ask the runner whether this device set can be saved at all (`validateSaveRestoreSupport`) before touching the disk,
+    // so the reason comes back first and no snapshot dir is made.
+    if let Some(reason) = save_unsupported(sock).await {
+        bail!("this VM cannot be saved: {reason}");
+    }
     std::fs::create_dir_all(&dir)?;
     let reply = control_call_with(
         sock,
@@ -529,6 +534,27 @@ pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
         let _ = std::fs::remove_dir_all(&dir);
     }
     outcome
+}
+
+/// The runner's `save-support` answer: `Some(reason)` when this VM's devices cannot be saved, `None` when they can or
+/// when the runner is too old to say (an unknown answer never blocks a save).
+async fn save_unsupported(sock: &std::path::Path) -> Option<String> {
+    let reply = control_call(sock, "save-support").await.ok()?;
+    save_support_reason(&reply)
+}
+
+fn save_support_reason(reply: &ControlReply) -> Option<String> {
+    if !reply.ok() || reply.0.get("supported").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    Some(
+        reply
+            .0
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Virtualization.framework gave no reason")
+            .to_owned(),
+    )
 }
 
 /// Whether snapshot `tag` of this workspace carries saved memory and device state (a disk-only snapshot does not).
@@ -567,6 +593,33 @@ pub async fn snapshot_save_disk(vm: &VmRecord, tag: &str, running: bool) -> Resu
 #[cfg(test)]
 mod snapshot_tests {
     use super::*;
+
+    #[test]
+    fn save_support_replies_decode() {
+        let r = ControlReply;
+        let no = serde_json::json!({"ok": true, "supported": false, "reason": "Unsupported graphics device in configuration"});
+        assert_eq!(
+            save_support_reason(&r(no)).as_deref(),
+            Some("Unsupported graphics device in configuration")
+        );
+        let nameless = serde_json::json!({"ok": true, "supported": false});
+        assert!(
+            save_support_reason(&r(nameless))
+                .unwrap()
+                .contains("no reason")
+        );
+        assert_eq!(
+            save_support_reason(&r(serde_json::json!({"ok": true, "supported": true}))),
+            None
+        );
+        // An old runner answers `unknown command`: never block a save on that.
+        assert_eq!(
+            save_support_reason(&r(
+                serde_json::json!({"ok": false, "error": "unknown command"})
+            )),
+            None
+        );
+    }
 
     #[test]
     fn restore_puts_the_snapshot_disk_and_efi_back() {

@@ -35,6 +35,10 @@ pub struct Entry {
 struct Index {
     #[serde(default)]
     images: BTreeMap<String, Entry>,
+    /// Template directory name to the macOS build of the Mac that added it (`24G90`). Kept beside `images`, not in
+    /// [`Entry`], so an index written before this existed still loads and nothing that builds an `Entry` changes.
+    #[serde(default)]
+    host_builds: BTreeMap<String, String>,
 }
 
 pub struct Store {
@@ -135,6 +139,20 @@ impl Store {
 
     /// Register `dir` (already inside the store root, named `entry.dir`) under `reference`.
     pub fn add(&self, reference: &str, entry: Entry) -> Result<String> {
+        self.add_with_build(
+            reference,
+            entry,
+            fluxvm_apple::host_health::current_os_build(),
+        )
+    }
+
+    /// [`Store::add`] with the host build to record (`None`: leave what is recorded as it is).
+    pub fn add_with_build(
+        &self,
+        reference: &str,
+        entry: Entry,
+        host_build: Option<String>,
+    ) -> Result<String> {
         let key = normalize(reference)?;
         ensure!(
             !entry.dir.contains('/') && !entry.dir.starts_with('.'),
@@ -146,12 +164,29 @@ impl Store {
         if entry.added_unix == 0 {
             entry.added_unix = now_unix();
         }
+        if let Some(b) = host_build {
+            idx.host_builds.insert(entry.dir.clone(), b);
+        }
         let replaced = idx.images.insert(key.clone(), entry);
+        let live: std::collections::BTreeSet<_> =
+            idx.images.values().map(|e| e.dir.clone()).collect();
+        idx.host_builds.retain(|d, _| live.contains(d));
         self.save(&idx)?;
         if let Some(old) = replaced {
             self.gc_dir(&old.dir)?;
         }
         Ok(key)
+    }
+
+    /// The macOS build of the Mac that added this template, or `None` for one added before builds were recorded.
+    #[allow(dead_code)] // recorded for a later restore-compat check; no command reads it yet
+    pub fn host_build(&self, reference: &str) -> Result<Option<String>> {
+        let key = normalize(reference)?;
+        let idx = self.load()?;
+        Ok(idx
+            .images
+            .get(&key)
+            .and_then(|e| idx.host_builds.get(&e.dir).cloned()))
     }
 
     /// `docker tag`: a second name for an existing image (same directory, no copy).
@@ -239,6 +274,28 @@ mod tests {
             source: "local".into(),
             added_unix: 0,
         }
+    }
+
+    #[test]
+    fn a_template_remembers_the_macos_build_it_was_added_on() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::open(d.path()).unwrap();
+        make_template(&store, "a");
+        make_template(&store, "b");
+        store.add_with_build("old", entry("a"), None).unwrap();
+        store
+            .add_with_build("new", entry("b"), Some("24G90".into()))
+            .unwrap();
+        assert_eq!(store.host_build("old").unwrap(), None);
+        assert_eq!(store.host_build("new").unwrap().as_deref(), Some("24G90"));
+        assert!(store.host_build("nope").unwrap().is_none());
+        // An index written before builds were recorded still loads.
+        std::fs::write(
+            d.path().join("index.json"),
+            br#"{"images":{"x:latest":{"dir":"a"}}}"#,
+        )
+        .unwrap();
+        assert!(store.host_build("x").unwrap().is_none());
     }
 
     #[test]
