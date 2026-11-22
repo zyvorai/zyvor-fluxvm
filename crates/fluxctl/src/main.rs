@@ -150,6 +150,7 @@ mod stack;
 mod stack_fleet;
 mod status;
 mod styles;
+mod support_cmd;
 mod vm_net;
 mod vm_spec;
 mod vz_doctor;
@@ -1915,6 +1916,10 @@ enum Command {
     /// image) and print the exact commands for the rest. Never runs sudo without `--sudo`, never changes a security
     /// setting, and records what it changed.
     Fix(cluster_cmd::FixArgs),
+    /// Collect what a maintainer needs (versions, cluster health, recent logs, instances, config, disk/RAM/network) into one
+    /// .tar.gz with every secret removed, and print its path. Works with the daemon down; says what it skipped and why.
+    /// Studio: Home, Download support bundle.
+    SupportBundle(support_cmd::SupportBundleArgs),
     /// Offline checks of a VM spec (`vm-spec check`): unknown keys, values the daemon refuses, settings the chosen
     /// backend ignores, missing paths.
     VmSpec {
@@ -6531,7 +6536,10 @@ async fn main() -> Result<()> {
 
     // `cluster status` and `fix` read this machine (and, with an inventory, ssh to Macs): no VmManager, and they work
     // when the daemon is down, which is when they are most needed.
-    if matches!(cli.command, Command::Cluster { .. } | Command::Fix(_)) {
+    if matches!(
+        cli.command,
+        Command::Cluster { .. } | Command::Fix(_) | Command::SupportBundle(_)
+    ) {
         let env = cluster_cmd::Env {
             listen: cfg.listen.clone(),
             state_dir: cfg.state_dir.clone(),
@@ -6542,6 +6550,7 @@ async fn main() -> Result<()> {
                 command: cluster::ClusterCommand::Status(a),
             } => cluster_cmd::run_status(a, &env).await?,
             Command::Fix(a) => cluster_cmd::run_fix(a, &env, &cfg.state_dir).await?,
+            Command::SupportBundle(a) => support_cmd::run(a, &env, &cfg).await?,
             _ => unreachable!(),
         };
         std::process::exit(code);
@@ -6647,6 +6656,7 @@ async fn main() -> Result<()> {
         | Command::ExecPolicy { .. }
         | Command::Explain(_)
         | Command::Fix(_)
+        | Command::SupportBundle(_)
         | Command::VmSpec { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
@@ -11001,6 +11011,16 @@ mod backlog_tier1_cli_tests {
         assert!(matches!(
             cli(&["cluster", "status", "--json", "-f", "fleet.yaml"]).command,
             Command::Cluster { .. }
+        ));
+        let Command::SupportBundle(b) =
+            cli(&["support-bundle", "--out", "/tmp/b.tgz", "--log-lines", "50"]).command
+        else {
+            panic!("expected support-bundle");
+        };
+        assert_eq!(b.log_lines, Some(50));
+        assert!(matches!(
+            cli(&["support-bundle"]).command,
+            Command::SupportBundle(_)
         ));
         let Command::Fix(f) = cli(&["fix", "--dry-run", "--sudo", "--yes"]).command else {
             panic!("expected fix");

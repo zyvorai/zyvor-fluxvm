@@ -22,6 +22,11 @@ fn now() -> u64 {
 }
 
 async fn cluster_health(State(m): State<Arc<VmManager>>) -> Json<ClusterHealth> {
+    Json(assess_now(&m).await)
+}
+
+/// This node's health now: what `GET /v1/cluster/health` returns and what the support bundle's `cluster-health.json` holds.
+pub(crate) async fn assess_now(m: &Arc<VmManager>) -> ClusterHealth {
     let vms = serde_json::json!({"items": m.list().await});
     let state_dir = m.cfg.state_dir.clone();
     let pressure = tokio::task::spawn_blocking(fluxvm_core::pressure_admission::sample_host)
@@ -57,7 +62,7 @@ async fn cluster_health(State(m): State<Arc<VmManager>>) -> Json<ClusterHealth> 
     })
     .await
     .unwrap_or_default();
-    Json(health::assess(&[facts], now()))
+    health::assess(&[facts], now())
 }
 
 #[cfg(test)]

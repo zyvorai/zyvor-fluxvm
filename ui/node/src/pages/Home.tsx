@@ -1,10 +1,12 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-import { Copy } from 'lucide-react';
+import { Copy, Download } from 'lucide-react';
 import { Button, Card, EmptyState, Hero, Pill, Reveal, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
+import { useAct } from '../lib/act';
+import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle } from '../lib/bundle';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
 function ItemRow({ i, notify }: { i: HealthItem; notify: Notify }) {
@@ -44,6 +46,23 @@ function Machine({ m, notify }: { m: MachineHealth; notify: Notify }) {
   );
 }
 
+/** Download the support bundle: versions, health, recent logs, instances, config and host facts with secrets removed. */
+function SupportBundle({ notify }: { notify: Notify }) {
+  const { busy, run } = useAct(notify);
+  const copy = () => navigator.clipboard.writeText(BUNDLE_COMMAND).then(() => notify('Copied: ' + BUNDLE_COMMAND), () => notify('Copy blocked by the browser', 'bad'));
+  const download = () => void run('bundle', async () => {
+    const d = await downloadSupportBundle();
+    notify(bundleSummary(d.name, d.bytes, d.skipped));
+  });
+  return (
+    <Card title="Support bundle" action={<Button size="sm" onClick={download} busy={busy === 'bundle'}><Download size={14} /> Download support bundle</Button>}>
+      <p>One file with the versions, this health report, recent logs, your instances, the settings in effect and disk, memory and network facts. Tokens, passwords, keys and kubeconfig credentials are removed.</p>
+      <p className="fx-muted">{BUNDLE_NOTE} If the daemon is stopped, run <code className="fx-mono">{BUNDLE_COMMAND}</code> in a terminal; it works without the daemon.</p>
+      <Button size="sm" variant="ghost" onClick={() => void copy()}><Copy size={14} /> Copy as fluxctl</Button>
+    </Card>
+  );
+}
+
 /** The first page: is the cluster fine, in words anyone can read, with the next thing to do and a copy button for each fix. */
 export function HomePage({ notify }: { notify: Notify }) {
   const h = usePoll(() => api.get<ClusterHealth>('/v1/cluster/health'), 10000);
@@ -54,6 +73,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <>
         <Hero eyebrow="Home" title="Cluster health is not available" lede="This node did not answer the health request." />
         <EmptyState title="Could not read the health report" body={`${h.error?.message ?? 'No answer'}. An older FluxVM daemon does not have this page's data; run fluxctl cluster status on the machine instead.`} action={<Button onClick={() => void copy('fluxctl cluster status')}><Copy size={14} /> Copy as fluxctl</Button>} />
+        <div className="fx-section"><SupportBundle notify={notify} /></div>
       </>
     );
   }
@@ -75,6 +95,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <div className="fx-grid cols-2 fx-section">
         {d.machines.map((m, n) => <Reveal key={m.name} delay={n * 60}><Machine m={m} notify={notify} /></Reveal>)}
       </div>
+      <div className="fx-section"><SupportBundle notify={notify} /></div>
       <p className="fx-muted fx-section">This page shows the node you are connected to. For every Mac of a fleet, run <code className="fx-mono">fluxctl cluster status -f inventory.yaml</code>.</p>
     </>
   );

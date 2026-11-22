@@ -55,6 +55,8 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 fluxvm-agent = { path = "../fluxvm-agent" }
 tempfile = "3"
 hex = "0.4"
+tar = "0.4"
+flate2 = "1"
 
 [[bin]]
 name = "fluxctl"

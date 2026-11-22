@@ -588,6 +588,31 @@ pub const CODES: &[HealthCode] = &[
         ]
     ),
     hc!(
+        "SUPPORT_BUNDLE_SECRET_LEFT",
+        "The support bundle was not written because its final check still found something that looks like a secret.",
+        [
+            "a log or setting held a credential in a form the redaction does not know",
+            "nothing was written or sent: the check fails closed on purpose"
+        ],
+        [
+            "send the output of `fluxctl cluster status --json` and `fluxctl doctor` by hand instead",
+            "report the pattern name from the message so the redaction can learn it"
+        ]
+    ),
+    hc!(
+        "SUPPORT_BUNDLE_WRITE_FAILED",
+        "The support bundle file could not be written.",
+        [
+            "the folder does not exist or is not writable",
+            "the disk is full",
+            "the output file already exists"
+        ],
+        [
+            "choose another place: `fluxctl support-bundle --out ~/bundle.tar.gz`",
+            "free disk space (`fluxctl cluster status` shows how much is left)"
+        ]
+    ),
+    hc!(
         "CHECK_FAILED",
         "A host check reported a problem that has no dedicated explanation.",
         ["see the check's own message"],
@@ -2061,6 +2086,8 @@ mod tests {
             "ROUTE_NOT_ACCEPTED",
             "ROUTE_BACKEND_UNRESOLVED",
             "BACKEND_NO_READY_ENDPOINTS",
+            "SUPPORT_BUNDLE_SECRET_LEFT",
+            "SUPPORT_BUNDLE_WRITE_FAILED",
         ] {
             seen.insert(extra.to_owned());
         }

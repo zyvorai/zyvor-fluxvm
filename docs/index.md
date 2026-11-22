@@ -12,6 +12,7 @@ Every feature area and every document, in one place.
 | A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
 | A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
 | Something that is not working | [troubleshooting.md](troubleshooting.md), or `fluxctl cluster status` and `fluxctl fix` ([cluster-home.md](cluster-home.md)) |
+| Need help from a maintainer | `fluxctl support-bundle` (secrets removed, works with the daemon down), or Studio Home, [support-bundle.md](support-bundle.md) |
 | A job in mind (CI runners, agent sandboxes, per-branch environments) | [Use cases](#use-cases) below |
 
 ## Feature highlights
