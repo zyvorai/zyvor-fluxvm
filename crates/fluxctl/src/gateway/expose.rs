@@ -40,6 +40,21 @@ const MAX_FAILS: u32 = 12;
 /// A forward that ran this long counts as having worked, so the backoff starts over.
 const HEALTHY: Duration = Duration::from_secs(10);
 
+/// Set by SIGTERM/SIGHUP so the forward loop can stop its kubectl child instead of leaving it holding the port.
+static TERMINATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_term(_sig: libc::c_int) {
+    TERMINATED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn install_term_flag() {
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_term as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, on_term as extern "C" fn(libc::c_int) as libc::sighandler_t);
+    }
+}
+
 /// How a `kubectl port-forward` ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForwardEnd {
@@ -102,10 +117,25 @@ impl ExposeEnv for SystemEnv {
         use std::os::unix::process::ExitStatusExt;
         let (program, args) = argv.split_first().ok_or_else(|| anyhow!("empty command"))?;
         let started = Instant::now();
-        let st = std::process::Command::new(program)
+        install_term_flag();
+        let mut child = std::process::Command::new(program)
             .args(args)
-            .status()
+            .spawn()
             .map_err(|e| anyhow!("could not run {program}: {e}"))?;
+        // Poll instead of blocking in `wait`: a SIGTERM or SIGHUP to this process (a service stop, a closed terminal) would
+        // otherwise end fluxctl and leave kubectl running with the port held. Ctrl-C reaches both, as before.
+        let st = loop {
+            if TERMINATED.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(ForwardEnd::Interrupted);
+            }
+            match child.try_wait() {
+                Ok(Some(st)) => break st,
+                Ok(None) => std::thread::sleep(Duration::from_millis(150)),
+                Err(e) => return Err(anyhow!("could not wait for {program}: {e}")),
+            }
+        };
         if matches!(st.signal(), Some(2 | 15)) {
             return Ok(ForwardEnd::Interrupted);
         }
