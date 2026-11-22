@@ -370,6 +370,21 @@ pub const CODES: &[HealthCode] = &[
     hc!("NO_MACHINES", "FluxVM does not know about any machine yet.",
         ["no daemon is running here and no fleet inventory was given"],
         ["start FluxVM here (`fluxctl service install` on a Mac), or pass `--inventory FILE` (docs/mac-fleet-quickstart.md)"]),
+    hc!("ENVOY_GATEWAY_NOT_INSTALLED", "You have Gateways or routes that use Envoy Gateway, but Envoy Gateway is not running in the cluster.",
+        ["Envoy Gateway was never installed on this cluster, or was removed", "its controller (deployment envoy-gateway in envoy-gateway-system) is not running"],
+        ["install it with `fluxctl kube cluster platform envoy-gateway NAME` (on a Mac: `fluxctl kube apple platform envoy-gateway NAME`)", "then `fluxctl cluster status` again; the Gateways become Programmed within a minute"]),
+    hc!("GATEWAY_NOT_PROGRAMMED", "A Gateway has not been set up by its controller, so it is not serving traffic.",
+        ["the controller rejected the Gateway (a bad listener, a port clash, a missing certificate Secret)", "the proxy pods behind it are not running or have no address yet"],
+        ["`kubectl describe gateway NAME -n NS` shows the controller's reason", "`fluxctl gateway inspect ROUTE -n NS` for a route on it", "fix the listener, then wait a minute; a Gateway that was just changed shows as still being set up, not as failed"]),
+    hc!("ROUTE_NOT_ACCEPTED", "A route was not accepted by the Gateway it points at, so it does nothing.",
+        ["the route names a Gateway or listener that does not exist", "the listener does not allow routes from this namespace, or the hostname or protocol does not match"],
+        ["`fluxctl gateway inspect ROUTE -n NS` shows the reason the Gateway gave", "check the route's parentRefs (Gateway name, namespace, sectionName) and the listener's allowedRoutes"]),
+    hc!("ROUTE_BACKEND_UNRESOLVED", "A route points at a Service it cannot use, so requests to it fail.",
+        ["the Service does not exist, or is in another namespace without a ReferenceGrant", "the port number is not one of the Service's ports"],
+        ["`fluxctl gateway inspect ROUTE -n NS` lists each backend and whether its port was found", "create the Service or fix the name and port in the route; re-run fluxctl gateway expose to write a correct route"]),
+    hc!("BACKEND_NO_READY_ENDPOINTS", "A route's Service has no ready pods, so the Gateway has nowhere to send requests.",
+        ["the pods are still starting, crashing, or failing their readiness check", "the Service selector matches no pods"],
+        ["`kubectl get pods -n NS` and `kubectl describe service NAME -n NS`", "`fluxctl gateway inspect ROUTE -n NS` shows the ready and not-ready endpoint counts"]),
     hc!("CHECK_FAILED", "A host check reported a problem that has no dedicated explanation.",
         ["see the check's own message"],
         ["run the command named in the fix line, or `fluxctl doctor` for details"]),
@@ -826,8 +841,13 @@ fn newer(a: &str, b: &str) -> bool {
 }
 
 pub fn assess(nodes: &[NodeFacts], now: u64) -> ClusterHealth {
+    assess_with(nodes, vec![], now)
+}
+
+/// [`assess`] plus problems that belong to the cluster rather than one machine (for example [`gateway_items`]).
+pub fn assess_with(nodes: &[NodeFacts], extra: Vec<Item>, now: u64) -> ClusterHealth {
     let machines: Vec<MachineHealth> = nodes.iter().map(|n| assess_node(n, now)).collect();
-    let mut items = vec![];
+    let mut items = extra;
     if machines.is_empty() {
         items.push(item(
             "cluster", "fleet", Severity::Fail, "NO_MACHINES",
@@ -843,6 +863,12 @@ pub fn assess(nodes: &[NodeFacts], now: u64) -> ClusterHealth {
     let bad = machines.iter().filter(|m| m.light != Severity::Ok).count();
     let headline = if machines.is_empty() {
         "No machines found".to_owned()
+    } else if bad == 0 && !items.is_empty() {
+        let base = match machines.len() {
+            1 => format!("{} is healthy", machines[0].name),
+            n => format!("All {n} machines are healthy"),
+        };
+        format!("{base}, but {} in the cluster", plural(items.len() as u64, "problem needs attention", "problems need attention"))
     } else if bad == 0 {
         match machines.len() {
             1 => format!("{} is healthy", machines[0].name),
@@ -938,6 +964,189 @@ pub fn next_action(h: &ClusterHealth) -> NextAction {
             }
         }
     }
+}
+
+// ---- Gateway API ------------------------------------------------------------------------------------------------------
+
+/// One Gateway API status condition as the API server reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GwCondition {
+    /// `True`, `False` or `Unknown`.
+    pub status: String,
+    /// The generation of the object the controller last looked at; `None` when it did not say.
+    pub observed_generation: Option<i64>,
+    pub message: Option<String>,
+}
+
+impl GwCondition {
+    /// The controller has seen the current version of the object. A condition with an older (or no) observed generation
+    /// describes a previous spec: the controller has not caught up yet, which is not a failure.
+    fn current(&self, generation: Option<i64>) -> bool {
+        match (self.observed_generation, generation) {
+            (Some(o), Some(g)) => o == g,
+            _ => false,
+        }
+    }
+    /// A current condition that says `False`.
+    fn failed(&self, generation: Option<i64>) -> bool {
+        self.current(generation) && self.status.eq_ignore_ascii_case("false")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GatewayFact {
+    pub namespace: String,
+    pub name: String,
+    /// Its class belongs to the Envoy Gateway controller.
+    #[serde(default)]
+    pub envoy: bool,
+    pub generation: Option<i64>,
+    /// `None` when the controller has not written the condition yet.
+    pub programmed: Option<GwCondition>,
+}
+
+/// One Gateway a route is attached to, with the route's conditions for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RouteParentFact {
+    pub gateway: String,
+    pub accepted: Option<GwCondition>,
+    pub resolved_refs: Option<GwCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BackendFact {
+    pub namespace: String,
+    pub service: String,
+    /// Ready endpoints; `None` when they could not be read (the Service is missing, or the read failed).
+    pub ready_endpoints: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RouteFact {
+    pub namespace: String,
+    pub name: String,
+    /// It is attached to a Gateway of the Envoy class.
+    #[serde(default)]
+    pub envoy: bool,
+    pub generation: Option<i64>,
+    #[serde(default)]
+    pub parents: Vec<RouteParentFact>,
+    #[serde(default)]
+    pub backends: Vec<BackendFact>,
+}
+
+/// What is known about the Gateway API objects of one cluster. Read-only evidence; nothing is guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GatewayFacts {
+    /// The FluxVM cluster name (for the `--cluster` of the fix commands); empty for the kubectl default.
+    pub cluster: String,
+    /// The Envoy Gateway controller is running; `None` when that could not be read.
+    pub controller_present: Option<bool>,
+    #[serde(default)]
+    pub gateways: Vec<GatewayFact>,
+    #[serde(default)]
+    pub routes: Vec<RouteFact>,
+}
+
+/// The plain-English problems with a cluster's Gateways, routes and backends. A cluster with no Gateways, and a healthy
+/// one, give nothing: Envoy Gateway being absent is only a problem when something needs it.
+pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
+    let flag = if f.cluster.is_empty() { String::new() } else { format!(" --cluster {}", f.cluster) };
+    let on = if f.cluster.is_empty() { String::new() } else { format!(" on {}", f.cluster) };
+    let mut out = vec![];
+    let mk = |sev: Severity, code: &str, msg: String, cause: Option<String>, fix: Fix| Item {
+        id: String::new(),
+        machine: "cluster".into(),
+        source: "gateway".into(),
+        severity: sev,
+        message: msg,
+        cause,
+        fix: Some(fix),
+        explain: Some(code.to_owned()),
+    };
+    let missing = f.controller_present == Some(false);
+    let needs_envoy = f.gateways.iter().any(|g| g.envoy) || f.routes.iter().any(|r| r.envoy);
+    if missing && needs_envoy {
+        let n = f.gateways.iter().filter(|g| g.envoy).count();
+        let r = f.routes.iter().filter(|r| r.envoy).count();
+        let what = match (n, r) {
+            (0, r) => plural(r as u64, "route", "routes"),
+            (n, 0) => plural(n as u64, "Gateway", "Gateways"),
+            (n, r) => format!("{} and {}", plural(n as u64, "Gateway", "Gateways"), plural(r as u64, "route", "routes")),
+        };
+        let name = if f.cluster.is_empty() { "NAME" } else { &f.cluster };
+        out.push(mk(
+            Severity::Fail,
+            "ENVOY_GATEWAY_NOT_INSTALLED",
+            format!("{what} {} Envoy Gateway, which is not running{on}", if n + r == 1 { "needs" } else { "need" }),
+            Some("the envoy-gateway controller is missing from the envoy-gateway-system namespace".into()),
+            Fix::command(format!("fluxctl kube cluster platform envoy-gateway {name}")),
+        ));
+    }
+    // Without the controller every Envoy Gateway looks broken for the same reason; say it once.
+    let skip = |envoy: bool| missing && envoy;
+    for g in f.gateways.iter().filter(|g| !skip(g.envoy)) {
+        if let Some(c) = &g.programmed
+            && c.failed(g.generation)
+        {
+            out.push(mk(
+                Severity::Fail,
+                "GATEWAY_NOT_PROGRAMMED",
+                format!("Gateway {}/{} is not set up, so it serves no traffic", g.namespace, g.name),
+                c.message.clone(),
+                Fix::command(format!("kubectl describe gateway {} -n {}", g.name, g.namespace)),
+            ));
+        }
+    }
+    let mut seen_backends = std::collections::BTreeSet::new();
+    for r in f.routes.iter().filter(|r| !skip(r.envoy)) {
+        let inspect = format!("fluxctl gateway inspect {} -n {}{flag}", r.name, r.namespace);
+        let id = format!("{}/{}", r.namespace, r.name);
+        let mut accepted_ok = true;
+        for p in &r.parents {
+            if let Some(c) = &p.accepted
+                && c.failed(r.generation)
+            {
+                accepted_ok = false;
+                out.push(mk(
+                    Severity::Fail,
+                    "ROUTE_NOT_ACCEPTED",
+                    format!("Route {id} was not accepted by Gateway {}, so it does nothing", p.gateway),
+                    c.message.clone(),
+                    Fix::command(inspect.clone()),
+                ));
+            }
+        }
+        for p in &r.parents {
+            if let Some(c) = &p.resolved_refs
+                && c.failed(r.generation)
+            {
+                out.push(mk(
+                    Severity::Fail,
+                    "ROUTE_BACKEND_UNRESOLVED",
+                    format!("Route {id} points at a Service that cannot be used, so requests to it fail"),
+                    c.message.clone(),
+                    Fix::command(inspect.clone()),
+                ));
+                break;
+            }
+        }
+        if !accepted_ok {
+            continue;
+        }
+        for b in &r.backends {
+            if b.ready_endpoints == Some(0) && seen_backends.insert((b.namespace.clone(), b.service.clone())) {
+                out.push(mk(
+                    Severity::Warn,
+                    "BACKEND_NO_READY_ENDPOINTS",
+                    format!("Service {}/{} (used by route {id}) has no ready pods, so the Gateway has nowhere to send requests", b.namespace, b.service),
+                    Some("its pods are starting, failing their readiness check, or the Service selects none".into()),
+                    Fix::command(inspect.clone()),
+                ));
+            }
+        }
+    }
+    out
 }
 
 // ---- facts from the daemon's JSON ---------------------------------------------------------------------------------
@@ -1235,7 +1444,7 @@ mod tests {
             }
         }
         // every code the model can emit is explained, and every explained code can be emitted by some path
-        for extra in ["HOST_UNREACHABLE", "MACOS_SLOTS_FULL", "NO_BACKUP", "STALE_BACKUP", "MISSING_IMAGE", "NO_MACHINES", "LOW_MEMORY"] {
+        for extra in ["HOST_UNREACHABLE", "MACOS_SLOTS_FULL", "NO_BACKUP", "STALE_BACKUP", "MISSING_IMAGE", "NO_MACHINES", "LOW_MEMORY", "ENVOY_GATEWAY_NOT_INSTALLED", "GATEWAY_NOT_PROGRAMMED", "ROUTE_NOT_ACCEPTED", "ROUTE_BACKEND_UNRESOLVED", "BACKEND_NO_READY_ENDPOINTS"] {
             seen.insert(extra.to_owned());
         }
         for c in CODES {
@@ -1310,5 +1519,143 @@ mod tests {
         std::fs::write(d.path().join("a.qcow2"), b"x").unwrap();
         assert!(newest_mtime(d.path()).unwrap() > 1_700_000_000);
         assert_eq!(newest_mtime(&d.path().join("missing")), None);
+    }
+
+    // ---- Gateway API ----
+
+    fn cond(status: &str, observed: Option<i64>) -> Option<GwCondition> {
+        Some(GwCondition { status: status.into(), observed_generation: observed, message: Some("because".into()) })
+    }
+
+    fn gw(envoy: bool, programmed: Option<GwCondition>) -> GatewayFact {
+        GatewayFact { namespace: "web".into(), name: "edge".into(), envoy, generation: Some(2), programmed }
+    }
+
+    fn route(accepted: Option<GwCondition>, resolved: Option<GwCondition>, ready: Option<u64>) -> RouteFact {
+        RouteFact {
+            namespace: "web".into(),
+            name: "shop".into(),
+            envoy: true,
+            generation: Some(2),
+            parents: vec![RouteParentFact { gateway: "edge".into(), accepted, resolved_refs: resolved }],
+            backends: vec![BackendFact { namespace: "web".into(), service: "shop".into(), ready_endpoints: ready }],
+        }
+    }
+
+    fn healthy_gateway() -> GatewayFacts {
+        GatewayFacts {
+            cluster: "dev".into(),
+            controller_present: Some(true),
+            gateways: vec![gw(true, cond("True", Some(2)))],
+            routes: vec![route(cond("True", Some(2)), cond("True", Some(2)), Some(2))],
+        }
+    }
+
+    fn codes_of(f: &GatewayFacts) -> Vec<String> {
+        gateway_items(f).into_iter().filter_map(|i| i.explain).collect()
+    }
+
+    #[test]
+    fn a_healthy_gateway_setup_and_an_empty_cluster_give_no_items() {
+        assert!(gateway_items(&healthy_gateway()).is_empty());
+        assert!(gateway_items(&GatewayFacts::default()).is_empty());
+        // Envoy Gateway absent is not a problem when nothing uses it, or when it could not be read.
+        let none_needed = GatewayFacts { controller_present: Some(false), ..Default::default() };
+        assert!(gateway_items(&none_needed).is_empty());
+        let other_class = GatewayFacts { controller_present: Some(false), gateways: vec![gw(false, cond("False", Some(2)))], ..Default::default() };
+        assert_eq!(codes_of(&other_class), ["GATEWAY_NOT_PROGRAMMED"]);
+        let unknown = GatewayFacts { controller_present: None, ..healthy_gateway() };
+        assert!(gateway_items(&unknown).is_empty());
+    }
+
+    #[test]
+    fn a_missing_controller_is_said_once_and_hides_its_symptoms() {
+        let mut f = healthy_gateway();
+        f.controller_present = Some(false);
+        f.gateways[0].programmed = cond("False", Some(2));
+        f.routes[0].parents[0].accepted = cond("False", Some(2));
+        let items = gateway_items(&f);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].explain.as_deref(), Some("ENVOY_GATEWAY_NOT_INSTALLED"));
+        assert_eq!(items[0].severity, Severity::Fail);
+        assert_eq!(items[0].message, "1 Gateway and 1 route need Envoy Gateway, which is not running on dev");
+        assert_eq!(items[0].fix.as_ref().unwrap().command.as_deref(), Some("fluxctl kube cluster platform envoy-gateway dev"));
+    }
+
+    #[test]
+    fn each_failing_condition_has_its_own_code_and_a_command() {
+        let mut f = healthy_gateway();
+        f.gateways[0].programmed = cond("False", Some(2));
+        assert_eq!(codes_of(&f), ["GATEWAY_NOT_PROGRAMMED"]);
+        let i = &gateway_items(&f)[0];
+        assert_eq!(i.cause.as_deref(), Some("because"));
+        assert_eq!(i.fix.as_ref().unwrap().command.as_deref(), Some("kubectl describe gateway edge -n web"));
+
+        let mut f = healthy_gateway();
+        f.routes[0].parents[0].accepted = cond("False", Some(2));
+        assert_eq!(codes_of(&f), ["ROUTE_NOT_ACCEPTED"]);
+        assert_eq!(gateway_items(&f)[0].fix.as_ref().unwrap().command.as_deref(), Some("fluxctl gateway inspect shop -n web --cluster dev"));
+
+        let mut f = healthy_gateway();
+        f.routes[0].parents[0].resolved_refs = cond("False", Some(2));
+        assert_eq!(codes_of(&f), ["ROUTE_BACKEND_UNRESOLVED"]);
+
+        let mut f = healthy_gateway();
+        f.routes[0].backends[0].ready_endpoints = Some(0);
+        let items = gateway_items(&f);
+        assert_eq!(codes_of(&f), ["BACKEND_NO_READY_ENDPOINTS"]);
+        assert_eq!(items[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn a_stale_condition_is_not_yet_reconciled_not_failed() {
+        let mut f = healthy_gateway();
+        f.gateways[0].programmed = cond("False", Some(1));
+        f.routes[0].parents[0].accepted = cond("False", Some(1));
+        f.routes[0].parents[0].resolved_refs = cond("False", None);
+        assert!(gateway_items(&f).is_empty());
+        // Not written at all, or Unknown, is also "not yet".
+        f.gateways[0].programmed = None;
+        f.routes[0].parents[0].accepted = cond("Unknown", Some(2));
+        assert!(gateway_items(&f).is_empty());
+        // An unreadable endpoint count is not "zero".
+        f.routes[0].backends[0].ready_endpoints = None;
+        assert!(gateway_items(&f).is_empty());
+    }
+
+    #[test]
+    fn a_rejected_route_does_not_also_complain_about_its_backend_and_backends_are_listed_once() {
+        let mut f = healthy_gateway();
+        f.routes[0].parents[0].accepted = cond("False", Some(2));
+        f.routes[0].backends[0].ready_endpoints = Some(0);
+        assert_eq!(codes_of(&f), ["ROUTE_NOT_ACCEPTED"]);
+        let mut f = healthy_gateway();
+        f.routes[0].backends[0].ready_endpoints = Some(0);
+        let mut second = f.routes[0].clone();
+        second.name = "shop2".into();
+        f.routes.push(second);
+        assert_eq!(codes_of(&f), ["BACKEND_NO_READY_ENDPOINTS"]);
+    }
+
+    #[test]
+    fn gateway_items_are_valid_items_and_join_the_cluster_health() {
+        let mut f = healthy_gateway();
+        f.gateways[0].programmed = cond("False", Some(2));
+        f.routes[0].backends[0].ready_endpoints = Some(0);
+        let items = gateway_items(&f);
+        for i in &items {
+            assert!(super::code(i.explain.as_deref().unwrap()).is_some());
+            assert!(i.fix.as_ref().unwrap().consistent());
+            assert!(!i.fix.as_ref().unwrap().safe, "a gateway fix is never applied automatically");
+        }
+        let h = assess_with(&[mac("m")], items, NOW);
+        assert_eq!(h.light, Severity::Fail);
+        assert!(h.headline.starts_with("m is healthy, but 2 problems need attention in the cluster"), "{}", h.headline);
+        assert_eq!(h.items.len(), 2);
+        assert!(h.items.iter().all(|i| i.id.starts_with("cluster/")));
+        assert_eq!(h.next_action.machine.as_deref(), Some("cluster"));
+        assert!(h.next_action.text.contains("kubectl describe gateway edge -n web"));
+        // no gateway problems: identical to the plain assessment
+        assert_eq!(assess_with(&[mac("m")], vec![], NOW), assess(&[mac("m")], NOW));
     }
 }

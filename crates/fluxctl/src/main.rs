@@ -1053,7 +1053,7 @@ enum Command {
         #[command(subcommand)]
         command: recipes::RecipeCommand,
     },
-    /// Gateway API on Envoy Gateway: `publish` a listener to 127.0.0.1, `explain` one request step by step (dns, tcp, tls, http,
+    /// Gateway API on Envoy Gateway: `expose` a Service in one command (and `unexpose`, `list`), or `publish` a listener to 127.0.0.1, `explain` one request step by step (dns, tcp, tls, http,
     /// backend), `check` a file of such probes, `inspect` an HTTPRoute, and a `demo`. Install Envoy Gateway with
     /// `kube apple create --addons envoy-gateway`. Ported from Zyvor Setura. See docs/gateway.md.
     Gateway {

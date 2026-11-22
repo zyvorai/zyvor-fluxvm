@@ -6,6 +6,33 @@ This is a port of **Zyvor Setura 0.1.0**, the Python developer CLI from Zyvor, i
 
 > Status: unit-tested with loopback HTTP and TLS servers and a fake `kubectl`, and **run once on a live FluxVM cluster** (a single-node k3s v1.37.2 in a QEMU/KVM guest on an x86-64 Linux host, Envoy Gateway v1.10.0): `platform envoy-gateway`, `demo apply`, `publish`, `explain`, `check`, `inspect` and `demo teardown` all worked after the two fixes described under [What the live run found](#what-the-live-run-found). Not run: macOS guests, HTTPS listeners, a second cluster, MetalLB.
 
+## Quick start: one command
+
+```
+fluxctl gateway expose web -n shop --cluster dev
+```
+
+This is all most people need. For the Service `web` in namespace `shop` it:
+
+1. checks that Envoy Gateway is on the cluster. If not it asks one question (`Install it now? [y/N]`); `--yes` skips the question. With no terminal and no `--yes` it fails and prints the exact command to run. On a FluxVM cluster (`--cluster NAME`) it installs the pinned add-on; on another cluster it prints the `helm install` command instead.
+2. creates a GatewayClass `fluxvm-envoy` only if the cluster has no GatewayClass for Envoy Gateway, then an EnvoyProxy (ClusterIP), a Gateway `fx-web` and an HTTPRoute `fx-web` in `shop`, routing `web.localhost` to the Service. Every object has the label `app.kubernetes.io/managed-by=fluxctl-gateway`.
+3. waits for the Gateway to be Programmed, picks the first free local port from 8080 (a real bind, not a guess; `--local-port N` to choose, and a taken port is an error that says so), and prints the URL and a `curl --resolve` line.
+4. forwards until Ctrl-C. If the proxy pod is replaced the forward ends; fluxctl says so on stderr, finds the Service again and reconnects with a backoff (it gives up after a dozen quick failures in a row).
+
+```
+fluxctl gateway list                         # what fluxctl exposed: host, route accepted?, gateway ready?
+fluxctl gateway unexpose web -n shop         # remove it
+fluxctl gateway expose web -n shop --dry-run # print the objects and commands, run nothing
+```
+
+Options: `--port SERVICE_PORT` (needed when the Service has several), `--host NAME` (default `SERVICE.localhost`), `--cluster NAME` or `--kube-context CTX`. `unexpose` and `list` only ever look at, or delete, objects with the managed-by label above; an object named `fx-web` that you made yourself is left alone, and `expose` refuses to overwrite it. `unexpose` keeps the shared GatewayClass and Envoy Gateway. Each exposed Service gets its own Envoy proxy.
+
+`*.localhost` names resolve to this machine in most browsers; fluxctl has not verified that for any particular one. If yours does not, use the printed `curl --resolve HOST:PORT:127.0.0.1 http://HOST:PORT/`.
+
+Errors say what to do next: no `kubectl` (how to install it), no reachable cluster (`--cluster` / `--kube-context`), Envoy Gateway missing and declined, Service not found (`kubectl -n NS get services`), port in use.
+
+> Status of `expose`, `unexpose`, `list` and the `publish` changes below: written with a fake kubectl and loopback-socket unit tests; **not run against a live cluster**.
+
 ## Install Envoy Gateway on a FluxVM k3s cluster
 
 ```
@@ -64,7 +91,7 @@ To open the demo in a browser add a temporary hosts entry `127.0.0.1 orders.flux
 fluxctl gateway publish dev -n fluxvm-gateway-demo --listener web [--port 8080] [--proxy-namespace envoy-gateway-system] [--dry-run]
 ```
 
-Reads the Gateway, requires the named listener to be HTTP or HTTPS, then finds the Services in the proxy namespace labelled `gateway.envoyproxy.io/owning-gateway-name` and `...-namespace` that expose a TCP port equal to the listener's port. It needs exactly one; zero or several is an error. It then replaces itself with `kubectl -n envoy-gateway-system port-forward --address 127.0.0.1 service/NAME LOCAL:PORT`, so Ctrl-C goes to kubectl. It listens on IPv4 loopback only. The forward ends when you stop it or the proxy pod exits; run it again after the pod is replaced. `--dry-run` does the lookup (reads only) and prints the command.
+Reads the Gateway, requires the named listener to be HTTP or HTTPS, then finds the Services in the proxy namespace labelled `gateway.envoyproxy.io/owning-gateway-name` and `...-namespace` that expose a TCP port equal to the listener's port. It needs exactly one; zero or several is an error. It then replaces itself with `kubectl -n envoy-gateway-system port-forward --address 127.0.0.1 service/NAME LOCAL:PORT`, so Ctrl-C goes to kubectl. It listens on IPv4 loopback only. The forward ends when you stop it or the proxy pod exits; run it again after the pod is replaced. `--dry-run` does the lookup (reads only) and prints the command. Without `--port` it uses the first free local port from 8080 (a real bind test); an explicit `--port` that is taken is refused before anything runs. When kubectl exits because the proxy pod was replaced, `publish` says so on stderr, finds the Service again and reconnects with a backoff instead of exiting (Ctrl-C still stops it; exit codes 0, 1, 2 as before). The `--port` default of 8080 is gone: use `--port N` to pin one.
 
 ## `gateway explain URL`
 
@@ -135,3 +162,15 @@ Prints JSON for an HTTPRoute: its generation; for each parent the controller and
 
 macOS guests (Apple Virtualization), HTTPS listeners and `--ca`, MetalLB, more than one cluster, and Envoy Gateway versions other than
 v1.10.0 on k3s versions other than v1.37.2.
+
+## In Studio
+
+The Kubernetes page has a **Gateways** tab for each cluster. It lists the Gateways with their listeners and the HTTPRoutes attached
+to them, each with a status in plain words: "Ready", "Waiting for the controller" (the controller has not yet seen the latest edit) or
+"Not accepted: <reason>". Backends show how many endpoints are ready. Every route row has a "Copy as fluxctl" button
+(`fluxctl gateway inspect ROUTE -n NS`). With no Gateways the tab explains how to start: `fluxctl gateway expose SERVICE`, which
+installs Envoy Gateway on first use.
+
+The data comes from `GET /v1/kube/{cluster}/gateways` (`schema: 1`): read-only, objects only (never Secrets), through the same client
+certificate as the Workloads tab. If the cluster cannot be read the answer carries `error` with a sentence and the next command
+instead of failing. Not compiled, type-checked or rendered when this section was written.

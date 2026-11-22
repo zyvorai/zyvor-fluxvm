@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+Gateway API from one command ([docs/gateway.md](docs/gateway.md#quick-start-one-command)). Unit-tested with a fake kubectl and loopback sockets; **not compiled by the author and not run on a live cluster when this entry was written**.
+
+- New `fluxctl gateway expose SERVICE [-n NS] [--port N] [--host NAME] [--local-port N] [--cluster NAME | --kube-context CTX] [--yes] [--dry-run]`: installs Envoy Gateway if missing (one yes/no question; `--yes` skips it; no terminal and no `--yes` fails with the command to run), creates a GatewayClass if needed, an EnvoyProxy, a Gateway and an HTTPRoute labelled `app.kubernetes.io/managed-by=fluxctl-gateway`, waits for Programmed, forwards a free local port and prints the URL (`SERVICE.localhost`) with a `curl --resolve` fallback.
+- New `gateway unexpose SERVICE` and `gateway list`; both only touch objects with that label.
+- `gateway publish`: without `--port` it picks a free local port (real bind test) instead of failing on 8080, and when the forward dies because the proxy pod was replaced it finds the Service again and reconnects with a backoff instead of exiting.
+- Plain-English errors with the next command for: kubectl missing, no reachable cluster, Envoy Gateway missing and declined, Service not found, port in use.
+
+Gateway problems in the cluster health model ([docs/cluster-home.md](docs/cluster-home.md#gateways-problems-with-your-gateway-api-setup)). Unit-tested with fixtures; **not compiled when this entry was written**.
+
+- New health codes `ENVOY_GATEWAY_NOT_INSTALLED` (only when Envoy-class Gateways or routes exist without the controller), `GATEWAY_NOT_PROGRAMMED`, `ROUTE_NOT_ACCEPTED`, `ROUTE_BACKEND_UNRESOLVED`, `BACKEND_NO_READY_ENDPOINTS`, with plain-English causes and command fixes for `fluxctl explain` (`explain --list` counts them). Stale conditions (`observedGeneration` behind `generation`) are "not yet reconciled", not failures.
+- `fluxctl cluster status` and `fluxctl fix` read the Gateways of each `~/.kube/fluxvm-NAME.yaml` cluster (read-only; never the default kubeconfig) and report them as cluster items. New `fluxvm_core::health::{GatewayFacts, gateway_items, assess_with}`; additive `Cluster::facts` in `gateway/kube.rs`.
+
+- Studio: a Gateways tab on the Kubernetes page (Gateways, listeners, attached HTTPRoutes, plain-English status, ready endpoint counts, "Copy as fluxctl") backed by the new read-only `GET /v1/kube/{cluster}/gateways` (`schema: 1`; an unreachable cluster is an `error` field with the next command). Parsing is unit-tested with fixtures; **not compiled, type-checked or rendered when this entry was written**. See [docs/gateway.md](docs/gateway.md#in-studio).
+
 Live run on a Linux host (single-node k3s v1.37.2 in a QEMU/KVM guest, Envoy Gateway v1.10.0) found and fixed two bugs ([docs/gateway.md](docs/gateway.md#what-the-live-run-found)):
 
 - `kube cluster create` on Linux failed with `no address on the private network card`: the unit script required the macOS-only `10.89.x.y` card. A guest without it now uses its default-route address and card for `--node-ip` and flannel (`UnitOpts.private_net`, set from the backend).

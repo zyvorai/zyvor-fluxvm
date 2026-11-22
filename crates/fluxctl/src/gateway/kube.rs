@@ -392,14 +392,122 @@ impl<'a> Cluster<'a> {
     }
 }
 
-/// Replaces this process with the command, so signals (Ctrl-C) go straight to kubectl. Only returns on failure.
-pub fn exec_forward(command: &[String]) -> anyhow::Error {
-    use std::os::unix::process::CommandExt;
-    let Some((program, args)) = command.split_first() else {
-        return anyhow!("empty command");
-    };
-    let err = Command::new(program).args(args).exec();
-    anyhow!("could not run {program}: {err}")
+// ---- health facts -----------------------------------------------------------------------------------------------------
+
+const ENVOY_CONTROLLER: &str = "gateway.envoyproxy.io/gatewayclass-controller";
+
+fn items_of(v: &Value) -> &[Value] {
+    v["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[])
+}
+
+fn condition(conditions: &Value, kind: &str) -> Option<fluxvm_core::health::GwCondition> {
+    conditions
+        .as_array()?
+        .iter()
+        .find(|c| c["type"].as_str() == Some(kind))
+        .map(|c| fluxvm_core::health::GwCondition {
+            status: c["status"].as_str().unwrap_or("Unknown").to_owned(),
+            observed_generation: c["observedGeneration"].as_i64(),
+            message: c["message"].as_str().filter(|m| !m.is_empty()).map(str::to_owned),
+        })
+}
+
+impl Cluster<'_> {
+    /// What the health model needs to know about this cluster's Gateways, HTTPRoutes and their backends. Read-only.
+    /// `None` when the cluster cannot be read or has no Gateway API, which is nothing to report. `cluster` is the FluxVM
+    /// cluster name used in the fix commands.
+    pub fn facts(&self, cluster: &str) -> Option<fluxvm_core::health::GatewayFacts> {
+        use fluxvm_core::health::{BackendFact, GatewayFact, GatewayFacts, RouteFact, RouteParentFact};
+        let list = |resource: &str, all_namespaces: bool| -> Result<Value, GetErr> {
+            let mut rest = vec!["get", resource];
+            if all_namespaces {
+                rest.push("-A");
+            }
+            rest.extend(["-o", "json", "--request-timeout=10s"]);
+            let out = self
+                .runner
+                .run(&self.args(&rest), None, Duration::from_secs(20))
+                .map_err(GetErr::Failed)?;
+            if out.code != 0 {
+                return Err(GetErr::Failed(out.stderr.trim().to_owned()));
+            }
+            serde_json::from_str(&out.stdout).map_err(|e| GetErr::Failed(e.to_string()))
+        };
+        let gateways = list("gateways.gateway.networking.k8s.io", true).ok()?;
+        let classes = list("gatewayclasses.gateway.networking.k8s.io", false).unwrap_or(Value::Null);
+        let envoy_classes: BTreeSet<&str> = items_of(&classes)
+            .iter()
+            .filter(|c| c["spec"]["controllerName"].as_str() == Some(ENVOY_CONTROLLER))
+            .filter_map(|c| c["metadata"]["name"].as_str())
+            .collect();
+        let mut out = GatewayFacts { cluster: cluster.to_owned(), ..Default::default() };
+        for g in items_of(&gateways) {
+            out.gateways.push(GatewayFact {
+                namespace: g["metadata"]["namespace"].as_str().unwrap_or("default").to_owned(),
+                name: g["metadata"]["name"].as_str().unwrap_or("").to_owned(),
+                envoy: g["spec"]["gatewayClassName"].as_str().is_some_and(|c| envoy_classes.contains(c)),
+                generation: g["metadata"]["generation"].as_i64(),
+                programmed: condition(&g["status"]["conditions"], "Programmed"),
+            });
+        }
+        let routes = list("httproutes.gateway.networking.k8s.io", true).unwrap_or(Value::Null);
+        let mut checked: std::collections::BTreeMap<(String, String), Option<u64>> = Default::default();
+        for r in items_of(&routes).iter().take(200) {
+            let ns = r["metadata"]["namespace"].as_str().unwrap_or("default");
+            let envoy = r["spec"]["parentRefs"].as_array().is_some_and(|p| {
+                p.iter().any(|p| {
+                    let pns = p["namespace"].as_str().unwrap_or(ns);
+                    out.gateways.iter().any(|g| g.envoy && g.namespace == pns && Some(g.name.as_str()) == p["name"].as_str())
+                })
+            });
+            let mut route = RouteFact {
+                namespace: ns.to_owned(),
+                name: r["metadata"]["name"].as_str().unwrap_or("").to_owned(),
+                envoy,
+                generation: r["metadata"]["generation"].as_i64(),
+                ..Default::default()
+            };
+            for p in r["status"]["parents"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                route.parents.push(RouteParentFact {
+                    gateway: p["parentRef"]["name"].as_str().unwrap_or("?").to_owned(),
+                    accepted: condition(&p["conditions"], "Accepted"),
+                    resolved_refs: condition(&p["conditions"], "ResolvedRefs"),
+                });
+            }
+            for rule in r["spec"]["rules"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                for b in rule["backendRefs"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                    let (kind, group) = (b["kind"].as_str().unwrap_or("Service"), b["group"].as_str().unwrap_or(""));
+                    let (Some(name), true) = (b["name"].as_str(), (kind, group) == ("Service", "")) else { continue };
+                    let bns = b["namespace"].as_str().unwrap_or(ns).to_owned();
+                    if route.backends.iter().any(|x| x.namespace == bns && x.service == name) {
+                        continue;
+                    }
+                    // At most 50 Services are looked up, so a huge cluster cannot make `cluster status` slow.
+                    let ready = match checked.get(&(bns.clone(), name.to_owned())) {
+                        Some(v) => *v,
+                        None if checked.len() >= 50 => None,
+                        None => {
+                            let v = self.service_evidence(&bns, name, Value::Null).ok().and_then(|(_, c)| {
+                                let ready = c["true"].as_u64()?;
+                                // Only a definite zero: endpoints with unknown readiness are not "not ready".
+                                (c["unknown"].as_u64() == Some(0) || ready > 0).then_some(ready)
+                            });
+                            checked.insert((bns.clone(), name.to_owned()), v);
+                            v
+                        }
+                    };
+                    route.backends.push(BackendFact { namespace: bns, service: name.to_owned(), ready_endpoints: ready });
+                }
+            }
+            out.routes.push(route);
+        }
+        out.controller_present = match self.get("envoy-gateway-system", "deployment/envoy-gateway", &[]) {
+            Ok(d) => Some(d["status"]["availableReplicas"].as_u64().unwrap_or(0) > 0),
+            Err(GetErr::Failed(m)) if m.contains("NotFound") || m.contains("not found") => Some(false),
+            Err(_) => None,
+        };
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -696,5 +804,44 @@ mod tests {
             shell_join(&v),
             "kubectl --context 'my ctx' -n envoy 8080:80 'it'\\''s'"
         );
+    }
+
+    #[test]
+    fn facts_read_gateways_routes_backends_and_the_controller() {
+        let gateways = json!({"items": [{"metadata": {"namespace": "web", "name": "edge", "generation": 2},
+            "spec": {"gatewayClassName": "eg"},
+            "status": {"conditions": [{"type": "Programmed", "status": "False", "observedGeneration": 2, "message": "no address"}]}}]});
+        let classes = json!({"items": [{"metadata": {"name": "eg"}, "spec": {"controllerName": "gateway.envoyproxy.io/gatewayclass-controller"}}]});
+        let routes = json!({"items": [{"metadata": {"namespace": "web", "name": "shop", "generation": 3},
+            "spec": {"parentRefs": [{"name": "edge"}], "rules": [{"backendRefs": [{"name": "shop", "port": 80}, {"name": "shop", "port": 80}]}]},
+            "status": {"parents": [{"parentRef": {"name": "edge"}, "conditions": [
+                {"type": "Accepted", "status": "True", "observedGeneration": 3},
+                {"type": "ResolvedRefs", "status": "False", "observedGeneration": 2}]}]}}]});
+        let f = FakeKubectl::default()
+            .json(gateways)
+            .json(classes)
+            .json(routes)
+            .json(json!({"spec": {"ports": [{"port": 80}]}}))
+            .json(json!({"items": [{"endpoints": [{"conditions": {"ready": false}}]}]}))
+            .text(1, "", "Error from server (NotFound): deployments.apps \"envoy-gateway\" not found");
+        let facts = cluster(&f, None).facts("dev").unwrap();
+        assert_eq!(facts.cluster, "dev");
+        assert_eq!(facts.controller_present, Some(false));
+        assert!(facts.gateways[0].envoy);
+        assert_eq!(facts.gateways[0].programmed.as_ref().unwrap().observed_generation, Some(2));
+        assert!(facts.routes[0].envoy);
+        assert_eq!(facts.routes[0].backends.len(), 1);
+        assert_eq!(facts.routes[0].backends[0].ready_endpoints, Some(0));
+        assert_eq!(facts.routes[0].parents[0].resolved_refs.as_ref().unwrap().observed_generation, Some(2));
+        // reads only
+        assert!(f.argvs().iter().all(|a| a.contains(" get ")), "{:?}", f.argvs());
+    }
+
+    #[test]
+    fn facts_are_none_when_the_cluster_has_no_gateway_api_or_cannot_be_read() {
+        let f = FakeKubectl::default().text(1, "", "error: the server doesn't have a resource type \"gateways\"");
+        assert!(cluster(&f, None).facts("dev").is_none());
+        let f = FakeKubectl::default().fail("kubectl did not finish within 20 seconds");
+        assert!(cluster(&f, None).facts("dev").is_none());
     }
 }
