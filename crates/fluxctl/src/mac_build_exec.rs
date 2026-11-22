@@ -34,8 +34,8 @@ pub fn check_supported(steps: &[Step]) -> Result<()> {
                 "step {} (line {line}): SNAPSHOT is not supported by `mac build`: a saved running state cannot be moved to another Mac. Remove it from the Macfile",
                 i + 1
             ),
-            Step::InstallIpswLatest => bail!(
-                "step {}: `FROM IPSW latest` is not supported by `mac build` yet: start from a template (`fluxctl mac import` or `mac pull`)",
+            Step::InstallIpswLatest | Step::InstallIpswPath { .. } => bail!(
+                "step {}: `FROM IPSW ...` is not supported by `mac build` yet: start from a template (`fluxctl mac import` or `mac pull`). `fluxctl mac ipsw` prints the unattended install plan and what it needs",
                 i + 1
             ),
             _ => {}
@@ -75,7 +75,7 @@ pub async fn execute<H: BuildHost>(host: &mut H, steps: &[Step]) -> Result<()> {
                     .await
             }
             Step::StoreTemplate => host.stop_and_store().await,
-            Step::InstallIpswLatest | Step::Snapshot { .. } => unreachable!("checked above"),
+            Step::InstallIpswLatest | Step::InstallIpswPath { .. } | Step::Snapshot { .. } => unreachable!("checked above"),
         };
         if let Err(e) = r {
             outcome = Err(e.context(format!("build failed at step {n} ({what})")));

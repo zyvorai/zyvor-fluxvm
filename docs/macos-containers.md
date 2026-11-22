@@ -156,7 +156,7 @@ One directive per line, `#` comment lines on their own line, a trailing `\` cont
 
 | Directive | Meaning |
 |---|---|
-| `FROM name:tag` | The template to clone. (`FROM IPSW latest` is parsed and refused by `build`.) |
+| `FROM name:tag` | The template to clone. `FROM IPSW latest` and `FROM IPSW /abs/path.ipsw` are parsed and validated, and `build` refuses to run them: see [IPSW installs](#ipsw-installs-from-ipsw). |
 | `USER name` | The SSH user for later `RUN`/`COPY`/`ADD`, and the image's default user for `run`. |
 | `RUN cmd` | Run over SSH, verbatim. |
 | `COPY src dst` | `scp -r` from the build context. A relative `dst` is under the current `WORKDIR`. Honors `.macignore`. |
@@ -167,7 +167,7 @@ One directive per line, `#` comment lines on their own line, a trailing `\` cont
 | `LABEL k=v ...` | Recorded in the image config (shown by `image inspect`). |
 | `EXPOSE port[/tcp\|udp] ...` | Recorded only. It does not publish anything: use `run -p`. |
 | `CMD ...`, `ENTRYPOINT ...` | Exec form (`["a","b"]`) or shell form. Recorded; `run IMAGE` with no `--` runs `ENTRYPOINT` then `CMD`, and words after `--` replace `CMD`. |
-| `HEALTHCHECK [--interval=D] [--timeout=D] [--retries=N] CMD ...` or `NONE` | **Recorded only; nothing runs it**, and `compose` `depends_on` does not wait for it. |
+| `HEALTHCHECK [--interval=D] [--timeout=D] [--retries=N] CMD ...` or `NONE` | Recorded in the image and **run over SSH** by `mac health`, `run --wait-healthy`, `compose` `condition: service_healthy` and `mac supervise` (see [Operations](#operations-health-restart-ttl-verify)). |
 | `SNAPSHOT tag` | Parsed; `build` refuses it. |
 
 `ENV`, `ARG` and `WORKDIR` are folded into each `RUN` as `export K='v'; cd 'dir' && cmd`, so `mac build --dry-run` shows exactly what
@@ -210,9 +210,18 @@ at that service, naming what it already started).
 - `mac compose down` deletes the project's instances, dependents first. `mac compose ps [-a]` lists them.
 - File: `mac-compose.yaml`, `.yml` or `.json` in the directory, or `-f`. The project name is `-p`, else `name:`, else the directory.
 - Keys: `image`, `command` (string = shell text, list = argv), `environment` (map or list), `env_file`, `ports` (`HOST:GUEST`),
-  `volumes` (`./host:/guest[:ro]`, relative to the file), `working_dir`, `depends_on` (list, or map whose `condition` is ignored),
-  `labels`, `restart`, `cpus`, `mem_limit`, `user`. **An unknown key (`build`, `networks`, `deploy`, ...) is an error**, not skipped.
-- `depends_on` orders the start and waits for SSH. It does not wait for a healthcheck.
+  `volumes` (`./host:/guest[:ro]`, relative to the file), `working_dir`, `depends_on` (list, or map with a `condition`),
+  `labels`, `restart`, `cpus`, `mem_limit`, `user`, `build`, `profiles`. **An unknown key (`networks`, `deploy`, ...) is an error**, not skipped.
+- `depends_on` orders the start and waits for SSH. With `condition: service_healthy` it also waits (up to 10 minutes) for the dependency's
+  image HEALTHCHECK to pass; the dependency's image must have one (`up --dry-run` checks it), otherwise it is an error. Any other
+  condition means "started".
+- `build: ./dir` or `build: {context, dockerfile, args}` (`dockerfile` names the Macfile, `args` are `--build-arg`s): `up` runs `mac build`
+  for a service whose image is not in the store, or for every such service with `up --build`. Without `image:` the result is tagged
+  `PROJECT-SERVICE:latest`. Paths are relative to the compose file.
+- `profiles: [debug]` makes a service optional: `up --profile debug` (repeatable) or `COMPOSE_PROFILES=debug,x` selects it. The 2-VM
+  refusal counts the **selected** services and says so; `down`, `ps`, `logs`, `exec` and `restart` consider every profile.
+- `mac compose logs SERVICE [--tail N] [-F]` (the VM's console log), `mac compose exec SERVICE [--user U] -- CMD` (over SSH) and
+  `mac compose restart [SERVICE...]` act on the project's instances. `-f FILE` and `-p/--project-name NAME` work on every subcommand.
 
 ## Shell completions
 
@@ -397,6 +406,62 @@ registries, including Docker Hub and GHCR, do not serve the catalog; the error s
 A JSON contents manifest of the template bundle: every file (`disk.raw`, `hardware.bin`, `auxiliary.bin`, `config.json`) with size and sha256, plus the registry digest, labels and
 build history. `--to FILE` writes it; `--attach REGISTRY_REF` publishes it as a referrer (`application/vnd.zyvor.fluxvm.contents.v1+json`). It does
 **not** list the files inside the guest's disk, so it is not an SPDX/CycloneDX software inventory. Hashing reads the sparse `disk.raw` at its full size: minutes for a 64 GiB disk.
+
+## Operations: health, restart, TTL, verify
+
+All of these are unit-tested against fakes (state machines, back-off, expiry, selection). **None was run against a real daemon or a macOS VM**:
+the SSH probe, the launchd calls and the label PATCHes are unverified.
+
+### Healthcheck (enforced)
+
+A Macfile `HEALTHCHECK` is stored in the image. The command runs **in the guest over SSH from the Mac that drives it** (not inside the daemon).
+The state lives in VM labels (`fluxvm.mac.health`, `.health.streak`, `.health.checked`) so it survives the process and shows in
+`mac inspect` as `state.health` (`status` `starting`, `healthy` or `unhealthy`, `failing_streak`, `last_check_unix`). Semantics follow Docker: `starting` until the
+first success, `healthy` after one, `unhealthy` after `--retries` consecutive failures; a success resets the streak.
+
+- `mac health NAME [--json]`: probe once now, record, print. Exit 1 unless healthy.
+- `mac run --wait-healthy [--health-timeout SECS]`: after the instance is up, block until healthy (probing at most every 2 s); fails on unhealthy, on a
+  stopped instance, on timeout, and when the image has no HEALTHCHECK. (Not `--wait healthy`: `--wait` is already the SSH wait in seconds.) Cannot be combined with `--rm`.
+- `compose` `depends_on: {db: {condition: service_healthy}}`: see Compose.
+- `mac supervise` probes instances when their interval is due.
+
+### `mac supervise`: restart policies that are enforced
+
+The daemon never restarts a macOS VM, so `mac run --restart` was a label. `fluxctl mac supervise [--interval 15] [--once] [--dry-run] [--no-reap]` is the loop that
+acts on it: each pass it starts instances whose policy says so (`always`; `unless-stopped` unless `mac stop` marked it; `on-failure` for `failed`), with an exponential
+back-off per instance (5 s doubling to 5 min, reset once the instance runs; a failed start such as a 409 is reported and retried later), runs due healthchecks, and reaps
+expired TTLs. `on-failure:N` is accepted, the count is not enforced. A transient daemon error does not end the loop.
+`mac supervise --install [--daemon URL] [--daemon-context NAME] [--interval S]` writes `~/Library/LaunchAgents/dev.zyvor.fluxvm.mac-supervise.plist` (RunAtLoad, KeepAlive, log
+`~/Library/Logs/fluxvm-mac-supervise.log`) and loads it; `--status` and `--uninstall` complete it. No sudo. The plist never holds a token: use a context, or the
+agent inherits only `$FLUXVM_URL`.
+
+### TTL and ownership: `mac run --ttl`, `mac reap`, `mac ttl`
+
+Every `mac run` instance is stamped `fluxvm.mac.owner` (`$USER`) and `fluxvm.mac.created`; `--ttl 2h` (`90s`, `30m`, `2h`, `1d`) adds `fluxvm.mac.expires` (unix seconds, counted from when
+the run started; the labels are written after the run returns, so a foreground command that never ends is not covered). `mac reap [--dry-run] [--all | --owner NAME]` deletes expired instances: yours by default,
+`--all` every owner's (and ownerless ones). `mac supervise` reaps on every pass unless `--no-reap`. `mac ttl NAME 2h|none` changes or clears it. `mac ps -f label=fluxvm.mac.owner=NAME` filters by owner.
+A reaper deletes the VM and its disk: it is a safety net for forgotten CI instances, not a pause.
+
+### `mac run --verify`
+
+Before any VM is created, checks the local image against the signatures kept when it was pulled or pushed, using the trust store (`mac keys trust`); an unsigned, untrusted or
+invalid image is refused. `FLUXVM_MAC_REQUIRE_SIGNED=1` makes it the default. It needs a registry-backed image (a plain `import` has no digest). Limits: it verifies the manifest digest recorded in the
+store, not the bytes of `disk.raw` now on disk; it does not apply with `--fleet`.
+
+### Image usage
+
+`mac run` records when each image was last used (`last-used.json` in the store). `mac images --usage` shows allocated size (the disk is sparse), apparent size, last use and age; `mac images --json`
+gains `allocated_bytes`, `added_unix` and `last_used_unix`. `mac image prune --keep-last N [--dry-run] [-f]` keeps, per repository, the N most recently used tags and untags the rest (files go
+with the last name; build-cache entries are left to `mac cache prune`). Instances keep their own disk clones, but health and `exec` read the image's config from the store.
+
+### IPSW installs: `FROM IPSW`
+
+`FROM IPSW latest` and `FROM IPSW /absolute/path.ipsw` parse (a bad selector says "only 'latest', or an absolute path to a .ipsw file"), and `mac build` still **refuses to run them**.
+`fluxctl mac ipsw [latest|PATH] [--disk-gib 64] [--user admin]` validates the source (a path must exist, be a zip and be several GB) and prints the unattended order, marking each phase as
+`have` (in the daemon: `apple.install`, `provision_*`, `fluxctl vz ipsw`; run once on an M4 per docs/macos.md), `partial` (scripts) or `MISSING`:
+resolve the IPSW, create the sparse disk (at least 40 GiB), run the installer, provision the admin account with no one at the console, first boot and SSH, authorize the daemon key and install the agent,
+disable sleep and the screen lock, shut down and store the template, then the Macfile steps. What still needs hardware: wiring that sequence as a build step, and running the whole chain on a Mac
+with an unlocked session and about 90 GB free; nothing here has done that.
 
 ## Hard limits
 

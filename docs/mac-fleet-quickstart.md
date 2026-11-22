@@ -9,6 +9,8 @@ a k3s guest on each. Nothing is pulled by a script you cannot read, nothing blin
 > Linux hosts too, or a Mac as a node of a cluster you started with `install.sh --server`? See the
 > [Cluster quickstart](cluster-quickstart.md): `fluxctl cluster add user@host` is the Linux counterpart of `mac-fleet up`.
 
+For a step-by-step run from two bare Macs to a 2-node k3s, see [tutorial-mac-fleet-k3s.md](tutorial-mac-fleet-k3s.md). On one Mac, `fluxctl mac quickstart` is the guided way in.
+
 ## Three commands
 
 ```bash

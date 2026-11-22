@@ -68,6 +68,11 @@ pub enum ImageCommand {
         /// Do not ask.
         #[arg(short = 'f', long)]
         force: bool,
+        /// Per repository, keep the N most recently used tags and untag the rest (store only; build-cache entries are left to
+        /// `mac cache prune`). Last use is recorded by `mac run`; an image never run counts from when it was added. Instances keep
+        /// their own disk clones, but `mac health` and `mac exec` read the image's config, which goes with the image.
+        #[arg(long, value_name = "N", conflicts_with = "all")]
+        keep_last: Option<usize>,
     },
     /// How an image was built (same as `mac history`).
     History { reference: String },
@@ -571,9 +576,23 @@ pub fn run_client(cmd: MacMore) -> Result<()> {
         MacMore::Image {
             command:
                 ImageCommand::Prune {
+                    keep_last: Some(n),
+                    dry_run,
+                    force,
+                    ..
+                },
+        } => {
+            let store = open_store()?;
+            let unused = crate::mac_imgstat::beyond_keep_last(&store, n)?;
+            prune_store(&store, &unused, dry_run, force)?;
+        }
+        MacMore::Image {
+            command:
+                ImageCommand::Prune {
                     all: false,
                     dry_run,
                     force,
+                    ..
                 },
         } => {
             prune_store(&open_store()?, &[], dry_run, force)?;
@@ -952,6 +971,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                     all: true,
                     dry_run,
                     force,
+                    ..
                 },
         } => {
             let items = instances(r).await?;
@@ -963,7 +983,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
             let unused = ops::unused_images(&store, &used)?;
             prune_store(&store, &unused, dry_run, force)?;
         }
-        MacMore::Compose { command } => crate::mac_compose::run_daemon(r, command).await?,
+        MacMore::Compose { command } => Box::pin(crate::mac_compose::run_daemon(r, command)).await?,
         _ => bail!("not an instance command"),
     }
     Ok(())
