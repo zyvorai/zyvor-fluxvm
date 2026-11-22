@@ -2553,12 +2553,33 @@ mod tests {
 
     #[test]
     fn a_held_lock_is_detected_without_being_taken() {
+        // A flock belongs to the open file, so a child another test forks in this process (before its exec closes the
+        // descriptor) briefly holds a lock it never asked for. Retry for a moment instead of failing on that window; a
+        // lock that is really held stays held and still fails the assertion below.
+        fn settle(want_held: bool, dir: &std::path::Path) -> bool {
+            for _ in 0..100 {
+                if SuperviseLock::is_held_in(dir, "dev") == want_held {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            false
+        }
         let dir = std::env::temp_dir().join(format!("fluxvm-held-test-{}", std::process::id()));
-        assert!(!SuperviseLock::is_held_in(&dir, "dev"));
-        let g = SuperviseLock::acquire_in(&dir, "dev").unwrap();
+        assert!(settle(false, &dir), "the lock should start free");
+        let started = std::time::Instant::now();
+        let g = loop {
+            match SuperviseLock::acquire_in(&dir, "dev") {
+                Ok(g) => break g,
+                Err(_) if started.elapsed() < std::time::Duration::from_secs(2) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("could not take a free lock: {e}"),
+            }
+        };
         assert!(SuperviseLock::is_held_in(&dir, "dev"));
         drop(g);
-        assert!(!SuperviseLock::is_held_in(&dir, "dev"));
+        assert!(settle(false, &dir), "the lock should be free again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
