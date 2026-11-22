@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Host-safety overrides:** `FLUXVM_SKIP_SESSION_CHECK=1` skips the locked-session check before a restore, and `FLUXVM_IGNORE_THERMAL=1` admits a new `vz` VM on a throttled Mac (logged, with an `admission.override` audit event). Both accept `1`, `true`, `yes` or `on`; anything else leaves the guard on. The refusal messages now name the override.
+
 - Saving a macOS VM now asks the runner (`save-support`) first and refuses with the framework reason before any snapshot directory is made; an old runner never blocks a save. The `fluxctl mac` template store records the macOS build each template was added on (`Store::host_build`), not yet read by any command. Unit-tested; not run on a real Mac.
 - **`kube apple platform` extras:** `prometheus-stack NAME [--retention]` (a k3s `HelmChart`, chart 93.6.1, contents fetched by the cluster, not hash-checked), `storage-local-path NAME [--class --retain --default --apply]`, `storage-longhorn` (guidance text only, installs nothing) and `kairon-label NAME --label KEY=VALUE [--node N]` (adds the `kairon.zyvor.dev/` prefix). Not applied to a real cluster; generators are unit-tested with a fake remote.
 

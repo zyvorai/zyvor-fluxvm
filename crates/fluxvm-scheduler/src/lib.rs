@@ -2799,10 +2799,28 @@ impl VmManager {
                 thermal_limit: limit,
                 ..Default::default()
             };
-            if let Some(why) = health.admission_blockers().into_iter().next() {
+            let ignore_thermal = fluxvm_apple::host_health::env_flag_set(
+                fluxvm_apple::host_health::IGNORE_THERMAL_ENV,
+            );
+            if ignore_thermal && let Some(why) = health.admission_blockers().into_iter().next() {
+                audit_event(
+                    "admission.override",
+                    &[("scope", "thermal"), ("reason", &why)],
+                );
+                tracing::warn!(
+                    "this Mac is {why}; admitting the VM anyway because {} is set",
+                    fluxvm_apple::host_health::IGNORE_THERMAL_ENV
+                );
+            }
+            if let Some(why) = health
+                .admission_blockers_unless(ignore_thermal)
+                .into_iter()
+                .next()
+            {
                 audit_event("admission.deny", &[("scope", "thermal"), ("reason", &why)]);
                 bail!(
-                    "this Mac is {why}; retry when `pmset -g therm` shows no speed limit, or place the VM on another Mac"
+                    "this Mac is {why}; retry when `pmset -g therm` shows no speed limit, place the VM on another Mac, or set {}=1 on the daemon to admit it anyway",
+                    fluxvm_apple::host_health::IGNORE_THERMAL_ENV
                 );
             }
         }

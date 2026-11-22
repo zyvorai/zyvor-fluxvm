@@ -39,6 +39,8 @@ All of these read state without sudo and change no host setting.
   Templates are cold-booted disks and are not affected.
 - **Locked-session guard.** Before restoring saved state the launch reads the console session. If it is locked or at the login window it fails
   with "restoring saved VM state needs an unlocked login session ... run `fluxctl mac host headless-check`". Cold boots are not blocked.
+  If the check is wrong for a Mac (for example the lock signal reads wrong on a headless setup), set `FLUXVM_SKIP_SESSION_CHECK=1` on the
+  daemon: the restore is then attempted and the log notes that the check was skipped.
 - **`mac-fleet doctor` / `status`.** The probe runs `fluxctl mac host headless-check --json` on each Mac over ssh. `doctor` prints one
   `headless` warning per failing check; `status` has a SESSION column (`unlocked`, `locked`, `login window`, or `-` for an older install).
 - **Heartbeat facts and placement.** `fluxvm-agent node` adds an optional `health` object to its Apple capabilities (`session_unlocked`,
@@ -46,7 +48,8 @@ All of these read state without sudo and change no host setting.
   `apple_placement::score` rejects a Mac throttled below 80% or with under 5 GiB free, ranks a locked-session Mac last and a Mac whose sleep
   is not held slightly lower. Unknown never counts against a Mac.
 - **Thermal admission.** Creating a `vz` VM on a Mac whose `pmset -g therm` shows `CPU_Speed_Limit` below 80 is refused, with an
-  `admission.deny` audit event.
+  `admission.deny` audit event. `FLUXVM_IGNORE_THERMAL=1` on the daemon admits the VM anyway; each override is logged and writes an
+  `admission.override` audit event so it is visible afterwards.
 - **Keep-awake only while a VM runs (opt-in).** `FLUXVM_KEEPAWAKE_WHILE_RUNNING=1` on the daemon holds `caffeinate -i -m -s -w <pid>` while
   a `vz` VM runs and releases it after the last stops (checked on the reaper tick). Off by default.
 - **Automatic macOS updates.** `status` shows `AutomaticallyInstallMacOSUpdates`; `headless-check` warns when it is on.

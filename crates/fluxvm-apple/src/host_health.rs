@@ -188,6 +188,24 @@ pub fn on_build_mismatch_from(value: Option<&str>) -> OnBuildMismatch {
     }
 }
 
+/// Environment variable that skips the locked-session check on restore (`1`, `true`, `yes` or `on`).
+pub const SKIP_SESSION_CHECK_ENV: &str = "FLUXVM_SKIP_SESSION_CHECK";
+/// Environment variable that lets a throttled Mac take a new VM anyway (`1`, `true`, `yes` or `on`).
+pub const IGNORE_THERMAL_ENV: &str = "FLUXVM_IGNORE_THERMAL";
+
+/// Whether an override variable's value turns it on. Anything else, including unset, empty and `0`, leaves the guard on.
+pub fn env_flag(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// Whether `name` is set to an enabled value in this process's environment.
+pub fn env_flag_set(name: &str) -> bool {
+    env_flag(std::env::var(name).ok().as_deref())
+}
+
 /// The message for a restore across macOS builds.
 pub fn mismatch_message(saved: &str, host: &str) -> String {
     format!(
@@ -200,12 +218,22 @@ pub fn mismatch_message(saved: &str, host: &str) -> String {
 pub fn locked_message() -> String {
     format!(
         "restoring saved VM state needs an unlocked login session and this Mac's session is locked; unlock it (or enable \
-         automatic login) and retry, and run `{HEADLESS_CHECK_HINT}` to see what to change"
+         automatic login) and retry, and run `{HEADLESS_CHECK_HINT}` to see what to change. If the check is wrong for this Mac, \
+         set {SKIP_SESSION_CHECK_ENV}=1 on the daemon to skip it"
     )
 }
 
 /// Decisions for placement and admission over published facts.
 impl HostHealth {
+    /// [`Self::admission_blockers`], or nothing when the operator set `FLUXVM_IGNORE_THERMAL` (`ignore_thermal`).
+    pub fn admission_blockers_unless(&self, ignore_thermal: bool) -> Vec<String> {
+        if ignore_thermal {
+            Vec::new()
+        } else {
+            self.admission_blockers()
+        }
+    }
+
     /// Reasons this Mac should not get a new VM right now. Unknown facts never count.
     pub fn admission_blockers(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -223,6 +251,40 @@ impl HostHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn override_variables_turn_on_only_for_explicit_values() {
+        for on in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(env_flag(Some(on)), "{on:?} should enable the override");
+        }
+        for off in ["", "0", "false", "no", "off", "2", "enable"] {
+            assert!(!env_flag(Some(off)), "{off:?} must not enable the override");
+        }
+        assert!(!env_flag(None));
+    }
+
+    #[test]
+    fn the_override_names_are_the_documented_ones() {
+        assert_eq!(SKIP_SESSION_CHECK_ENV, "FLUXVM_SKIP_SESSION_CHECK");
+        assert_eq!(IGNORE_THERMAL_ENV, "FLUXVM_IGNORE_THERMAL");
+        assert!(locked_message().contains(SKIP_SESSION_CHECK_ENV));
+    }
+
+    #[test]
+    fn a_throttled_mac_is_admitted_only_with_the_thermal_override() {
+        let hot = HostHealth {
+            thermal_limit: Some(50),
+            ..Default::default()
+        };
+        assert_eq!(
+            hot.admission_blockers_unless(false),
+            hot.admission_blockers()
+        );
+        assert!(!hot.admission_blockers_unless(false).is_empty());
+        assert!(hot.admission_blockers_unless(true).is_empty());
+        let cool = HostHealth::default();
+        assert!(cool.admission_blockers_unless(false).is_empty());
+    }
 
     const IOREG_LOCKED: &str = include_str!("host_health_fixtures/ioreg_locked.txt");
     const IOREG_UNLOCKED: &str = include_str!("host_health_fixtures/ioreg_unlocked.txt");
