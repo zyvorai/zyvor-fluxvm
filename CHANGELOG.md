@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+Mac compose gaps filled ([docs/macos-containers.md](docs/macos-containers.md#compose)). Unit-tested with fixtures; **not run against a daemon or a real macOS VM**.
+
+- `mac compose up --no-build` (a `build:` service with no image in the store is an error), `up --wait-healthy` (after the last service started, wait until every service whose image has a HEALTHCHECK is healthy) and `up --health-timeout SECS` (also bounds the `service_healthy` waits, which were fixed at 600 s).
+- `depends_on` conditions are validated when the file is read: `service_completed_successfully` and unknown conditions are refused with a reason instead of being treated as "started", and a dependency on a service in a profile that is not enabled names the `--profile` to pass.
+- Instances created by `compose up` now carry `fluxvm.mac.owner` and `fluxvm.mac.created`, like `mac run`.
+
 - **guestkit pin repointed to the `v1` tag.** `packaging/guestkit.ref` and every workflow checkout named `v1.2.9`, a tag guestkit never published (its only tag is `v1`, on a commit whose `Cargo.toml` says 1.3.1, the version `Cargo.lock` records), so every CI job that checks guestkit out failed at checkout. `scripts/check-guestkit-pin.sh` now also accepts a major tag like `v1` (it must match the lock's major version; the checkout is still verified against the tag).
 
 Gateway API from one command ([docs/gateway.md](docs/gateway.md#quick-start-one-command)). Unit-tested with a fake kubectl and loopback sockets; **not compiled by the author and not run on a live cluster when this entry was written**.
