@@ -508,7 +508,7 @@ pub async fn after_create<H: Host>(
     for add in &plan.install {
         // Only "envoy-gateway" exists; the plan builder never produces another name.
         let done = recipes::envoy_gateway(&r, PinSrc::Download).await.map_err(|e| {
-            anyhow::anyhow!("{name} was created, but Envoy Gateway was not installed: {e:#}; run `fluxctl kube apple platform envoy-gateway {name}`")
+            anyhow::anyhow!("{name} was created, but Envoy Gateway was not installed: {e:#}; run `fluxctl kube cluster platform envoy-gateway {name}`")
         })?;
         rep.installed.push(format!("{add} {}", done.version));
         rep.notes.extend(done.notes);

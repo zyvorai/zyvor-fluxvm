@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas, checkpointLabelNow, checkpointLabelOk, checkpointsOf, serviceUrls, backendText, exposeCommand, gatewayTone } from './kube';
+import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas, checkpointLabelNow, checkpointLabelOk, checkpointsOf, serviceUrls, backendText, exposeCommand, gatewayTone, installGatewayCommand } from './kube';
 
 const pod = (name: string, status: string, over: Partial<KubePod> = {}): KubePod => ({
   namespace: 'default', name, status, phase: null, ready: '1/1', restarts: 0, node: 'n1', pod_ip: '10.42.0.5', created: null, ...over,
@@ -171,5 +171,7 @@ describe('gateways', () => {
     expect(backendText({ namespace: 'shop', name: 'api', port: 8080, ready_endpoints: 2 })).toBe('api:8080 (2 ready)');
     expect(backendText({ namespace: 'shop', name: 'api', port: null, ready_endpoints: 0 })).toBe('api (none ready)');
     expect(exposeCommand('web')).toBe('fluxctl gateway expose web');
+    expect(installGatewayCommand('dev')).toBe('fluxctl kube cluster platform envoy-gateway dev');
+    expect(installGatewayCommand("a b'c")).toBe("fluxctl kube cluster platform envoy-gateway 'a b'\\''c'");
   });
 });
