@@ -171,6 +171,9 @@ pub enum MacCommand {
     },
     #[command(flatten)]
     Plus(crate::mac_plus::MacPlus),
+    /// `quickstart`/`setup`, `cheatsheet` and shell completion: the easy way in.
+    #[command(flatten)]
+    Ux(crate::mac_ux::MacUx),
 }
 
 impl MacCommand {
@@ -181,7 +184,7 @@ impl MacCommand {
             // The fleet scheduler talks to the Macs over ssh, not to a daemon from here.
             Self::Run { sched, .. } => sched.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
-            Self::Plus(_) => true,
+            Self::Plus(_) | Self::Ux(_) => true,
             _ => !matches!(
                 self,
                 Self::Run { .. }
@@ -783,6 +786,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         }
         MacCommand::More(m) => return crate::mac_more::run_client(m),
         MacCommand::Plus(p) => return crate::mac_plus::run(&store, p).await,
+        MacCommand::Ux(u) => return crate::mac_ux::run(u).await,
         MacCommand::Import { dir, reference } => {
             check_template(&dir)?;
             let key = mac_store::normalize(&reference)?;

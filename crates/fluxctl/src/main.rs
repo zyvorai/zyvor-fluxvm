@@ -86,6 +86,7 @@ mod mac_build_exec;
 mod mac_cache;
 mod mac_cmd;
 mod mac_errors;
+mod mac_ux;
 mod mac_compose;
 mod mac_config;
 mod mac_cp;
