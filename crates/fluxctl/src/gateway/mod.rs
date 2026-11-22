@@ -40,7 +40,10 @@ pub struct Target {
 
 impl Target {
     fn selection(&self) -> Selection {
-        Selection { kube_context: self.kube_context.clone(), cluster: self.cluster.clone() }
+        Selection {
+            kube_context: self.kube_context.clone(),
+            cluster: self.cluster.clone(),
+        }
     }
 }
 
@@ -154,14 +157,26 @@ pub fn run(cmd: GatewayCommand) -> i32 {
 
 fn cluster_for<'a>(t: &Target, runner: &'a dyn KubeRun) -> Result<Cluster<'a>> {
     let sel = t.selection();
-    let home = if sel.cluster.is_some() { Some(crate::docker_host::home()?) } else { None };
+    let home = if sel.cluster.is_some() {
+        Some(crate::docker_host::home()?)
+    } else {
+        None
+    };
     Ok(Cluster::new(sel.prefix(home.as_deref())?, runner))
 }
 
 /// [`run`] with a replaceable kubectl and output, for the tests.
 pub fn execute(cmd: GatewayCommand, runner: &dyn KubeRun, out: &mut dyn Write) -> Result<i32> {
     match cmd {
-        GatewayCommand::Publish { gateway, listener, namespace, proxy_namespace, port, dry_run, target } => {
+        GatewayCommand::Publish {
+            gateway,
+            listener,
+            namespace,
+            proxy_namespace,
+            port,
+            dry_run,
+            target,
+        } => {
             let c = cluster_for(&target, runner)?;
             let command = c.publication(&namespace, &gateway, &listener, &proxy_namespace, port)?;
             if dry_run {
@@ -172,13 +187,37 @@ pub fn execute(cmd: GatewayCommand, runner: &dyn KubeRun, out: &mut dyn Write) -
             // Only returns when kubectl could not be started.
             Err(kube::exec_forward(&command))
         }
-        GatewayCommand::Inspect { route, namespace, target } => {
+        GatewayCommand::Inspect {
+            route,
+            namespace,
+            target,
+        } => {
             let c = cluster_for(&target, runner)?;
-            writeln!(out, "{}", serde_json::to_string_pretty(&c.inspect(&namespace, &route)?)?)?;
+            writeln!(
+                out,
+                "{}",
+                serde_json::to_string_pretty(&c.inspect(&namespace, &route)?)?
+            )?;
             Ok(0)
         }
-        GatewayCommand::Explain { url, address, backend, ca, status, timeout, json } => {
-            let report = probe(&ProbeOpts { url, address, ca, status, backend, timeout }).map_err(|e| anyhow!(e))?;
+        GatewayCommand::Explain {
+            url,
+            address,
+            backend,
+            ca,
+            status,
+            timeout,
+            json,
+        } => {
+            let report = probe(&ProbeOpts {
+                url,
+                address,
+                ca,
+                status,
+                backend,
+                timeout,
+            })
+            .map_err(|e| anyhow!(e))?;
             if json {
                 writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
             } else {
@@ -193,18 +232,45 @@ pub fn execute(cmd: GatewayCommand, runner: &dyn KubeRun, out: &mut dyn Write) -
         }
         GatewayCommand::Demo { command } => match command {
             DemoCommand::Print { checks } => {
-                write!(out, "{}", if checks { demo::CHECKS } else { demo::MANIFEST })?;
+                write!(
+                    out,
+                    "{}",
+                    if checks { demo::CHECKS } else { demo::MANIFEST }
+                )?;
                 Ok(0)
             }
-            DemoCommand::Apply { dry_run, yes, target } => demo_run(demo::Action::Apply, &target, dry_run, yes, runner, out),
-            DemoCommand::Teardown { dry_run, yes, target } => demo_run(demo::Action::Teardown, &target, dry_run, yes, runner, out),
+            DemoCommand::Apply {
+                dry_run,
+                yes,
+                target,
+            } => demo_run(demo::Action::Apply, &target, dry_run, yes, runner, out),
+            DemoCommand::Teardown {
+                dry_run,
+                yes,
+                target,
+            } => demo_run(demo::Action::Teardown, &target, dry_run, yes, runner, out),
         },
     }
 }
 
-fn demo_run(action: demo::Action, target: &Target, dry_run: bool, yes: bool, runner: &dyn KubeRun, out: &mut dyn Write) -> Result<i32> {
+fn demo_run(
+    action: demo::Action,
+    target: &Target,
+    dry_run: bool,
+    yes: bool,
+    runner: &dyn KubeRun,
+    out: &mut dyn Write,
+) -> Result<i32> {
     let c = cluster_for(target, runner)?;
-    demo::run(action, &target.selection(), &c.cmd, dry_run, yes, runner, out)?;
+    demo::run(
+        action,
+        &target.selection(),
+        &c.cmd,
+        dry_run,
+        yes,
+        runner,
+        out,
+    )?;
     Ok(0)
 }
 
@@ -222,13 +288,22 @@ struct Case {
 /// Reads and runs a check file. Any invalid case (or a probe argument that is invalid) is an error before anything is printed.
 fn check(path: &str) -> Result<Vec<probe::Report>> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
-    let cases: Vec<Case> = serde_json::from_str(&text).map_err(|e| anyhow!("invalid check file {path}: {e}; see `fluxctl gateway demo print --checks`"))?;
+    let cases: Vec<Case> = serde_json::from_str(&text).map_err(|e| {
+        anyhow!("invalid check file {path}: {e}; see `fluxctl gateway demo print --checks`")
+    })?;
     if cases.is_empty() {
         bail!("check file must be a nonempty JSON array");
     }
     let mut reports = vec![];
     for c in cases {
-        let opts = ProbeOpts { url: c.url, address: c.address, ca: c.ca, status: c.status.unwrap_or(200), backend: c.backend, timeout: c.timeout.unwrap_or(4.0) };
+        let opts = ProbeOpts {
+            url: c.url,
+            address: c.address,
+            ca: c.ca,
+            status: c.status.unwrap_or(200),
+            backend: c.backend,
+            timeout: c.timeout.unwrap_or(4.0),
+        };
         reports.push(probe(&opts).map_err(|e| anyhow!(e))?);
     }
     Ok(reports)
@@ -239,7 +314,7 @@ mod tests {
     use super::kube::fake::FakeKubectl;
     use super::*;
     use clap::{CommandFactory, Parser};
-    use std::io::{Read, Write as _};
+    use std::io::Read;
     use std::net::TcpListener;
 
     #[derive(Parser)]
@@ -255,7 +330,8 @@ mod tests {
         std::thread::spawn(move || {
             for _ in 0..n {
                 let Ok((mut s, _)) = l.accept() else { return };
-                s.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+                s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .ok();
                 let mut buf = Vec::new();
                 let mut b = [0u8; 512];
                 while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -290,16 +366,33 @@ mod tests {
     #[test]
     fn arguments_parse_with_setura_defaults() {
         match parse(&["publish", "dev", "--listener", "web", "--dry-run"]).unwrap() {
-            GatewayCommand::Publish { namespace, proxy_namespace, port, dry_run, .. } => {
-                assert_eq!((namespace.as_str(), proxy_namespace.as_str(), port, dry_run), ("default", "envoy-gateway-system", 8080, true));
+            GatewayCommand::Publish {
+                namespace,
+                proxy_namespace,
+                port,
+                dry_run,
+                ..
+            } => {
+                assert_eq!(
+                    (namespace.as_str(), proxy_namespace.as_str(), port, dry_run),
+                    ("default", "envoy-gateway-system", 8080, true)
+                );
             }
             _ => panic!(),
         }
         match parse(&["explain", "http://x/", "--status", "404", "--json"]).unwrap() {
-            GatewayCommand::Explain { status, timeout, json, .. } => assert_eq!((status, timeout, json), (404, 4.0, true)),
+            GatewayCommand::Explain {
+                status,
+                timeout,
+                json,
+                ..
+            } => assert_eq!((status, timeout, json), (404, 4.0, true)),
             _ => panic!(),
         }
-        assert!(parse(&["publish", "dev"]).is_err(), "--listener is required");
+        assert!(
+            parse(&["publish", "dev"]).is_err(),
+            "--listener is required"
+        );
         assert!(parse(&["demo", "apply", "--dry-run", "--cluster", "dev"]).is_ok());
     }
 
@@ -308,10 +401,26 @@ mod tests {
         let f = FakeKubectl::default()
             .json(serde_json::json!({"spec": {"listeners": [{"name": "web", "protocol": "HTTP", "port": 8080}]}}))
             .json(serde_json::json!({"items": [{"metadata": {"name": "envoy-demo-dev-1a2b"}, "spec": {"ports": [{"port": 8080}]}}]}));
-        let cmd = parse(&["publish", "dev", "-n", "demo", "--listener", "web", "--port", "9080", "--dry-run", "--kube-context", "lab"]).unwrap();
+        let cmd = parse(&[
+            "publish",
+            "dev",
+            "-n",
+            "demo",
+            "--listener",
+            "web",
+            "--port",
+            "9080",
+            "--dry-run",
+            "--kube-context",
+            "lab",
+        ])
+        .unwrap();
         let (code, out) = run_ok(cmd, &f);
         assert_eq!(code, 0);
-        assert_eq!(out.trim(), "kubectl --context lab -n envoy-gateway-system port-forward --address 127.0.0.1 service/envoy-demo-dev-1a2b 9080:8080");
+        assert_eq!(
+            out.trim(),
+            "kubectl --context lab -n envoy-gateway-system port-forward --address 127.0.0.1 service/envoy-demo-dev-1a2b 9080:8080"
+        );
         // only reads: two gets, no port-forward
         assert!(f.argvs().iter().all(|a| a.contains(" get ")));
     }
@@ -332,10 +441,33 @@ mod tests {
         let port = serve(2);
         let url = format!("http://orders.mactra.test:{port}/checkout?q=1");
         let f = FakeKubectl::default();
-        let (code, text) = run_ok(parse(&["explain", &url, "--address", "127.0.0.1", "--backend", "orders-v1"]).unwrap(), &f);
+        let (code, text) = run_ok(
+            parse(&[
+                "explain",
+                &url,
+                "--address",
+                "127.0.0.1",
+                "--backend",
+                "orders-v1",
+            ])
+            .unwrap(),
+            &f,
+        );
         assert_eq!(code, 0, "{text}");
         assert!(text.starts_with("dns      overridden"));
-        let (code, json) = run_ok(parse(&["explain", &url, "--address", "127.0.0.1", "--status", "204", "--json"]).unwrap(), &f);
+        let (code, json) = run_ok(
+            parse(&[
+                "explain",
+                &url,
+                "--address",
+                "127.0.0.1",
+                "--status",
+                "204",
+                "--json",
+            ])
+            .unwrap(),
+            &f,
+        );
         assert_eq!(code, 1);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["ok"], false);
@@ -343,7 +475,14 @@ mod tests {
         assert_eq!(v["steps"]["backend"]["state"], "unused");
         // usage error: exit 2 path is an Err from execute
         let mut out = Vec::<u8>::new();
-        assert!(execute(parse(&["explain", "file:///etc/passwd"]).unwrap(), &f, &mut out).is_err());
+        assert!(
+            execute(
+                parse(&["explain", "file:///etc/passwd"]).unwrap(),
+                &f,
+                &mut out
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -365,7 +504,15 @@ mod tests {
     fn invalid_check_files_are_usage_errors() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("cases.json");
-        for bad in ["[]", "{}", "not json", r#"[{"address": "127.0.0.1"}]"#, r#"[{"url": "http://h/", "bogus": 1}]"#, r#"[{"url": "http://h/", "status": "200"}]"#, r#"[{"url": "ftp://h/"}]"#] {
+        for bad in [
+            "[]",
+            "{}",
+            "not json",
+            r#"[{"address": "127.0.0.1"}]"#,
+            r#"[{"url": "http://h/", "bogus": 1}]"#,
+            r#"[{"url": "http://h/", "status": "200"}]"#,
+            r#"[{"url": "ftp://h/"}]"#,
+        ] {
             std::fs::write(&path, bad).unwrap();
             assert!(check(path.to_str().unwrap()).is_err(), "{bad}");
         }
@@ -379,9 +526,15 @@ mod tests {
         assert!(manifest.contains("kind: HTTPRoute"));
         let (_, checks) = run_ok(parse(&["demo", "print", "--checks"]).unwrap(), &f);
         assert!(checks.contains("orders-v1"));
-        let (code, out) = run_ok(parse(&["demo", "teardown", "--dry-run", "--kube-context", "lab"]).unwrap(), &f);
+        let (code, out) = run_ok(
+            parse(&["demo", "teardown", "--dry-run", "--kube-context", "lab"]).unwrap(),
+            &f,
+        );
         assert_eq!(code, 0);
         assert!(out.contains("kubectl --context lab delete -f -"));
-        assert!(f.calls.borrow().is_empty(), "dry runs and print never call kubectl");
+        assert!(
+            f.calls.borrow().is_empty(),
+            "dry runs and print never call kubectl"
+        );
     }
 }

@@ -26,18 +26,32 @@ pub struct RunOut {
 /// Runs one program with arguments (and optional stdin) and returns what it printed. `Err` means it could not be run or
 /// passed its deadline.
 pub trait KubeRun {
-    fn run(&self, argv: &[String], stdin: Option<&[u8]>, deadline: Duration) -> Result<RunOut, String>;
+    fn run(
+        &self,
+        argv: &[String],
+        stdin: Option<&[u8]>,
+        deadline: Duration,
+    ) -> Result<RunOut, String>;
 }
 
 /// The kubectl on `PATH`, run without a shell.
 pub struct SystemKubectl;
 
 impl KubeRun for SystemKubectl {
-    fn run(&self, argv: &[String], stdin: Option<&[u8]>, deadline: Duration) -> Result<RunOut, String> {
+    fn run(
+        &self,
+        argv: &[String],
+        stdin: Option<&[u8]>,
+        deadline: Duration,
+    ) -> Result<RunOut, String> {
         let (program, args) = argv.split_first().ok_or("empty command")?;
         let mut child = Command::new(program)
             .args(args)
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -65,7 +79,10 @@ impl KubeRun for SystemKubectl {
             Err(_) => {
                 // SAFETY: plain kill(2) on the child this function started.
                 unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                Err(format!("{program} did not finish within {} seconds", deadline.as_secs()))
+                Err(format!(
+                    "{program} did not finish within {} seconds",
+                    deadline.as_secs()
+                ))
             }
         }
     }
@@ -91,17 +108,27 @@ pub fn label(value: &str) -> Result<&str, GetErr> {
     let b = value.as_bytes();
     let ok = !b.is_empty()
         && b.len() <= 63
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
         && b[0] != b'-'
         && b[b.len() - 1] != b'-';
-    if ok { Ok(value) } else { Err(GetErr::Invalid(format!("expected Kubernetes DNS label, got {value:?}"))) }
+    if ok {
+        Ok(value)
+    } else {
+        Err(GetErr::Invalid(format!(
+            "expected Kubernetes DNS label, got {value:?}"
+        )))
+    }
 }
 
 /// Quotes an argument for display in a shell command line, only where it needs it.
 pub fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|a| {
-            if !a.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&b)) {
+            if !a.is_empty()
+                && a.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&b))
+            {
                 a.clone()
             } else {
                 format!("'{}'", a.replace('\'', "'\\''"))
@@ -155,7 +182,11 @@ impl<'a> Cluster<'a> {
     }
 
     fn args(&self, rest: &[&str]) -> Vec<String> {
-        self.cmd.iter().cloned().chain(rest.iter().map(|s| (*s).to_owned())).collect()
+        self.cmd
+            .iter()
+            .cloned()
+            .chain(rest.iter().map(|s| (*s).to_owned()))
+            .collect()
     }
 
     /// `kubectl -n NS get RESOURCE OPTIONS -o json`, parsed.
@@ -163,31 +194,59 @@ impl<'a> Cluster<'a> {
         let mut rest = vec!["-n", label(namespace)?, "get", resource];
         rest.extend_from_slice(options);
         rest.extend(["-o", "json", "--request-timeout=10s"]);
-        let out = self.runner.run(&self.args(&rest), None, Duration::from_secs(20)).map_err(GetErr::Failed)?;
+        let out = self
+            .runner
+            .run(&self.args(&rest), None, Duration::from_secs(20))
+            .map_err(GetErr::Failed)?;
         if out.code != 0 {
             let msg = out.stderr.trim();
-            return Err(GetErr::Failed(if msg.is_empty() { format!("kubectl get {resource} failed") } else { msg.to_owned() }));
+            return Err(GetErr::Failed(if msg.is_empty() {
+                format!("kubectl get {resource} failed")
+            } else {
+                msg.to_owned()
+            }));
         }
-        serde_json::from_str(&out.stdout).map_err(|e| GetErr::Failed(format!("kubectl get {resource}: not JSON: {e}")))
+        serde_json::from_str(&out.stdout)
+            .map_err(|e| GetErr::Failed(format!("kubectl get {resource}: not JSON: {e}")))
     }
 
     /// The `kubectl port-forward` command that publishes one listener of a Gateway on `127.0.0.1`. Finds the single Envoy
     /// Service Envoy Gateway generated for the Gateway that exposes the listener's port.
-    pub fn publication(&self, namespace: &str, gateway: &str, listener: &str, proxy_namespace: &str, local_port: i64) -> Result<Vec<String>> {
+    pub fn publication(
+        &self,
+        namespace: &str,
+        gateway: &str,
+        listener: &str,
+        proxy_namespace: &str,
+        local_port: i64,
+    ) -> Result<Vec<String>> {
         if !(1..=65535).contains(&local_port) {
             bail!("local port must be between 1 and 65535");
         }
         let obj = self
-            .get(namespace, &format!("gateway.gateway.networking.k8s.io/{}", label(gateway).map_err(|e| anyhow!("{e}"))?), &[])
+            .get(
+                namespace,
+                &format!(
+                    "gateway.gateway.networking.k8s.io/{}",
+                    label(gateway).map_err(|e| anyhow!("{e}"))?
+                ),
+                &[],
+            )
             .map_err(|e| anyhow!("{e}"))?;
         let target = obj["spec"]["listeners"]
             .as_array()
             .and_then(|l| l.iter().find(|x| x["name"].as_str() == Some(listener)))
             .filter(|t| matches!(t["protocol"].as_str(), Some("HTTP" | "HTTPS")))
             .ok_or_else(|| anyhow!("choose an existing HTTP or HTTPS listener"))?;
-        let port = target["port"].as_i64().ok_or_else(|| anyhow!("the listener has no port"))?;
-        let selector = format!("gateway.envoyproxy.io/owning-gateway-name={gateway},gateway.envoyproxy.io/owning-gateway-namespace={namespace}");
-        let services = self.get(proxy_namespace, "services", &["-l", &selector]).map_err(|e| anyhow!("{e}"))?;
+        let port = target["port"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("the listener has no port"))?;
+        let selector = format!(
+            "gateway.envoyproxy.io/owning-gateway-name={gateway},gateway.envoyproxy.io/owning-gateway-namespace={namespace}"
+        );
+        let services = self
+            .get(proxy_namespace, "services", &["-l", &selector])
+            .map_err(|e| anyhow!("{e}"))?;
         let matches: Vec<&str> = services["items"]
             .as_array()
             .map(|items| items.as_slice())
@@ -195,26 +254,51 @@ impl<'a> Cluster<'a> {
             .iter()
             .filter(|s| {
                 s["spec"]["ports"].as_array().is_some_and(|ps| {
-                    ps.iter().any(|p| p["port"].as_i64() == Some(port) && p["protocol"].as_str().unwrap_or("TCP") == "TCP")
+                    ps.iter().any(|p| {
+                        p["port"].as_i64() == Some(port)
+                            && p["protocol"].as_str().unwrap_or("TCP") == "TCP"
+                    })
                 })
             })
             .filter_map(|s| s["metadata"]["name"].as_str())
             .collect();
         if matches.len() != 1 {
-            bail!("expected one Envoy Service for this listener, found {}", matches.len());
+            bail!(
+                "expected one Envoy Service for this listener, found {}",
+                matches.len()
+            );
         }
         let svc = label(matches[0]).map_err(|e| anyhow!("{e}"))?;
-        Ok(self.args(&["-n", proxy_namespace, "port-forward", "--address", "127.0.0.1", &format!("service/{svc}"), &format!("{local_port}:{port}")]))
+        Ok(self.args(&[
+            "-n",
+            proxy_namespace,
+            "port-forward",
+            "--address",
+            "127.0.0.1",
+            &format!("service/{svc}"),
+            &format!("{local_port}:{port}"),
+        ]))
     }
 
     /// An HTTPRoute's conditions per parent, whether each is current, and its Services' ready endpoint counts.
     pub fn inspect(&self, namespace: &str, route: &str) -> Result<Value> {
         let obj = self
-            .get(namespace, &format!("httproute.gateway.networking.k8s.io/{}", label(route).map_err(|e| anyhow!("{e}"))?), &[])
+            .get(
+                namespace,
+                &format!(
+                    "httproute.gateway.networking.k8s.io/{}",
+                    label(route).map_err(|e| anyhow!("{e}"))?
+                ),
+                &[],
+            )
             .map_err(|e| anyhow!("{e}"))?;
         let generation = obj["metadata"]["generation"].clone();
         let mut parents = vec![];
-        for entry in obj["status"]["parents"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        for entry in obj["status"]["parents"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
             let conditions: Vec<Value> = entry["conditions"]
                 .as_array()
                 .map(|a| a.as_slice())
@@ -222,7 +306,8 @@ impl<'a> Cluster<'a> {
                 .iter()
                 .map(|c| {
                     let mut c = c.clone();
-                    let current = c.get("observedGeneration") == Some(&generation) && !generation.is_null();
+                    let current =
+                        c.get("observedGeneration") == Some(&generation) && !generation.is_null();
                     c["current"] = json!(current);
                     c
                 })
@@ -231,9 +316,19 @@ impl<'a> Cluster<'a> {
         }
         let mut backends = vec![];
         let mut seen: BTreeSet<String> = BTreeSet::new();
-        for rule in obj["spec"]["rules"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-            for r in rule["backendRefs"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-                let name = r["name"].as_str().ok_or_else(|| anyhow!("a backendRef has no name"))?;
+        for rule in obj["spec"]["rules"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
+            for r in rule["backendRefs"]
+                .as_array()
+                .map(|a| a.as_slice())
+                .unwrap_or(&[])
+            {
+                let name = r["name"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("a backendRef has no name"))?;
                 let ns = r["namespace"].as_str().unwrap_or(namespace);
                 let kind = r["kind"].as_str().unwrap_or("Service");
                 let group = r["group"].as_str().unwrap_or("");
@@ -247,7 +342,8 @@ impl<'a> Cluster<'a> {
                     backends.push(row);
                     continue;
                 }
-                match self.service_evidence(ns, name, r.get("port").cloned().unwrap_or(Value::Null)) {
+                match self.service_evidence(ns, name, r.get("port").cloned().unwrap_or(Value::Null))
+                {
                     Ok((found, counts)) => {
                         row["service_port_found"] = json!(found);
                         row["endpoint_records_by_ready_condition"] = counts;
@@ -258,17 +354,33 @@ impl<'a> Cluster<'a> {
                 backends.push(row);
             }
         }
-        Ok(json!({"namespace": namespace, "route": route, "generation": generation, "parents": parents, "backends": backends}))
+        Ok(
+            json!({"namespace": namespace, "route": route, "generation": generation, "parents": parents, "backends": backends}),
+        )
     }
 
     fn service_evidence(&self, ns: &str, name: &str, port: Value) -> Result<(bool, Value), GetErr> {
         label(name)?;
         let svc = self.get(ns, &format!("service/{name}"), &[])?;
-        let slices = self.get(ns, "endpointslices.discovery.k8s.io", &["-l", &format!("kubernetes.io/service-name={name}")])?;
-        let found = svc["spec"]["ports"].as_array().is_some_and(|ps| ps.iter().any(|p| p["port"] == port));
+        let slices = self.get(
+            ns,
+            "endpointslices.discovery.k8s.io",
+            &["-l", &format!("kubernetes.io/service-name={name}")],
+        )?;
+        let found = svc["spec"]["ports"]
+            .as_array()
+            .is_some_and(|ps| ps.iter().any(|p| p["port"] == port));
         let (mut t, mut f, mut u) = (0u64, 0u64, 0u64);
-        for s in slices["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
-            for e in s["endpoints"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        for s in slices["items"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
+            for e in s["endpoints"]
+                .as_array()
+                .map(|a| a.as_slice())
+                .unwrap_or(&[])
+            {
                 match e["conditions"]["ready"].as_bool() {
                     Some(true) => t += 1,
                     Some(false) => f += 1,
@@ -283,7 +395,9 @@ impl<'a> Cluster<'a> {
 /// Replaces this process with the command, so signals (Ctrl-C) go straight to kubectl. Only returns on failure.
 pub fn exec_forward(command: &[String]) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
-    let Some((program, args)) = command.split_first() else { return anyhow!("empty command") };
+    let Some((program, args)) = command.split_first() else {
+        return anyhow!("empty command");
+    };
     let err = Command::new(program).args(args).exec();
     anyhow!("could not run {program}: {err}")
 }
@@ -303,11 +417,19 @@ pub mod fake {
 
     impl FakeKubectl {
         pub fn json(self, v: Value) -> Self {
-            self.answers.borrow_mut().push_back(Ok(RunOut { code: 0, stdout: v.to_string(), stderr: String::new() }));
+            self.answers.borrow_mut().push_back(Ok(RunOut {
+                code: 0,
+                stdout: v.to_string(),
+                stderr: String::new(),
+            }));
             self
         }
         pub fn text(self, code: i32, out: &str, err: &str) -> Self {
-            self.answers.borrow_mut().push_back(Ok(RunOut { code, stdout: out.into(), stderr: err.into() }));
+            self.answers.borrow_mut().push_back(Ok(RunOut {
+                code,
+                stdout: out.into(),
+                stderr: err.into(),
+            }));
             self
         }
         pub fn fail(self, msg: &str) -> Self {
@@ -315,14 +437,29 @@ pub mod fake {
             self
         }
         pub fn argvs(&self) -> Vec<String> {
-            self.calls.borrow().iter().map(|(a, _)| a.join(" ")).collect()
+            self.calls
+                .borrow()
+                .iter()
+                .map(|(a, _)| a.join(" "))
+                .collect()
         }
     }
 
     impl KubeRun for FakeKubectl {
-        fn run(&self, argv: &[String], stdin: Option<&[u8]>, _: Duration) -> Result<RunOut, String> {
-            self.calls.borrow_mut().push((argv.to_vec(), stdin.map(|b| String::from_utf8_lossy(b).into_owned())));
-            self.answers.borrow_mut().pop_front().unwrap_or_else(|| Err("unexpected kubectl call".into()))
+        fn run(
+            &self,
+            argv: &[String],
+            stdin: Option<&[u8]>,
+            _: Duration,
+        ) -> Result<RunOut, String> {
+            self.calls.borrow_mut().push((
+                argv.to_vec(),
+                stdin.map(|b| String::from_utf8_lossy(b).into_owned()),
+            ));
+            self.answers
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| Err("unexpected kubectl call".into()))
         }
     }
 }
@@ -339,26 +476,57 @@ mod tests {
         json!({"metadata": {"name": "generated-envoy"}, "spec": {"ports": [{"port": 8080}]}})
     }
     fn cluster<'a>(f: &'a FakeKubectl, context: Option<&str>) -> Cluster<'a> {
-        let sel = Selection { kube_context: context.map(str::to_owned), cluster: None };
+        let sel = Selection {
+            kube_context: context.map(str::to_owned),
+            cluster: None,
+        };
         Cluster::new(sel.prefix(None).unwrap(), f)
     }
 
     #[test]
     fn service_discovery_builds_a_loopback_port_forward() {
-        let f = FakeKubectl::default().json(gateway()).json(json!({"items": [svc()]}));
-        let cmd = cluster(&f, Some("mactra")).publication("demo", "dev", "web", "envoy", 9080).unwrap();
-        assert_eq!(cmd, ["kubectl", "--context", "mactra", "-n", "envoy", "port-forward", "--address", "127.0.0.1", "service/generated-envoy", "9080:8080"]);
+        let f = FakeKubectl::default()
+            .json(gateway())
+            .json(json!({"items": [svc()]}));
+        let cmd = cluster(&f, Some("mactra"))
+            .publication("demo", "dev", "web", "envoy", 9080)
+            .unwrap();
+        assert_eq!(
+            cmd,
+            [
+                "kubectl",
+                "--context",
+                "mactra",
+                "-n",
+                "envoy",
+                "port-forward",
+                "--address",
+                "127.0.0.1",
+                "service/generated-envoy",
+                "9080:8080"
+            ]
+        );
         let calls = f.argvs();
-        assert!(calls[1].contains("owning-gateway-name=dev") && calls[1].contains("owning-gateway-namespace=demo"));
+        assert!(
+            calls[1].contains("owning-gateway-name=dev")
+                && calls[1].contains("owning-gateway-namespace=demo")
+        );
         assert!(calls[1].contains("-n envoy get services"));
-        assert!(calls[0].contains("get gateway.gateway.networking.k8s.io/dev") && calls[0].ends_with("--request-timeout=10s"));
+        assert!(
+            calls[0].contains("get gateway.gateway.networking.k8s.io/dev")
+                && calls[0].ends_with("--request-timeout=10s")
+        );
     }
 
     #[test]
     fn a_missing_or_ambiguous_service_is_refused() {
         for items in [vec![], vec![svc(), svc()]] {
-            let f = FakeKubectl::default().json(gateway()).json(json!({"items": items}));
-            let e = cluster(&f, None).publication("demo", "dev", "web", "envoy", 8080).unwrap_err();
+            let f = FakeKubectl::default()
+                .json(gateway())
+                .json(json!({"items": items}));
+            let e = cluster(&f, None)
+                .publication("demo", "dev", "web", "envoy", 8080)
+                .unwrap_err();
             assert!(e.to_string().contains("expected one Envoy Service"), "{e}");
         }
     }
@@ -367,8 +535,12 @@ mod tests {
     fn only_a_tcp_service_on_the_listener_port_matches() {
         let udp = json!({"metadata": {"name": "dns"}, "spec": {"ports": [{"port": 8080, "protocol": "UDP"}]}});
         let other = json!({"metadata": {"name": "other"}, "spec": {"ports": [{"port": 9090}]}});
-        let f = FakeKubectl::default().json(gateway()).json(json!({"items": [udp, other, svc()]}));
-        let cmd = cluster(&f, None).publication("demo", "dev", "web", "envoy", 8080).unwrap();
+        let f = FakeKubectl::default()
+            .json(gateway())
+            .json(json!({"items": [udp, other, svc()]}));
+        let cmd = cluster(&f, None)
+            .publication("demo", "dev", "web", "envoy", 8080)
+            .unwrap();
         assert!(cmd.contains(&"service/generated-envoy".to_owned()));
         assert_eq!(cmd[0], "kubectl");
     }
@@ -376,22 +548,49 @@ mod tests {
     #[test]
     fn unknown_or_non_http_listener_and_bad_inputs_are_refused() {
         let f = FakeKubectl::default().json(gateway());
-        assert!(cluster(&f, None).publication("demo", "dev", "nope", "envoy", 8080).is_err());
-        let tcp = json!({"spec": {"listeners": [{"name": "web", "protocol": "TCP", "port": 8080}]}});
+        assert!(
+            cluster(&f, None)
+                .publication("demo", "dev", "nope", "envoy", 8080)
+                .is_err()
+        );
+        let tcp =
+            json!({"spec": {"listeners": [{"name": "web", "protocol": "TCP", "port": 8080}]}});
         let f = FakeKubectl::default().json(tcp);
-        assert!(cluster(&f, None).publication("demo", "dev", "web", "envoy", 8080).is_err());
+        assert!(
+            cluster(&f, None)
+                .publication("demo", "dev", "web", "envoy", 8080)
+                .is_err()
+        );
         // nothing is run for an invalid name or port
         let f = FakeKubectl::default();
-        assert!(cluster(&f, None).publication("Demo", "dev", "web", "envoy", 8080).is_err());
-        assert!(cluster(&f, None).publication("demo", "dev", "web", "envoy", 0).is_err());
-        assert!(cluster(&f, None).publication("demo", "dev", "web", "envoy", 70000).is_err());
+        assert!(
+            cluster(&f, None)
+                .publication("Demo", "dev", "web", "envoy", 8080)
+                .is_err()
+        );
+        assert!(
+            cluster(&f, None)
+                .publication("demo", "dev", "web", "envoy", 0)
+                .is_err()
+        );
+        assert!(
+            cluster(&f, None)
+                .publication("demo", "dev", "web", "envoy", 70000)
+                .is_err()
+        );
         assert!(f.calls.borrow().is_empty());
     }
 
     #[test]
     fn kubectl_failure_is_reported_with_its_message() {
-        let f = FakeKubectl::default().text(1, "", "Error from server (NotFound): gateways \"dev\" not found\n");
-        let e = cluster(&f, None).publication("demo", "dev", "web", "envoy", 8080).unwrap_err();
+        let f = FakeKubectl::default().text(
+            1,
+            "",
+            "Error from server (NotFound): gateways \"dev\" not found\n",
+        );
+        let e = cluster(&f, None)
+            .publication("demo", "dev", "web", "envoy", 8080)
+            .unwrap_err();
         assert!(e.to_string().contains("NotFound"));
         let f = FakeKubectl::default().fail("kubectl did not finish within 20 seconds");
         assert!(cluster(&f, None).inspect("demo", "orders").is_err());
@@ -411,7 +610,10 @@ mod tests {
         let row = cluster(&f, None).inspect("demo", "orders").unwrap();
         assert_eq!(row["parents"][0]["conditions"][0]["current"], json!(false));
         assert_eq!(row["parents"][0]["conditions"][1]["current"], json!(true));
-        assert_eq!(row["backends"][0]["endpoint_records_by_ready_condition"], json!({"true": 1, "false": 1, "unknown": 1}));
+        assert_eq!(
+            row["backends"][0]["endpoint_records_by_ready_condition"],
+            json!({"true": 1, "false": 1, "unknown": 1})
+        );
         assert_eq!(row["backends"][0]["service_port_found"], json!(true));
         assert_eq!(row["generation"], json!(2));
         assert!(f.argvs()[2].contains("kubernetes.io/service-name=orders"));
@@ -439,11 +641,37 @@ mod tests {
     #[test]
     fn selection_prefix_and_labels() {
         let home = std::path::Path::new("/home/u");
-        let s = Selection { kube_context: Some("lab".into()), cluster: Some("dev".into()) };
-        assert_eq!(s.prefix(Some(home)).unwrap(), ["kubectl", "--kubeconfig", "/home/u/.kube/fluxvm-dev.yaml", "--context", "lab"]);
+        let s = Selection {
+            kube_context: Some("lab".into()),
+            cluster: Some("dev".into()),
+        };
+        assert_eq!(
+            s.prefix(Some(home)).unwrap(),
+            [
+                "kubectl",
+                "--kubeconfig",
+                "/home/u/.kube/fluxvm-dev.yaml",
+                "--context",
+                "lab"
+            ]
+        );
         assert_eq!(Selection::default().prefix(None).unwrap(), ["kubectl"]);
-        assert!(Selection { cluster: Some("../x".into()), ..Default::default() }.prefix(Some(home)).is_err());
-        assert!(Selection { kube_context: Some("--all".into()), ..Default::default() }.prefix(None).is_err());
+        assert!(
+            Selection {
+                cluster: Some("../x".into()),
+                ..Default::default()
+            }
+            .prefix(Some(home))
+            .is_err()
+        );
+        assert!(
+            Selection {
+                kube_context: Some("--all".into()),
+                ..Default::default()
+            }
+            .prefix(None)
+            .is_err()
+        );
         assert!(label("a-b1").is_ok());
         for bad in ["", "-a", "a-", "A", "a_b", &"a".repeat(64)] {
             assert!(label(bad).is_err(), "{bad}");
@@ -452,7 +680,21 @@ mod tests {
 
     #[test]
     fn shell_join_quotes_only_when_needed() {
-        let v: Vec<String> = ["kubectl", "--context", "my ctx", "-n", "envoy", "8080:80", "it's"].iter().map(|s| (*s).to_owned()).collect();
-        assert_eq!(shell_join(&v), "kubectl --context 'my ctx' -n envoy 8080:80 'it'\\''s'");
+        let v: Vec<String> = [
+            "kubectl",
+            "--context",
+            "my ctx",
+            "-n",
+            "envoy",
+            "8080:80",
+            "it's",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert_eq!(
+            shell_join(&v),
+            "kubectl --context 'my ctx' -n envoy 8080:80 'it'\\''s'"
+        );
     }
 }

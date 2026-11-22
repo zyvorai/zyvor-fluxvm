@@ -47,7 +47,10 @@ pub struct Step {
 
 impl Step {
     fn new(state: &str) -> Step {
-        Step { state: state.to_owned(), ..Default::default() }
+        Step {
+            state: state.to_owned(),
+            ..Default::default()
+        }
     }
 
     /// The `key=value` pairs after the state, for the text output.
@@ -89,7 +92,13 @@ pub struct Steps {
 
 impl Steps {
     pub fn named(&self) -> [(&'static str, &Step); 5] {
-        [("dns", &self.dns), ("tcp", &self.tcp), ("tls", &self.tls), ("http", &self.http), ("backend", &self.backend)]
+        [
+            ("dns", &self.dns),
+            ("tcp", &self.tcp),
+            ("tls", &self.tls),
+            ("http", &self.http),
+            ("backend", &self.backend),
+        ]
     }
     fn get_mut(&mut self, stage: &str) -> &mut Step {
         match stage {
@@ -123,7 +132,14 @@ pub struct ProbeOpts {
 
 impl ProbeOpts {
     pub fn new(url: &str) -> ProbeOpts {
-        ProbeOpts { url: url.to_owned(), address: None, ca: None, status: 200, backend: None, timeout: 4.0 }
+        ProbeOpts {
+            url: url.to_owned(),
+            address: None,
+            ca: None,
+            status: 200,
+            backend: None,
+            timeout: 4.0,
+        }
     }
 }
 
@@ -144,7 +160,10 @@ pub struct Target {
 pub fn parse_url(url: &str) -> Result<Target, String> {
     const BAD: &str = "expected an absolute HTTP(S) URL without credentials";
     if url.bytes().any(|b| b < 33 || b == 127) || !url.is_ascii() {
-        return Err("encode spaces and omit fragments and control characters (the URL must be plain ASCII)".into());
+        return Err(
+            "encode spaces and omit fragments and control characters (the URL must be plain ASCII)"
+                .into(),
+        );
     }
     if url.contains('#') {
         return Err("encode spaces and omit fragments and control characters".into());
@@ -203,12 +222,22 @@ pub fn parse_url(url: &str) -> Result<Target, String> {
         Some((p, q)) => (p, q),
         None => (tail, ""),
     };
-    let mut path_query = if path.is_empty() { "/".to_owned() } else { path.to_owned() };
+    let mut path_query = if path.is_empty() {
+        "/".to_owned()
+    } else {
+        path.to_owned()
+    };
     if !query.is_empty() {
         path_query.push('?');
         path_query.push_str(query);
     }
-    Ok(Target { secure, host: host.to_ascii_lowercase(), port, netloc: netloc.to_owned(), path_query })
+    Ok(Target {
+        secure,
+        host: host.to_ascii_lowercase(),
+        port,
+        netloc: netloc.to_owned(),
+        path_query,
+    })
 }
 
 /// Name lookup, replaceable in tests.
@@ -239,16 +268,21 @@ fn tls_config(ca: Option<&str>) -> Result<Arc<rustls::ClientConfig>, String> {
             return Err(format!("{path}: no PEM certificate found"));
         }
     }
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     Ok(Arc::new(config))
 }
 
 /// Sends the request and reads the status line and headers. The body is not read.
-fn exchange<S: Read + Write>(s: &mut S, request: &str) -> Result<(u16, Vec<(String, String)>), String> {
+fn exchange<S: Read + Write>(
+    s: &mut S,
+    request: &str,
+) -> Result<(u16, Vec<(String, String)>), String> {
     s.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
     s.flush().map_err(|e| e.to_string())?;
     let mut buf: Vec<u8> = Vec::new();
@@ -299,7 +333,10 @@ pub fn probe_with(o: &ProbeOpts, resolve: Resolve<'_>) -> Result<Report, String>
     }
     let timeout = Duration::from_secs_f64(o.timeout);
     let override_ip: Option<IpAddr> = match &o.address {
-        Some(a) => Some(a.parse().map_err(|_| format!("--address {a:?} is not a numeric IP address"))?),
+        Some(a) => Some(
+            a.parse()
+                .map_err(|_| format!("--address {a:?} is not a numeric IP address"))?,
+        ),
         None => None,
     };
     let mut steps = Steps {
@@ -317,7 +354,16 @@ pub fn probe_with(o: &ProbeOpts, resolve: Resolve<'_>) -> Result<Report, String>
     }
     let start = Instant::now();
     let mut stage = "dns";
-    let result = run_stages(o, &target, override_ip, expected, timeout, resolve, &mut steps, &mut stage);
+    let result = run_stages(
+        o,
+        &target,
+        override_ip,
+        expected,
+        timeout,
+        resolve,
+        &mut steps,
+        &mut stage,
+    );
     let ok = match result {
         Ok(()) => true,
         Err(reason) => {
@@ -328,7 +374,12 @@ pub fn probe_with(o: &ProbeOpts, resolve: Resolve<'_>) -> Result<Report, String>
         }
     };
     let elapsed_ms = (start.elapsed().as_secs_f64() * 10_000.0).round() / 10.0;
-    Ok(Report { url: o.url.clone(), ok, steps, elapsed_ms })
+    Ok(Report {
+        url: o.url.clone(),
+        ok,
+        steps,
+        elapsed_ms,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -355,7 +406,12 @@ fn run_stages(
         }
     }
     steps.dns = Step {
-        state: if override_ip.is_some() { "overridden" } else { "ok" }.into(),
+        state: if override_ip.is_some() {
+            "overridden"
+        } else {
+            "ok"
+        }
+        .into(),
         addresses: Some(seen),
         ..Default::default()
     };
@@ -374,8 +430,10 @@ fn run_stages(
         }
     }
     let mut sock = sock.ok_or(last)?;
-    sock.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
-    sock.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+    sock.set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    sock.set_write_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
     steps.tcp = Step {
         state: "ok".into(),
         peer: sock.peer_addr().ok().map(|a| a.ip().to_string()),
@@ -387,7 +445,8 @@ fn run_stages(
     if t.secure {
         *stage = "tls";
         let config = tls_config(o.ca.as_deref())?;
-        let name = ServerName::try_from(t.host.clone()).map_err(|e| format!("invalid server name {:?}: {e}", t.host))?;
+        let name = ServerName::try_from(t.host.clone())
+            .map_err(|e| format!("invalid server name {:?}: {e}", t.host))?;
         let mut conn = rustls::ClientConnection::new(config, name).map_err(|e| e.to_string())?;
         while conn.is_handshaking() {
             conn.complete_io(&mut sock).map_err(|e| e.to_string())?;
@@ -398,7 +457,11 @@ fn run_stages(
             Some(other) => format!("{other:?}"),
             None => "unknown".to_owned(),
         };
-        steps.tls = Step { state: "ok".into(), version: Some(version), ..Default::default() };
+        steps.tls = Step {
+            state: "ok".into(),
+            version: Some(version),
+            ..Default::default()
+        };
         tls = Some(conn);
     }
 
@@ -412,7 +475,12 @@ fn run_stages(
         Some(conn) => exchange(&mut rustls::Stream::new(conn, &mut sock), &request)?,
         None => exchange(&mut sock, &request)?,
     };
-    steps.http = Step { state: "ok".into(), status: Some(status), expected: Some(expected), ..Default::default() };
+    steps.http = Step {
+        state: "ok".into(),
+        status: Some(status),
+        expected: Some(expected),
+        ..Default::default()
+    };
     if status != expected {
         return Err(format!("expected HTTP {expected}, received {status}"));
     }
@@ -420,14 +488,21 @@ fn run_stages(
     // backend
     if let Some(want) = &o.backend {
         *stage = "backend";
-        let actual = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(BACKEND_HEADER)).map(|(_, v)| v.as_str());
+        let actual = headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(BACKEND_HEADER))
+            .map(|(_, v)| v.as_str());
         if actual != Some(want.as_str()) {
             return Err(match actual {
                 Some(a) => format!("expected {want:?}, received {a:?}"),
                 None => format!("expected {want:?}, received no {BACKEND_HEADER} header"),
             });
         }
-        steps.backend = Step { state: "ok".into(), identity: actual.map(str::to_owned), ..Default::default() };
+        steps.backend = Step {
+            state: "ok".into(),
+            identity: actual.map(str::to_owned),
+            ..Default::default()
+        };
     }
     Ok(())
 }
@@ -476,7 +551,10 @@ mod tests {
                                 s.set_read_timeout(Some(Duration::from_secs(5))).ok();
                                 match tls {
                                     Some(cfg) => {
-                                        let Ok(mut conn) = rustls::ServerConnection::new(cfg) else { return };
+                                        let Ok(mut conn) = rustls::ServerConnection::new(cfg)
+                                        else {
+                                            return;
+                                        };
                                         let mut st = rustls::Stream::new(&mut conn, &mut s);
                                         serve_one(&mut st, port);
                                     }
@@ -488,7 +566,11 @@ mod tests {
                     }
                 }
             });
-            Server { port, stop, handle: Some(handle) }
+            Server {
+                port,
+                stop,
+                handle: Some(handle),
+            }
         }
 
         fn url(&self, scheme: &str, host: &str) -> String {
@@ -516,7 +598,9 @@ mod tests {
         }
         let text = String::from_utf8_lossy(&buf).into_owned();
         let first = text.lines().next().unwrap_or("");
-        let host_ok = text.lines().any(|l| l == format!("Host: orders.mactra.test:{port}"));
+        let host_ok = text
+            .lines()
+            .any(|l| l == format!("Host: orders.mactra.test:{port}"));
         let good = host_ok && first == "GET /checkout?q=1 HTTP/1.1";
         let code = if good { "200 OK" } else { "404 Not Found" };
         let _ = s.write_all(format!("HTTP/1.1 {code}\r\nX-Setura-Backend: orders-v1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
@@ -524,13 +608,20 @@ mod tests {
     }
 
     fn opts(url: &str) -> ProbeOpts {
-        ProbeOpts { address: Some("127.0.0.1".into()), ..ProbeOpts::new(url) }
+        ProbeOpts {
+            address: Some("127.0.0.1".into()),
+            ..ProbeOpts::new(url)
+        }
     }
 
     #[test]
     fn host_path_and_identity_are_preserved() {
         let s = Server::start(None);
-        let r = probe(&ProbeOpts { backend: Some("orders-v1".into()), ..opts(&s.url("http", "orders.mactra.test")) }).unwrap();
+        let r = probe(&ProbeOpts {
+            backend: Some("orders-v1".into()),
+            ..opts(&s.url("http", "orders.mactra.test"))
+        })
+        .unwrap();
         assert!(r.ok, "{r:?}");
         assert_eq!(r.steps.dns.state, "overridden");
         assert_eq!(r.steps.tls.state, "unused");
@@ -540,14 +631,27 @@ mod tests {
     #[test]
     fn a_negative_route_can_be_the_expected_outcome() {
         let s = Server::start(None);
-        let url = s.url("http", "orders.mactra.test").replace("checkout", "wrong");
-        assert!(probe(&ProbeOpts { status: 404, ..opts(&url) }).unwrap().ok);
+        let url = s
+            .url("http", "orders.mactra.test")
+            .replace("checkout", "wrong");
+        assert!(
+            probe(&ProbeOpts {
+                status: 404,
+                ..opts(&url)
+            })
+            .unwrap()
+            .ok
+        );
     }
 
     #[test]
     fn wrong_backend_fails_at_the_backend_step() {
         let s = Server::start(None);
-        let r = probe(&ProbeOpts { backend: Some("orders-v2".into()), ..opts(&s.url("http", "orders.mactra.test")) }).unwrap();
+        let r = probe(&ProbeOpts {
+            backend: Some("orders-v2".into()),
+            ..opts(&s.url("http", "orders.mactra.test"))
+        })
+        .unwrap();
         assert!(!r.ok);
         assert_eq!(r.steps.http.state, "ok");
         assert_eq!(r.steps.backend.state, "failed");
@@ -556,7 +660,12 @@ mod tests {
     #[test]
     fn http_status_mismatch_leaves_the_backend_untested() {
         let s = Server::start(None);
-        let r = probe(&ProbeOpts { status: 204, backend: Some("orders-v1".into()), ..opts(&s.url("http", "orders.mactra.test")) }).unwrap();
+        let r = probe(&ProbeOpts {
+            status: 204,
+            backend: Some("orders-v1".into()),
+            ..opts(&s.url("http", "orders.mactra.test"))
+        })
+        .unwrap();
         assert_eq!(r.steps.http.status, Some(200));
         assert_eq!(r.steps.http.state, "failed");
         assert_eq!(r.steps.backend.state, "untested");
@@ -564,7 +673,9 @@ mod tests {
 
     #[test]
     fn dns_failure_stops_before_tcp() {
-        let fail = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> { Err(std::io::Error::other("no DNS")) };
+        let fail = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
+            Err(std::io::Error::other("no DNS"))
+        };
         let r = probe_with(&ProbeOpts::new("https://orders.mactra.test"), &fail).unwrap();
         assert_eq!(r.steps.dns.state, "failed");
         assert_eq!(r.steps.tcp.state, "untested");
@@ -582,7 +693,9 @@ mod tests {
     #[test]
     fn with_an_address_the_resolver_is_never_asked() {
         let s = Server::start(None);
-        let boom = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> { panic!("resolver must not run") };
+        let boom = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
+            panic!("resolver must not run")
+        };
         let r = probe_with(&opts(&s.url("http", "orders.mactra.test")), &boom).unwrap();
         assert!(r.ok);
     }
@@ -600,23 +713,76 @@ mod tests {
 
     #[test]
     fn invalid_input_is_a_usage_error() {
-        for url in ["file:///tmp/x", "http://a@localhost/", "http://localhost:0", "http://localhost:x/", "http://h/p#frag", "http://h/a b", "ftp://h/", "localhost", "http:///x"] {
+        for url in [
+            "file:///tmp/x",
+            "http://a@localhost/",
+            "http://localhost:0",
+            "http://localhost:x/",
+            "http://h/p#frag",
+            "http://h/a b",
+            "ftp://h/",
+            "localhost",
+            "http:///x",
+        ] {
             assert!(probe(&ProbeOpts::new(url)).is_err(), "{url}");
         }
-        assert!(probe(&ProbeOpts { status: 99, ..ProbeOpts::new("http://localhost") }).is_err());
-        assert!(probe(&ProbeOpts { status: 600, ..ProbeOpts::new("http://localhost") }).is_err());
+        assert!(
+            probe(&ProbeOpts {
+                status: 99,
+                ..ProbeOpts::new("http://localhost")
+            })
+            .is_err()
+        );
+        assert!(
+            probe(&ProbeOpts {
+                status: 600,
+                ..ProbeOpts::new("http://localhost")
+            })
+            .is_err()
+        );
         for t in [0.0, -1.0, 61.0, f64::NAN] {
-            assert!(probe(&ProbeOpts { timeout: t, ..ProbeOpts::new("http://localhost") }).is_err(), "{t}");
+            assert!(
+                probe(&ProbeOpts {
+                    timeout: t,
+                    ..ProbeOpts::new("http://localhost")
+                })
+                .is_err(),
+                "{t}"
+            );
         }
-        assert!(probe(&ProbeOpts { address: Some("localhost".into()), ..ProbeOpts::new("http://localhost") }).is_err());
+        assert!(
+            probe(&ProbeOpts {
+                address: Some("localhost".into()),
+                ..ProbeOpts::new("http://localhost")
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn url_parts() {
         let t = parse_url("https://Orders.Mactra.test/checkout?q=1").unwrap();
-        assert_eq!((t.secure, t.host.as_str(), t.port, t.netloc.as_str(), t.path_query.as_str()), (true, "orders.mactra.test", 443, "Orders.Mactra.test", "/checkout?q=1"));
+        assert_eq!(
+            (
+                t.secure,
+                t.host.as_str(),
+                t.port,
+                t.netloc.as_str(),
+                t.path_query.as_str()
+            ),
+            (
+                true,
+                "orders.mactra.test",
+                443,
+                "Orders.Mactra.test",
+                "/checkout?q=1"
+            )
+        );
         let t = parse_url("http://[::1]:8080").unwrap();
-        assert_eq!((t.host.as_str(), t.port, t.path_query.as_str()), ("::1", 8080, "/"));
+        assert_eq!(
+            (t.host.as_str(), t.port, t.path_query.as_str()),
+            ("::1", 8080, "/")
+        );
         assert_eq!(parse_url("http://h?x=1").unwrap().path_query, "/?x=1");
         assert_eq!(parse_url("http://h:/p").unwrap().port, 80);
     }
@@ -629,7 +795,12 @@ mod tests {
         let client = ["req", "west"].concat();
         let proxy = ["HTTP", "_PROXY"].concat();
         assert!(!src.split("#[cfg(test)]").next().unwrap().contains(&client));
-        assert!(!src.split("#[cfg(test)]").next().unwrap().contains(&format!("var(\"{proxy}")));
+        assert!(
+            !src.split("#[cfg(test)]")
+                .next()
+                .unwrap()
+                .contains(&format!("var(\"{proxy}"))
+        );
     }
 
     // ---- TLS: a throwaway CA and a leaf for orders.mactra.test, made with rcgen.
@@ -640,11 +811,15 @@ mod tests {
     }
 
     fn pki(leaf_name: &str) -> TestPki {
-        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
+        };
         use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
         let ca_key = KeyPair::generate().unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca_params.distinguished_name.push(DnType::CommonName, "gateway test CA");
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "gateway test CA");
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         let ca = ca_params.self_signed(&ca_key).unwrap();
@@ -654,13 +829,18 @@ mod tests {
         leaf.is_ca = IsCa::NoCa;
         let cert = leaf.signed_by(&key, &issuer).unwrap();
         let der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
-        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(vec![CertificateDer::from(cert.der().to_vec())], der)
-            .unwrap();
-        TestPki { ca_pem: ca.pem(), server: Arc::new(cfg) }
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from(cert.der().to_vec())], der)
+        .unwrap();
+        TestPki {
+            ca_pem: ca.pem(),
+            server: Arc::new(cfg),
+        }
     }
 
     fn write_ca(pem: &str) -> (tempfile::TempDir, String) {
@@ -677,16 +857,30 @@ mod tests {
         let (_d, ca) = write_ca(&pki.ca_pem);
         let s = Server::start(Some(pki.server.clone()));
         // trusted CA and matching name: the real hostname is the SNI/verification name although we dial 127.0.0.1
-        let ok = probe(&ProbeOpts { ca: Some(ca.clone()), ..opts(&s.url("https", "orders.mactra.test")) }).unwrap();
+        let ok = probe(&ProbeOpts {
+            ca: Some(ca.clone()),
+            ..opts(&s.url("https", "orders.mactra.test"))
+        })
+        .unwrap();
         assert!(ok.ok, "{ok:?}");
         assert_eq!(ok.steps.tls.state, "ok");
-        assert!(ok.steps.tls.version.as_deref().is_some_and(|v| v.starts_with("TLSv1.")));
+        assert!(
+            ok.steps
+                .tls
+                .version
+                .as_deref()
+                .is_some_and(|v| v.starts_with("TLSv1."))
+        );
         // no --ca: the private CA is not in the system roots
         let untrusted = probe(&opts(&s.url("https", "orders.mactra.test"))).unwrap();
         assert_eq!(untrusted.steps.tls.state, "failed");
         assert_eq!(untrusted.steps.http.state, "untested");
         // a different hostname than the certificate's
-        let bad = probe(&ProbeOpts { ca: Some(ca), ..opts(&s.url("https", "other.mactra.test")) }).unwrap();
+        let bad = probe(&ProbeOpts {
+            ca: Some(ca),
+            ..opts(&s.url("https", "other.mactra.test"))
+        })
+        .unwrap();
         assert_eq!(bad.steps.tls.state, "failed");
     }
 
@@ -694,19 +888,34 @@ mod tests {
     fn an_unreadable_or_empty_ca_is_a_tls_failure() {
         let pki = pki("orders.mactra.test");
         let s = Server::start(Some(pki.server.clone()));
-        let r = probe(&ProbeOpts { ca: Some("/nonexistent/ca.pem".into()), ..opts(&s.url("https", "orders.mactra.test")) }).unwrap();
+        let r = probe(&ProbeOpts {
+            ca: Some("/nonexistent/ca.pem".into()),
+            ..opts(&s.url("https", "orders.mactra.test"))
+        })
+        .unwrap();
         assert_eq!(r.steps.tls.state, "failed");
         let (_d, empty) = write_ca("not a certificate\n");
-        let r = probe(&ProbeOpts { ca: Some(empty), ..opts(&s.url("https", "orders.mactra.test")) }).unwrap();
+        let r = probe(&ProbeOpts {
+            ca: Some(empty),
+            ..opts(&s.url("https", "orders.mactra.test"))
+        })
+        .unwrap();
         assert_eq!(r.steps.tls.state, "failed");
     }
 
     #[test]
     fn text_output_lists_every_step() {
         let s = Server::start(None);
-        let r = probe(&ProbeOpts { backend: Some("orders-v1".into()), ..opts(&s.url("http", "orders.mactra.test")) }).unwrap();
+        let r = probe(&ProbeOpts {
+            backend: Some("orders-v1".into()),
+            ..opts(&s.url("http", "orders.mactra.test"))
+        })
+        .unwrap();
         let text = render_text(&r);
-        let names: Vec<&str> = text.lines().map(|l| l.split_whitespace().next().unwrap()).collect();
+        let names: Vec<&str> = text
+            .lines()
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
         assert_eq!(names, ["dns", "tcp", "tls", "http", "backend"]);
         assert!(text.contains("overridden"));
         assert!(text.contains("identity=orders-v1"));
