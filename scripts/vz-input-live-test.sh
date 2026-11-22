@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: keyboard and mouse input (`POST /v1/vms/{id}/input`), CD-ROM eject (`POST /v1/vms/{id}/cdroms/{name}/eject`), the display screenshot
 # (`GET /v1/vms/{id}/screenshot`), the stored sign-in (`GET|DELETE /v1/vms/{id}/signin`) and the vmnet list (`GET /v1/vznets`) on a vz guest. A click and a
 # batched key press are accepted, malformed or empty input is refused (422 / 400), an unknown VM is refused, a guest with no CD-ROM has nothing to eject.

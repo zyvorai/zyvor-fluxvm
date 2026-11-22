@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: the guest log of a vz VM (`GET /v1/vms/{id}/logs?lines=N&follow=bool`). The log is the guest's raw serial console (hvc0):
 # it holds the login prompt once the guest has booted, `lines` bounds what comes back, text written to the guest's console shows
 # up in it, `follow` streams new console output from the tail, and an unknown VM is refused with 400.

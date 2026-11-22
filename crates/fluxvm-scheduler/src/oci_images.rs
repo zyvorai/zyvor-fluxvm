@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! OCI images for `vz` sandboxes: pull from a registry (pure Rust, digest-verified), then build each platform
 //! manifest's ext4 rootfs once in a short-lived builder VM and cache it under `<state_dir>/oci/rootfs/<hex>.ext4`.

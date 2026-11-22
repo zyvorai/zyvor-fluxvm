@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # FluxVM macOS guest first-boot helper. Run it once inside the guest as an admin (or from a LaunchDaemon baked into the
 # template). It reads the FluxVM first-boot share (apple.firstboot), installs the keys as a root-owned AuthorizedKeysFile

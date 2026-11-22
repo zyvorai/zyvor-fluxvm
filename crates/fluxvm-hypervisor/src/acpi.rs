@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Minimal Firecracker-style ACPI tables for PVH Linux guests.
 //! Writes RSDP @ RSDP_ADDR and XSDT/FADT/MADT into SYSTEM_MEM.

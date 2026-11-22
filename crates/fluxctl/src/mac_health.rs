@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Enforced `HEALTHCHECK` for `fluxctl mac` instances. The Macfile records a healthcheck in the image config; this module runs it:
 //! over SSH, inside the guest, from the Mac that drives the instance (`mac health`, `mac run --wait-healthy`, compose

@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # One pull-install pass (scripts/fluxvm-bootstrap.sh), run by fluxvm-bootstrap.timer. Configuration is
 # /etc/fluxvm/bootstrap.conf; set FLUXVM_AUTO_UPGRADE=0 there to check and report only.

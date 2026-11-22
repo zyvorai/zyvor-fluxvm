@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The lifecycle of an Apple-silicon k3s cluster, written against [`Host`] so that the order of operations (journal before
 //! VM, VM before labels, token on stdin before the service starts, servers before agents, cleanup after a failure) is

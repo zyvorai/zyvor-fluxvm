@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: restart a vz guest (`POST /v1/vms/{id}/restart`). The id stays, the runner process is replaced, the disk keeps what
 # was written and memory does not; a paused guest restarts too, and so does a stopped one (a restart then just starts it).
 #   scripts/vz-restart-live-test.sh [/path/to/agent-micro-arm64.raw]

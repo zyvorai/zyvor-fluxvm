@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Screenshots and keyboard/mouse input for the display of a running `vz` VM (Linux or macOS guest), for agents that
 //! drive a guest's GUI or text console, and a per-VM sign-in kept in the host's Keychain that is typed into the guest

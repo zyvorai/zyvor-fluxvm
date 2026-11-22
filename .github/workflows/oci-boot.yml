@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # OCI sandboxes on vz: lint and test fluxvm-oci-init on Linux (its PID 1 code only compiles there), then build the
 # boot artifacts (oci-kernel, oci-initrd) on arm64 and upload them. Publishing them as signed catalog entries is a

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Times the AgentSession lifecycle against a running daemon, with curl so no CLI start-up is counted:
 #   create -> first exec -> checkpoint (memory+disk) -> restore -> delete, N runs, median and worst.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube diff` and `kube timeline`: git log for the cluster. Every checkpoint (including the `try-`, `auto-` and
 //! `git-` ones) is saved with a small inventory of what ran in the cluster at that moment: each Deployment, StatefulSet,

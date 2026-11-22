@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Tests scripts/check-glibc-floor.sh against a tiny dynamically linked C program built on the spot.
 # Linux with gcc and objdump only; elsewhere it prints a notice and exits 0.
 set -uo pipefail

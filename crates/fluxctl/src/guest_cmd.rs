@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl vm guest …`: guest operations over the QEMU guest agent (REST: `/v1/vms/{id}/guest/…`).
 //! Passwords are read from stdin or a file, never from an argument, and are never printed.

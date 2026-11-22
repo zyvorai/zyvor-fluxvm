@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 // Execute the production policy header with deterministic host map helpers.
 #include <assert.h>
 #include <stdint.h>

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac-fleet`: running a child process (ssh, or a local shell) with a deadline, and the `LocalTransport` that lets the
 //! fleet scripts run on this Mac. The transport trait stays in `mac_fleet_ssh`; this is the part that can time out.

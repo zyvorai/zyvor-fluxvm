@@ -1,11 +1,11 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 [package]
 name = "fluxvm-apple"
 version = "0.4.21"
 edition = "2024"
-license = "LicenseRef-Zyvor-Production-1.0"
+license = "LicenseRef-Zyvor-Production-2.0"
 description = "Apple Virtualization.framework backend (macOS on Apple silicon) for Zyvor FluxVM"
 build = "build.rs"
 

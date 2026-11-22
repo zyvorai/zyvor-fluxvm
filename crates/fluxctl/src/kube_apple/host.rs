@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Everything `kube apple` needs from the machine it runs on, as one trait, so the lifecycle logic can be tested with a fake
 //! that records the order of its calls. [`RealHost`] is the one that talks to the FluxVM daemon and the system `ssh`.

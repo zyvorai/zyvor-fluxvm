@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl kube dev`: save a file, and the image is rebuilt, copied into the cluster and the deployment restarted. The
 //! watcher polls modification times so it needs no extra dependency; the decisions are pure and tested.

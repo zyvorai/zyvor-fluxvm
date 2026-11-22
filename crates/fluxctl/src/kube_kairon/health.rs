@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Health checks as pure functions of captured `kubectl ... -o json`, each giving a plain-English line and, when it fails,
 //! one fix hint. Tested with fixtures.

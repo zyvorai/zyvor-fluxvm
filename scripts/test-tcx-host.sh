@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Privileged host smoke test for the TCX helper. Requires Linux >= 6.6,
 # CAP_BPF/CAP_NET_ADMIN (normally root), libbpf, bpffs and bpftool.
 set -euo pipefail

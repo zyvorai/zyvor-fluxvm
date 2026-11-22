@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Day-2 operations on a (possibly multi-server) cluster: the snapshot schedule, token rotation, node removal and the rebuild
 //! of a lost journal. Written against [`Host`] like the rest of the lifecycle, and tested with the same fake.

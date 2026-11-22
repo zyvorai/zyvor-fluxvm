@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Network Fabric lab profile (dataplane schema v4) — soft opt-in for first
 # enable. Same eBPF mode as GA, but not fail-closed and default-allow so a lab

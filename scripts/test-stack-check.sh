@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Offline test of scripts/stack-check.sh with fake curl, kubectl and fluxctl (no daemon, cluster or network needed).
 # shellcheck disable=SC2034,SC2120  # OUT and RC are read inside the eval'd expectations; run takes optional arguments

@@ -323,4 +323,4 @@ This mirrors the [maturity caveat](docs/proof-and-status.md#maturity-whats-real-
 
 ## License
 
-Zyvor Production License v1.0 (SPDX `LicenseRef-Zyvor-Production-1.0`): non-production use is free, production use requires a commercial license (sales@zyvor.dev). See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Zyvor Production Licence v2.0 (SPDX `LicenseRef-Zyvor-Production-2.0`). A 30-day trial is available on request from sales@zyvor.dev (a paid evaluation Order at no charge); production and any other use needs a paid Order. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # TEMPORARY validation tool, not part of the regular test suite: boots a
 # Linux guest on THIS (real Intel) host with FLUXVM_TEST_SPOOF_AMD_VENDOR=1,

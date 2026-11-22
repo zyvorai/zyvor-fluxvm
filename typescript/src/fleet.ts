@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 /**
  * Client for FluxVM central's fleet API (`/fleet/*`): the Mac cloud's tenants, API keys, leases, VMs, networks,

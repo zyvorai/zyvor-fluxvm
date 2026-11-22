@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import type {ReactNode} from 'react';
 import clsx from 'clsx';
@@ -241,7 +241,7 @@ function Platform() {
         <div className={styles.platformCard}>
           <Heading as="h3">Source-available</Heading>
           <p>
-            Zyvor Production License v1.0, the whole repository: permitted for non-production use. Every claim on this site links to what has and has not been
+            Zyvor Production Licence v2.0, the whole repository: permitted for non-production use. Every claim on this site links to what has and has not been
             verified.
           </p>
           <Chevron href={REPO}>GitHub</Chevron>

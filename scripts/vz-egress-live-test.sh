@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: the egress policy the daemon answers for (`POST /v1/egress/check`, `GET /v1/egress/nftables`). With no allowlist every host is
 # allowed; with `[sandbox] egress_allow_domains` only the listed hosts and their subdomains are, matching is case-insensitive and ignores a
 # trailing dot, and and a configured vault credential is never revealed by the API or the log.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Thin HTTP client for `fluxvm-agent central`'s `/fleet/*` API, backing
 //! the `fluxctl fleet ...` subcommands. Every fleet operation used to mean a

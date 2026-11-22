@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl fleet members | member-add | member-rm | member-role`: the people of a tenant who sign in to the console
 //! with SSO. The CLI itself keeps using tokens.

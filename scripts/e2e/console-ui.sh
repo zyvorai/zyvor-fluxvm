@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034,SC2154
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # The fleet console in a headless Chrome (Linux and macOS): central + two simulated Macs + a tenant with a lease and a VM, then
 # scripts/e2e/console-ui.mjs signs in as operator and tenant and opens every page. Needs node, puppeteer (npm i -g puppeteer, or

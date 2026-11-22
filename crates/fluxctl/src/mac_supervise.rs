@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac supervise`: enforce what `mac run --restart` only recorded. The daemon never restarts a macOS VM, so this loop does:
 //! each tick it lists the instances, starts those whose restart policy says they should be running (with a back-off so a VM that

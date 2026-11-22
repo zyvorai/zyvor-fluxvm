@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Prove process.ask HITL and fork promote against a running FluxVM daemon (Linux KVM or Mac vz).
 #   FLUXVM_URL=http://127.0.0.1:7788 FLUXVM_TOKEN=… IMAGE=agent-micro \
 #     scripts/agent-session-hitl-promote-live-test.sh

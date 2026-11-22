@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Runs inside the guest: accepts one AF_VSOCK connection at a time (spawning
 //! a thread per connection), reads one newline-delimited JSON request, acts

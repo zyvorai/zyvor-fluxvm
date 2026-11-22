@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The VM request, the shell scripts run in the guests and the ssh command lines of `fluxctl kube apple`, as pure
 //! functions of validated inputs. No script here takes the cluster token: it only ever travels on stdin.

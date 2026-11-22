@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The node side of enrollment (see `central::enroll`). A node started with a join token (`fvjt_...`) generates a
 //! `node_id` once, exchanges the token for its own credential, keeps both in its state directory (mode 0600; it

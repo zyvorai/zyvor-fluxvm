@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Drive the fleet UI's forms (join token, lease, billing) against a real central and check the effect through its API.
 #   ./flows.sh                                  start a central and one simulated Mac from BIN (default ../../target/debug/fluxvm-agent)

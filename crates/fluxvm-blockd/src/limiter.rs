@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Token-bucket bandwidth and IOPS limiter. Requests incur "debt" and are
 //! delayed until it is repaid, so a single large request is never rejected.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Live test of apple.host_gpu: an offline vz sandbox reaches a host OpenAI-compatible
 # server over vsock (docs/host-inference.md). Starts fluxctl infer serve --stand-in when

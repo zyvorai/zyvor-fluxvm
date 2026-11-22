@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Portable tests for Multus extra NICs, warm-pool NIC claim, in-tree Windows
 # tables, and the S2/S8/S10/S11 evidence scripts.

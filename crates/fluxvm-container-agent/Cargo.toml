@@ -1,11 +1,11 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 [package]
 name = "fluxvm-container-agent"
 version = "0.1.0"
 edition = "2024"
-license = "LicenseRef-Zyvor-Production-1.0"
+license = "LicenseRef-Zyvor-Production-2.0"
 description = "In-guest OCI process supervisor for FluxVM secure containers"
 
 [[bin]]

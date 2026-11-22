@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 use fluxvm_mesh::acme::{
     AcmeClient, default_account_key_path, default_certificate_key_path, default_certificate_path,
 };

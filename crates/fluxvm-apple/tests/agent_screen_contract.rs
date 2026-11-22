@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //! The keys, modifiers and actions `fluxvm_apple::screen` validates are the ones the runner handles, so a request the
 //! Rust side accepts is never refused by the runner. Runs on any OS; the Swift itself is compiled only on macOS.
 use fluxvm_apple::screen::{MODIFIERS, NAMED_KEYS};

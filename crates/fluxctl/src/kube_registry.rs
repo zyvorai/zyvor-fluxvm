@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `/etc/rancher/k3s/registries.yaml` (mirrors, private registries, credentials, TLS) and airgap image preload.
 //! Rendering and planning are pure; [`apply_airgap`] executes a plan through a [`GuestOps`].

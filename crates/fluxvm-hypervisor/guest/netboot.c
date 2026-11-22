@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 /* Freestanding 64-bit guest: serial + virtio-mmio-net + ARP + ICMP ping. */
 typedef unsigned char u8;

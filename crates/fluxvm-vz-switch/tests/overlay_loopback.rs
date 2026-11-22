@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Two (and a third, wrongly keyed) real switches on one machine, joined by the real AES-256-GCM overlay over loopback
 //! UDP: guests on different "Macs" reach each other, learned MACs turn floods into unicast, and a switch holding another

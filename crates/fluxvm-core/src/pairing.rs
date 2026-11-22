@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Pairing: a machine asks to join a fleet, a person approves it, and the machine receives its node credential without
 //! anyone typing a URL or a token. See docs/cluster-pairing.md for the protocol and the threat model.

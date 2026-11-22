@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Guest crash detection for `on_crash`: the QEMU arguments (a pvpanic device,
 //! an i6300esb watchdog, the `-action` policy and a dedicated event monitor),

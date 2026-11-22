@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! CPU and memory use for the Kubernetes page, from the cluster's metrics-server (`metrics.k8s.io`, which k3s ships).
 //!

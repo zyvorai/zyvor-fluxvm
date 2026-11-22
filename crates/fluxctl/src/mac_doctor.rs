@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac doctor`: a read-only preflight for the macOS-guest workflow. Every limit in docs/macos-containers.md that
 //! otherwise fails late (a 409, a 503, a 20 GB copy instead of a clone, a key login that does not work) is checked up front

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Shared signing helpers for FluxVM's macOS binaries. Source it; every function is prefixed `fs_`.
 #
 #   FLUXVM_SIGN_IDENTITY   codesign identity: "-" (ad hoc, the default) or e.g.

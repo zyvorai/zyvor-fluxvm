@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Opt-in sleep prevention that lasts only while a VM runs. `FLUXVM_KEEPAWAKE_WHILE_RUNNING=1` on the daemon makes it hold
 //! `caffeinate -i -m -s -w <daemon pid>` while at least one `vz` VM is running and release it when the last one stops. The

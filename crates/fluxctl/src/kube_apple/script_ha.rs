@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Shell scripts and parsers for the HA, rotation, snapshot-schedule, node-removal and rebuild work. Like `script.rs`, these
 //! are pure functions of validated input and no script here contains a secret: tokens and S3 keys only travel on stdin.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The operations layer of `fluxctl mac`: enforced healthchecks, `supervise` (restart policies), TTLs and the reaper, `run --verify`.
 //! This file holds the clap surface and the dispatch; the logic is in `mac_health`, `mac_supervise`, `mac_reap`.

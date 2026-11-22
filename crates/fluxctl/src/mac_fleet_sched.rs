@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac-fleet`: the scheduler core. Pure functions and small state types, no ssh: what a Mac reports (the template
 //! `name:tag@digest` it holds, free CPU/memory/disk, power, running macOS guests), how a job is matched to a Mac, how

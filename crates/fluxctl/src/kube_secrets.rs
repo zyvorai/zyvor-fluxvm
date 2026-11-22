@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Secrets-encryption status and key rotation, as thin wrappers over `k3s secrets-encrypt` run on a server through a
 //! [`GuestOps`]. The status parser is pure. Rotation is refused without an explicit `yes`, because a wrong rotation

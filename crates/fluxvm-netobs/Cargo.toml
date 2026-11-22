@@ -1,11 +1,11 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 [package]
 name = "fluxvm-netobs"
 version = "0.3.0"
 edition = "2024"
-license = "LicenseRef-Zyvor-Production-1.0"
+license = "LicenseRef-Zyvor-Production-2.0"
 description = "Native guest-network observability for FluxVM: flows, TCP health, DNS/TLS/HTTP metadata, rollups, pcap ring"
 
 [lib]

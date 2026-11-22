@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Image usage for `fluxctl mac`: when each image was last used by `mac run` (`last-used.json` in the store root), the size and
 //! last-used columns of `mac images --usage`, and `mac image prune --keep-last N`. Pure parts are unit tested on temporary stores.

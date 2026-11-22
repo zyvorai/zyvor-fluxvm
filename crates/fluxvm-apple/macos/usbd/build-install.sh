@@ -1,6 +1,6 @@
 #!/bin/bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Installs the USB Accessory Access helper as a per-user launch agent.
 #   ./build-install.sh                          build from source, ad hoc sign, install to /Applications (sudo)

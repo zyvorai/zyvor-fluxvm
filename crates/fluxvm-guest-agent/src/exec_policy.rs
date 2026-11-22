@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Confined `exec`: runs a request's command under Landlock + seccomp via
 //! `fluxvm-procbox` when the request carries a policy, and reports what was

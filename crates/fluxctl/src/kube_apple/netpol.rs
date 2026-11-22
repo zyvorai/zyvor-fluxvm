@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! A baseline NetworkPolicy set for one namespace: deny all ingress and egress, then allow DNS, traffic inside the
 //! namespace, and what you name. Pure generator (golden-tested); `--apply` pipes it to `kubectl apply -f -` on a server.

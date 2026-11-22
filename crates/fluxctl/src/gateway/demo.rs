@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl gateway demo apply | teardown | print`: the demo fixture from Zyvor Setura 0.1.0 (a namespace, a GatewayClass, a
 //! Gateway with one HTTP listener, a small app and an HTTPRoute), applied to or removed from a cluster with kubectl.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test of agent-session rewind on the vz backend: automatic points, undo, pin, bisect and branch (docs/agent-sessions.md).
 #   scripts/vz-rewind-live-test.sh [image]        (default image: debian-13 from the catalog / image store)
 # Needs Apple silicon macOS, the Xcode command line tools, Rust, python3 and curl. Takes a few minutes (cold boot).

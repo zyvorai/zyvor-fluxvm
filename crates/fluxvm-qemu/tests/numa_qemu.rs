@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Runs a real QEMU with a host-bound guest NUMA node, pins its vCPU
 //! threads and reads the result back. Set FLUXVM_QEMU_NUMA_TEST=1 on a

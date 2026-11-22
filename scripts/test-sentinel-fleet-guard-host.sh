@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 set -euo pipefail
 [[ "${FLUXVM_FLEET_GUARD_HOST_TEST:-0}" == 1 ]] || { echo 'SKIP: set FLUXVM_FLEET_GUARD_HOST_TEST=1 on a disposable SSH-capable lab'; exit 0; }

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Native writes to an already-pinned hash map. Open once for a restore,
 //! avoiding a bpftool subprocess and a pathname lookup for every entry.

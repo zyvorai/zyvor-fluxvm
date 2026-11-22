@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # rustfmt-check only this repo's workspace members. Sibling path deps
 # (guestkit) have their own CI and must not fail FluxVM fmt gates.
 set -euo pipefail

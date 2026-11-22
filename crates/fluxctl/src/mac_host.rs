@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac host`: the Mac that runs FluxVM, looked at as a server. Read-only `status`, `headless-check` and `rosetta`;
 //! a `keepawake` LaunchAgent that holds a `caffeinate` assertion; and `tune`, which prints recommended power settings and

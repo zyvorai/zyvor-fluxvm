@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Same shape as ../../config.example.toml, trimmed to what the DaemonSet
 # needs. All paths here must match the hostPath volumes in daemonset.yaml.

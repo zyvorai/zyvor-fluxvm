@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Build the agent-micro image: Debian 13's arm64 cloud image (partitions and EFI boot kept, so the vz backend boots it like
 # debian-13) with the static fluxvm-guest-agent installed and enabled, and cloud-init limited to the NoCloud seed.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl explain`: what an API error code means and what to do about it. Offline; the table is
 //! `fluxvm_core::error_codes`, which a `fluxvm-api` test keeps in step with the codes the API sends.

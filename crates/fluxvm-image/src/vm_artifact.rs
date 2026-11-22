@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! VM images as OCI artifacts: push a VM bundle (a raw disk, or a prepared macOS template directory) to any OCI
 //! registry and pull it back onto another host, so a fleet of Macs shares one golden image instead of copying 50 GB

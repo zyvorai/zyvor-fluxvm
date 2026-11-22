@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 # Installs the FluxVM guest agent as a LaunchDaemon inside a macOS guest.
 # Run as root, in the guest:  sudo ./install.sh /path/to/fluxvm-guest-agent [token]

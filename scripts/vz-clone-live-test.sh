@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: clone a vz guest (`POST /v1/vms/{id}/clone`). A running guest is refused (a clone needs a stopped VM for a consistent
 # disk); a stopped guest clones, the clone cold-boots with the parent's disk contents but not its memory, and writes in the clone
 # do not reach the parent.

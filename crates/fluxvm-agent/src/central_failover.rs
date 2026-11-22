@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Automatic reschedule of `reschedulable` VMs after a node stops heartbeating. Opt-in, fencing-safe.
 //! See `docs/fleet-affinity.md` for the rule and its limits.

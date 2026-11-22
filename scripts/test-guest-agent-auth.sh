@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Real-hardware regression test for the vsock guest-agent's shared-secret
 # auth (fluxvm_guest_protocol::Envelope / TOKEN_FILE_PATH). Boots a real
 # QEMU VM and talks to its guest agent over a *raw* AF_VSOCK socket — not

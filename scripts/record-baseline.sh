@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Record host metadata and run the existing benches before behavior changes.
 # Non-Linux hosts record metadata and skip KVM benches (exit 0).
 # avg_create_ms / boot_to_ready_ms from bench-sandbox.sh are API create time,

@@ -150,7 +150,7 @@ Unlike some of the figures in this table, we deliberately don't include a lines-
 
 ## License
 
-Zyvor Production License v1.0 for the entire repository: non-production use is free; production use requires a commercial license (sales@zyvor.dev). See [README.md — License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license) and [NOTICE](https://github.com/zyvorai/zyvor-fluxvm/blob/main/NOTICE).
+Zyvor Production Licence v2.0 for the entire repository. A 30-day trial is available on request from sales@zyvor.dev (a paid evaluation Order at no charge); production and any other use needs a paid Order. See [README.md — License](https://github.com/zyvorai/zyvor-fluxvm/blob/main/README.md#license) and [NOTICE](https://github.com/zyvorai/zyvor-fluxvm/blob/main/NOTICE).
 
 ---
 

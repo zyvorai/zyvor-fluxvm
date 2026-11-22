@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Reads Gateway API evidence and builds the `kubectl port-forward` command, through the kubectl on this host and the
 //! kubeconfig or context you select. Ported from Zyvor Setura 0.1.0.

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Who may sign in to a tenant through single sign-on, and what each role may do. Central enforces all of it; these helpers only
 // keep the form from offering what it would refuse.

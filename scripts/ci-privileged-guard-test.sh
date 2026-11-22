@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Root-side wrapper for the privileged CI job (.github/workflows/vmm-guard-qos.yml).
 # Install it root-owned and not writable by the runner user, and allow only this

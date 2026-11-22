@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The Mac side of a multi-server cluster: a small TCP forwarder that gives `127.0.0.1:API_PORT` one stable meaning while
 //! the servers behind it come and go, and a kubeconfig with one context per server as a manual fallback.

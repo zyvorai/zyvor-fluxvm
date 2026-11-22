@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac ps --fleet [INVENTORY]` and `fluxctl mac images --fleet [INVENTORY]`: the same listings, from every Mac of
 //! the inventory at once over ssh, one table (or one JSON document with `--json`) with the Mac named in each row. A Mac

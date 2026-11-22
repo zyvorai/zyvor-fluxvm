@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Prometheus alert rules for the Mac fleet (`fluxvm_mac_*`) and Kubernetes on Apple guests (`fluxvm_kube_apple_*`).
 # The metrics come from `fluxctl mac metrics --kube [--textfile PATH]` (crates/fluxctl/src/mac_metrics.rs; node_exporter textfile collector), scraped

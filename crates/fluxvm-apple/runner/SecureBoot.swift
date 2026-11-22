@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //
 // macOS 27 EFI Secure Boot for Linux guests, applied to the VM's EFI variable store (efi.bin) before boot.
 import Foundation

@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # The in-tree KVM engine ("native", no QEMU): real guest boots on hosted
 # runners (the repo is public, so /dev/kvm is available), the static guest

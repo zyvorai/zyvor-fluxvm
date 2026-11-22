@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! High availability for `fluxvm-agent central`: several centrals share one store (Redis); exactly one holds the
 //! leader lock and serves `/fleet/*`, the others answer `503` naming the leader until the lock lapses and one of them

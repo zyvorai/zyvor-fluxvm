@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Build a flat-ext4 guest root for the native (QEMU-free) KVM profile with
 # Cloud-init and the static fluxvm-guest-agent installed and enabled:

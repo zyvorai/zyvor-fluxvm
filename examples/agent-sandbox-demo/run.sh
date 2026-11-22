@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # An agent's loop in a safe, forkable sandbox on a Mac, with real timings:
 #   1. an offline sandbox (no network card at all) holds a small project whose test fails;

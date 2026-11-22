@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test of agent sessions on the vz backend with the guest agent (`agent-micro`): the engine a session gets,
 # hardened exec, confinement, the job supervisor, the display (screenshot/input), fork cloning, process.ask HITL,
 # fork promote (when sha256sum is in the guest), and (with the egress proxy) per-session HTTP rules.

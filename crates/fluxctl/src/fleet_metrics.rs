@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl fleet top` and `fluxctl fleet metrics <vm>`: usage from central's metrics collector
 //! (`GET /fleet/metrics/vms`, `GET /fleet/metrics/vms/{node}/{id}`).

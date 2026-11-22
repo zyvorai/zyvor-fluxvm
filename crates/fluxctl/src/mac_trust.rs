@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Trust for `fluxctl mac` images: Ed25519 signatures over the manifest digest, a local trust store, and the licence guard on
 //! public registries.

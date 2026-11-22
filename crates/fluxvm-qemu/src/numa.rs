@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Guest NUMA layout bound to host NUMA nodes: one memory backend per
 //! guest node with `host-nodes=H,policy=bind`, and vCPU threads pinned to

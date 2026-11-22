@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 """Writes a CycloneDX 1.5 SBOM of the Rust dependencies pinned in Cargo.lock.
 
     scripts/make-sbom.py --version 0.4.12 > sbom.cdx.json

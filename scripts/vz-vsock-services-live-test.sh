@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test of `apple.vsock_services` on a Linux guest: the `metadata` and `telemetry` built-ins and an allow-listed
 # port relayed to a host Unix socket, and that a port not in the list stays closed.
 #   scripts/vz-vsock-services-live-test.sh [image]

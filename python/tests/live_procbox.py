@@ -1,5 +1,5 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 """Live check against a real daemon with ``[sandbox.procbox] enabled = true``.
 
     FLUXVM_LIVE_URL=http://127.0.0.1:17788 python3 -m unittest python/tests/live_procbox.py

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Getting a `kaironctl` that is checked against the release's own `SHA256SUMS` before it is ever run. Fails closed: if the
 //! checksums cannot be fetched, or the file does not match, nothing is executed.

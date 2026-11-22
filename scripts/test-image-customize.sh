@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Real-hardware regression for `fluxctl build-image` via **guestkit only**
 # (fluxvm_image::customize_image) — every BuildImageRequest field that mutates
 # the guest filesystem: hostname, packages, commands, ssh_key, copy_in,

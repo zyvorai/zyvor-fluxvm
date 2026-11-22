@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # S1 depth — mid-flow kill + live SYN anti-replay under load.
 set -euo pipefail
 NS="${S1_NAMESPACE:-fluxvm-s1-depth-$RANDOM}"

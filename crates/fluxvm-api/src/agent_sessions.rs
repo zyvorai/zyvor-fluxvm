@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! AgentSession: one handle for what an AI agent needs from FluxVM. It is a thin layer over
 //! the existing sandbox, snapshot, fork, change-set and event primitives; it adds no new

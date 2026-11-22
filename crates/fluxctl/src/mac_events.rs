@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Lifecycle events for `fluxctl mac` instances and `fluxctl kube apple` nodes, in the shape of the daemon's event log
 //! (`{ts, event, vm_id?, fields}`), so they travel the same stream and the same signed webhooks as the daemon's `vm.*` events.

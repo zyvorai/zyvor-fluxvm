@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Lazy HTTP base: caching, bounded parallelism, failure surfacing as NBD EIO
 //! and whole-image sha256 verification, against an in-process range server.

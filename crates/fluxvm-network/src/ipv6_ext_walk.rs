@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //! Portable mirror of Set 19's verifier-bounded IPv6 extension-header walk.
 //!
 //! The production walk lives in `bpf/fluxvm_tc.bpf.c` /

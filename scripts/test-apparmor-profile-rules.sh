@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Static checks on deploy/apparmor/fluxvm: rules the Kairon node and
 # storage=shared disks depend on must stay in both enforced profiles.
 set -euo pipefail

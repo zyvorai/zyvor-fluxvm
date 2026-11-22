@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac-fleet`: everything that is *sent* to a Mac, as pure functions of their inputs, so that the exact remote
 //! commands are golden-tested and `--dry-run` can print them. Nothing here touches the network or the disk.

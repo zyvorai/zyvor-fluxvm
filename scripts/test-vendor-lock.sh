@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Checks packaging/vendor.lock is well formed and that the install scripts accept --lock / --version / --sha256 /
 # --from-file. Offline: no download, no GitHub API call, runs on any OS (the scripts' --dry-run does not need Linux).

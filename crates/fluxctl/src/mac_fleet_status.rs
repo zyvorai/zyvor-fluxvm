@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl mac-fleet status --detail`: the table of `status` plus what the scheduler and an operator of a headless
 //! Mac need: whether the Mac is drained (and since when), which templates it holds, and the headless checks of

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Pure helpers for a VM's screen: what the node accepts for keyboard and mouse input, so the browser can refuse first.
 // Shared by the node Studio and the fleet console (their displays are the same component).

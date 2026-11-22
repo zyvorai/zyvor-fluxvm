@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Builds fluxctl, fluxvm-vz-switch, fluxvm-blockd (FluxDisk), fluxvm-usernet, the signed Virtualization.framework runner and
 # the vmnet broker / USB Accessory Access helpers, signs everything and packs it for Homebrew / a GitHub release:
 #   target/package/fluxvm-<version>-macos-arm64.tar.gz  (+ .sha256)

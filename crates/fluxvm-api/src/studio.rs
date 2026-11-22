@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 //
 // FluxVM Studio: the web UI. The built SPA (`ui/node/dist`, committed so `cargo build` stays Node-free; CI
 // rebuilds and fails if it is stale) is embedded in the binary and served under `/console/`.

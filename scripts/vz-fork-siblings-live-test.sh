@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: fork a vz guest into two children (`POST /v1/vms/{id}/fork` with count 2). Each child must hold the parent's
 # memory marker, get its own machine-id and hostname, and diverge independently: a file written in one child must not appear
 # in its sibling or the parent.

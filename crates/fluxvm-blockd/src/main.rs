@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! fluxvm-blockd serve --export name=base[,overlay=path][,ro][,iops=N][,bps=N]...
 //!                     [--listen 127.0.0.1:10809] [--watch-pid P | --watch-pid-file F]

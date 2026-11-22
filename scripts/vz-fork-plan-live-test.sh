@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test: the fork dry run (`POST /v1/vms/{id}/fork/plan`) on vz guests. A forkable guest gets an ok plan with a memory
 # bound, bad counts, parallelism and names are refused with their own codes, a guest on the Mac's NAT is refused with `forkable`
 # and the real fork agrees, and planning creates no VM.

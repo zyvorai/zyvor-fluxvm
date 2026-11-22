@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! The rest of the `fluxctl mac` command set, kept out of `mac_cmd.rs`: instance lifecycle (`stop`, `start`, `restart`,
 //! `pause`, `unpause`, `rename`, `wait`, `reconcile`, `prune`), inspection (`inspect`, `logs`, `stats`, `top`, `port`, `cp`),

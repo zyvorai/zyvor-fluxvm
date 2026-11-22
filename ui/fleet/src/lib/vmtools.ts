@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 // Pure helpers for a VM's snapshots, clones and commands: what the node accepts, so the forms can refuse first.
 // The screen helpers moved to @fluxvm/ui-core (the node Studio shows the same display); they are re-exported here.

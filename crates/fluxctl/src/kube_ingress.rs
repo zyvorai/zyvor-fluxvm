@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Customising the bundled Traefik (a `HelmChartConfig`, the supported way; `traefik.yaml` is never edited) and ServiceLB
 //! node pools. Pure generators; nothing here talks to a cluster.

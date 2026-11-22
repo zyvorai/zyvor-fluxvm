@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # FLUXVM_SECURE_CONTAINERS_SET17
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 #
 # Real RuntimeClass stateful NetworkPolicy proof.
 # - client initiates TCP to server: allowed by client egress + server ingress

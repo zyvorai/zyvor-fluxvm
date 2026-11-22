@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! `fluxctl service install | uninstall | status`: run `fluxctl serve` as a launchd LaunchAgent of the logged-in user.
 //! Not a system LaunchDaemon: Virtualization.framework restores saved VM state only in an unlocked login session

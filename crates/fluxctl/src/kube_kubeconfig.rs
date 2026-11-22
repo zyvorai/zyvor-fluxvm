@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Merging any k3s kubeconfig (for example `/etc/rancher/k3s/k3s.yaml`, whose cluster, user and context are all called
 //! `default`) into `~/.kube/config` under a chosen name, optionally pointing it at a different API server address.

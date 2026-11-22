@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 # Live test of NBD structured replies between `fluxvm-blockd` and Virtualization.framework's NBD client: the guest
 # reads and writes a plain overlay export and the server logs whether the client negotiated structured replies. The
 # test passes either way as long as I/O is correct; the log line is the finding.

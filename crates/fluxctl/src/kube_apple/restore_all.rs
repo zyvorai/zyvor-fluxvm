@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Restoring an etcd snapshot on a multi-server cluster: `kube apple snapshot restore NAME SNAPSHOT --rejoin-servers --yes`.
 //!

@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! Docker Engine API subset on a unix socket.
 //!
@@ -253,7 +253,7 @@ async fn info(State(st): State<DockerState>) -> impl IntoResponse {
         "Swarm": { "LocalNodeState": "inactive" },
         "InitBinary": "fluxvm-oci-init",
         "SecurityOptions": ["name=fluxvm"],
-        "ProductLicense": "LicenseRef-Zyvor-Production-1.0",
+        "ProductLicense": "LicenseRef-Zyvor-Production-2.0",
         "Warnings": [
             "FluxVM Docker API shim: containers are OCI sandboxes (one microVM each). build/compose/networks/bind-mounts are not supported."
         ]

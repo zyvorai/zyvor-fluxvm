@@ -1,5 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
-// SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+// SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 //! IPv4 fragment reassembly for datagrams the guest sends. Bounded in datagram count and size, with a timeout.
 //! Overlapping fragments make the whole datagram be discarded (RFC 5722 / RFC 1858 style hardening); an exact
