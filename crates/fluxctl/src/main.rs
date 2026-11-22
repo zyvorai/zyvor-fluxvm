@@ -152,6 +152,7 @@ mod stack_fleet;
 mod status;
 mod styles;
 mod support_cmd;
+mod up;
 mod vm_net;
 mod vm_spec;
 mod vz_doctor;
@@ -1523,15 +1524,21 @@ enum Command {
         id: Uuid,
         name: String,
     },
-    /// Bring up the VMs described in `fluxvm.toml`: create what is missing, start what is stopped, recreate what
-    /// changed, in dependency order, and make the services reachable by name. Naming a service brings up only it and
-    /// what it depends on.
+    /// Get started with one command. With a `fluxvm.toml` here (or SERVICES, `-f`, `--fleet`) it brings up that stack:
+    /// create what is missing, start what is stopped, recreate what changed, in dependency order, and make the services
+    /// reachable by name; naming a service brings up only it and what it depends on. With none of those it is for a new
+    /// user: check this machine (KVM or Apple Virtualization, disk, memory, tools), reuse or start the daemon, create the
+    /// default single-server k3s cluster (the same as `kube cluster create default`), wait until it is healthy and print
+    /// the next three commands. Running it again on a healthy setup changes nothing and says so. `--dry-run` shows the
+    /// plan only; `--yes` does not ask. See docs/up.md.
     Up {
         #[arg(short = 'f', long, default_value = "fluxvm.toml")]
         file: PathBuf,
         services: Vec<String>,
         #[command(flatten)]
         fleet: StackFleet,
+        #[command(flatten)]
+        setup: up::UpArgs,
         /// With --fleet: this node (overrides `placement.node`; also a drained one).
         #[arg(long, requires = "fleet")]
         node: Option<String>,
@@ -5894,7 +5901,19 @@ async fn run_remote(
                 .unwrap_or_else(|| "root".into());
             run::ssh_to(&ip, &user, port, vm["backend"] == "vz", &ssh_args).await?;
         }
-        Command::Up { file, services, .. } => {
+        Command::Up {
+            file,
+            services,
+            fleet,
+            setup,
+            ..
+        } => {
+            if up_is_setup(&file, &services, &fleet) {
+                anyhow::bail!(
+                    "`fluxctl up` without a fluxvm.toml sets up the machine it runs on, so it does not use --server or a remote context. Next: run it on that machine (ssh to it), or put a fluxvm.toml here to bring up a stack on the server"
+                );
+            }
+            setup.reject_for_stack()?;
             let (f, dir) = load_stack_file(&file)?;
             let only = (!services.is_empty()).then_some(services.as_slice());
             stack::up(r, &f, &dir, only).await?;
@@ -6647,6 +6666,23 @@ async fn main() -> Result<()> {
         let code =
             backup_verify_cmd::run(command, &cfg.state_dir, &cfg.qemu_img_binary, format).await?;
         std::process::exit(code);
+    }
+
+    if let Command::Up {
+        file,
+        services,
+        fleet,
+        setup,
+        ..
+    } = &cli.command
+    {
+        if !up_is_setup(file, services, fleet) {
+            setup.reject_for_stack()?;
+        } else {
+            // Its own boxed future: inlining it into `main` grew `main`'s frame past the 8 MiB stack of a debug build.
+            let code = Box::pin(up_setup(setup, &cfg, cli.server_token.clone())).await?;
+            std::process::exit(code);
+        }
     }
 
     let m = manager(cfg.clone()).await?;
@@ -8768,6 +8804,43 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
         },
     }
     Ok(())
+}
+
+/// `fluxctl up` as the new-user setup. Looking (`--dry-run`) must work even when the state directory cannot be opened,
+/// so it falls back to asking the daemon; changing things needs the manager like every other command that creates VMs.
+async fn up_setup(a: &up::UpArgs, cfg: &Config, token: Option<String>) -> Result<i32> {
+    match manager(cfg.clone()).await {
+        Ok(m) => Box::pin(up_command(&run::Local(&m), a, &cfg.listen, &cfg.state_dir)).await,
+        Err(_) if a.dry_run => {
+            let r = remote::Remote::new(&cfg.listen, token);
+            Box::pin(up_command(&r, a, &cfg.listen, &cfg.state_dir)).await
+        }
+        Err(e) => Err(e.context(format!(
+            "cannot open FluxVM's state directory {}. Next: `fluxctl up --dry-run` shows the plan without it, `fluxctl doctor` names the cause, or run `sudo fluxctl up` when the directory belongs to root",
+            cfg.state_dir.display()
+        ))),
+    }
+}
+
+/// `fluxctl up` is the new-user setup, not a stack, when there is no stack to bring up: no SERVICES, no `--fleet`, and the
+/// stack file (default `fluxvm.toml`) does not exist.
+fn up_is_setup(file: &std::path::Path, services: &[String], fleet: &StackFleet) -> bool {
+    services.is_empty() && fleet.fleet.is_none() && !file.exists()
+}
+
+/// `fluxctl up` for any daemon connection.
+async fn up_command<A: run::VmApi>(
+    api: &A,
+    a: &up::UpArgs,
+    listen: &str,
+    state_dir: &std::path::Path,
+) -> Result<i32> {
+    let steps = up::RealSteps {
+        api,
+        listen: listen.to_owned(),
+        state_dir: state_dir.to_owned(),
+    };
+    up::run(&steps, a, &mut std::io::stdout(), &mut up::ask_on_terminal).await
 }
 
 /// `fluxctl kube …` for any daemon connection (local state dir or `--server`).

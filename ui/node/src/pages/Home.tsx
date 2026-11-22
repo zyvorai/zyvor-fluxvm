@@ -1,12 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-import { Copy, Download } from 'lucide-react';
+import { useState } from 'react';
+import { Copy, Download, Rocket } from 'lucide-react';
 import { Button, Card, EmptyState, Hero, Pill, Reveal, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
 import { useAct } from '../lib/act';
 import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle } from '../lib/bundle';
+import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
 function ItemRow({ i, notify }: { i: HealthItem; notify: Notify }) {
@@ -28,6 +30,38 @@ function ItemRow({ i, notify }: { i: HealthItem; notify: Notify }) {
       </span>
       {cmd ? <CopyCmd notify={notify} cmd={cmd} /> : null}
     </li>
+  );
+}
+
+/** "Get started": the checklist `fluxctl up` works through, read-only, with the exact command to copy. */
+function GetStarted({ notify }: { notify: Notify }) {
+  const p = usePoll(() => api.get<UpPlan>('/v1/up/plan'), 15000);
+  if (!p.data) {
+    // An older daemon has no plan route; the command still works, so say so instead of hiding the feature.
+    return <Card title="Get started"><p className="fx-muted">{p.loading ? 'Checking this machine.' : 'This daemon cannot show the plan. Run the command below on the machine; it checks everything itself.'}</p><CopyCmd notify={notify} cmd="fluxctl up --dry-run" /></Card>;
+  }
+  const d = p.data;
+  return (
+    <Card title="Get started" action={<Pill tone={d.nothing_to_do ? 'ok' : d.can_run ? 'warn' : 'bad'}>{d.nothing_to_do ? 'Set up' : d.can_run ? 'Ready to start' : 'Blocked'}</Pill>}>
+      <p>{d.headline}</p>
+      <p className="fx-muted">{upAdvice(d)}</p>
+      <ul className="fx-feed">
+        {d.steps.map((s) => (
+          <li key={s.id}>
+            <Pill tone={stepTone(s.state)}>{stepWord(s.state)}</Pill>
+            <span>
+              {s.title}: {s.detail}
+              {s.state !== 'done' && s.fix ? <div className="fx-muted">Fix: {s.fix}</div> : null}
+              {s.state !== 'done' && s.code ? <div className="fx-muted">More: <code className="fx-mono">fluxctl explain {s.code}</code></div> : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p><CopyCmd notify={notify} cmd={upCommand(d)} /> <CopyCmd notify={notify} cmd={upCommand(d, true)} /></p>
+      <p className="fx-muted">Then try:</p>
+      <ul className="fx-feed">{d.next_commands.map((c) => <li key={c.command}><span>{c.why}</span><CopyCmd notify={notify} cmd={c.command} /></li>)}</ul>
+      <p className="fx-muted">Studio only shows the plan. Run the copied command in a terminal on this machine.</p>
+    </Card>
   );
 }
 
@@ -65,6 +99,7 @@ function SupportBundle({ notify }: { notify: Notify }) {
 
 /** The first page: is the cluster fine, in words anyone can read, with the next thing to do and a copy button for each fix. */
 export function HomePage({ notify }: { notify: Notify }) {
+  const [start, setStart] = useState(false);
   const h = usePoll(() => api.get<ClusterHealth>('/v1/cluster/health'), 10000);
   const copy = (cmd: string) => navigator.clipboard.writeText(cmd).then(() => notify('Copied: ' + cmd), () => notify('Copy blocked by the browser', 'bad'));
   if (h.loading && !h.data) return <><Hero eyebrow="Home" title="Checking your cluster" lede="One moment." /><Skeleton h={140} /></>;
@@ -84,7 +119,9 @@ export function HomePage({ notify }: { notify: Notify }) {
       <Hero eyebrow="Home" title={d.headline} lede={d.capacity.summary}>
         <Pill tone={tone(d.light)}>{lightWord(d.light)}</Pill>
         <Button onClick={() => void copy('fluxctl cluster status')}><Copy size={14} /> Copy: fluxctl cluster status</Button>
+        <Button onClick={() => setStart((v) => !v)}><Rocket size={14} /> Get started</Button>
       </Hero>
+      {start ? <Reveal><GetStarted notify={notify} /></Reveal> : null}
       <Reveal>
         <Card title="Next best action" action={next.safe ? <Button size="sm" onClick={() => void copy('fluxctl fix')}><Copy size={14} /> Copy: fluxctl fix</Button> : next.command ? <CopyCmd notify={notify} cmd={next.command} /> : undefined}>
           <p>{next.text}</p>

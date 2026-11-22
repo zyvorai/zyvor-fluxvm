@@ -193,6 +193,9 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ### Support bundle (`fluxctl support-bundle`, Studio Home)
 
 - One `.tar.gz` for a maintainer (versions, cluster health, recent daemon and VM logs, instance and cluster lists, effective config, disk/RAM/network) with secrets removed by a pure, tested redaction and a fail-closed final scan; works with the daemon down and lists what it skipped and why; Studio **Home** has Download support bundle (`POST /v1/support-bundle`) and Copy as fluxctl ([docs/support-bundle.md](docs/support-bundle.md)); unit-tested, not run against a live daemon.
+### Get started (`fluxctl up`, Studio Home)
+
+- `fluxctl up`: checks the host, reuses or starts the daemon, creates the default single-server k3s cluster (`kube cluster create default`, k3s verified by SHA-256), waits until healthy, prints the next three commands; idempotent; `--dry-run`, `--yes`, `--json`; every failure names its fix and a `fluxctl explain` code. Studio Home has a **Get started** button backed by `GET /v1/up/plan`. Unit-tested with fakes; not run end to end ([docs/up.md](docs/up.md)).
 
 ### Cluster home (`fluxctl cluster status`, `fluxctl fix`, Studio Home)
 

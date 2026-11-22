@@ -2431,6 +2431,45 @@ pub fn fetch_offline(dir: &Path, version: Option<&str>) -> Result<Value> {
     Ok(json!({"version": version, "dir": dir, "files": files}))
 }
 
+/// Where a downloaded k3s release is kept: `<root>/<version>`, with `+` made safe for a path.
+pub fn k3s_cache_dir(root: &Path, version: &str) -> PathBuf {
+    root.join(version.replace('+', "-"))
+}
+
+/// The k3s binary and its checksum list for the stable release, in a cache under `root`, verified against the release's
+/// SHA-256 list (a verified copy already there is reused, so a second run downloads only the small list). Returns the
+/// binary, the list and the version. This is what `fluxctl up` hands to `kube cluster create --binary --sha256-file`.
+pub fn fetch_k3s(root: &Path, binary: &str, sums_name: &str) -> Result<(PathBuf, PathBuf, String)> {
+    let version = stable_version()?;
+    let dir = k3s_cache_dir(root, &version);
+    std::fs::create_dir_all(&dir)?;
+    let base = format!(
+        "https://github.com/k3s-io/k3s/releases/download/{}",
+        version.replace('+', "%2B")
+    );
+    let sums_text = curl(&format!("{base}/{sums_name}"), None)?;
+    let sums_path = dir.join(sums_name);
+    std::fs::write(&sums_path, &sums_text)?;
+    let want = parse_sums(&sums_text)
+        .get(binary)
+        .cloned()
+        .with_context(|| format!("{sums_name} has no entry for {binary}"))?;
+    let bin = dir.join(binary);
+    if bin.exists() && sha256_file(&bin)? == want {
+        return Ok((bin, sums_path, version));
+    }
+    eprintln!("downloading {binary} {version} (about 70 MB)...");
+    let part = TempArchive(dir.join(format!(".{binary}.part")));
+    curl(&format!("{base}/{binary}"), Some(&part.0))?;
+    let got = sha256_file(&part.0)?;
+    if got != want {
+        bail!("{binary}: SHA-256 {got} does not match the release's {want}; nothing was installed");
+    }
+    std::fs::set_permissions(&part.0, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    std::fs::rename(&part.0, &bin)?;
+    Ok((bin, sums_path, version))
+}
+
 fn agent_paths(home: &Path) -> (PathBuf, PathBuf) {
     (
         home.join("Library/LaunchAgents")
@@ -2485,6 +2524,12 @@ pub fn agent_uninstall() -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_k3s_cache_dir_is_a_safe_path_per_version() {
+        let d = super::k3s_cache_dir(std::path::Path::new("/c"), "v1.31.4+k3s1");
+        assert_eq!(d, std::path::PathBuf::from("/c/v1.31.4-k3s1"));
+    }
+
     #[test]
     fn a_second_supervisor_for_the_same_cluster_is_refused() {
         let dir = std::env::temp_dir().join(format!("fluxvm-lock-test-{}", std::process::id()));

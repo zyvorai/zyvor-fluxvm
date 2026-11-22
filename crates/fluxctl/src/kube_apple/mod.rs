@@ -29,6 +29,7 @@ mod script_ha;
 mod suc;
 #[cfg(test)]
 mod tests;
+pub(crate) mod up_glue;
 
 #[cfg(test)]
 mod tests_backend {
@@ -509,6 +510,109 @@ fn wants_deprecation_note(args: &[String]) -> bool {
     typed("apple") && !typed("cluster") && !typed("--foreground")
 }
 
+/// `kube cluster create`: build the request from the flags and run the lifecycle. Shared with `fluxctl up`, which
+/// parses these same flags for its default cluster, so there is one create path.
+pub(crate) async fn create_value<H: host::Host>(
+    h: &H,
+    store: &Store,
+    command: AppleCommand,
+) -> Result<serde_json::Value> {
+    let AppleCommand::Create {
+        name,
+        vm,
+        binary,
+        api_port,
+        embedded_etcd,
+        tls_san,
+        kubeconfig,
+        servers,
+        endpoint,
+        vip,
+        cluster_cidr,
+        service_cidr,
+        cluster_dns,
+        cluster_domain,
+        mut disable,
+        secrets_encryption,
+        mut platform,
+        gateway,
+        no_gateway,
+    } = command
+    else {
+        unreachable!("create_value is only called with a Create command")
+    };
+    let install = resolve_install(&binary, None)?;
+    // The gateway choice is made before any VM exists, so a contradiction costs nothing.
+    let choice = gateway_choice::decide(
+        platform.addons.as_deref(),
+        gateway,
+        no_gateway,
+        std::io::IsTerminal::is_terminal(&std::io::stdin()),
+    )?;
+    let (addons, gateway_installed) =
+        gateway_choice::resolve(platform.addons.take(), choice, || {
+            gateway_choice::ask(&mut std::io::stdin().lock(), &mut std::io::stderr())
+        })?;
+    platform.addons = addons;
+    // Platform flags are checked (and the registries file read) before any VM exists.
+    let platform_plan = if platform.is_empty() {
+        None
+    } else {
+        Some(platform_cmd::plan_from_args(&platform)?)
+    };
+    for d in platform_plan.iter().flat_map(|p| p.disable.iter()) {
+        if !disable.contains(d) {
+            disable.push(d.clone());
+        }
+    }
+    let req = lifecycle::CreateReq {
+        name,
+        params: vm.params(),
+        api_port,
+        // More than one server only works with embedded etcd, so asking for several implies it.
+        datastore: if embedded_etcd || servers > 1 {
+            Datastore::Etcd
+        } else {
+            Datastore::Sqlite
+        },
+        tls_sans: tls_san,
+        install,
+        kubeconfig,
+        user: h.user(),
+        servers,
+        endpoint: endpoint.as_deref().map(|e| {
+            if e == "kube-vip" {
+                EndpointKind::KubeVip
+            } else {
+                EndpointKind::Proxy
+            }
+        }),
+        vip,
+        flags: SharedFlags {
+            cluster_cidr,
+            service_cidr,
+            cluster_dns,
+            cluster_domain,
+            disable,
+            secrets_encryption,
+        },
+    };
+    let report = lifecycle::create(h, store, &req).await?;
+    let note = gateway_choice::choice_note(choice, gateway_installed).replace("NAME", &req.name);
+    let Some(plan) = platform_plan else {
+        // Nothing was asked for, but the choice is still recorded so the report says why there is no gateway.
+        let mut v = serde_json::to_value(&report)?;
+        v["platform"] = serde_json::json!({ "choices": [note] });
+        return Ok(v);
+    };
+    let mut v = serde_json::to_value(&report)?;
+    let mut applied =
+        serde_json::to_value(platform_cmd::after_create(h, store, &req.name, &plan).await?)?;
+    applied["choices"] = serde_json::json!([note]);
+    v["platform"] = applied;
+    Ok(v)
+}
+
 pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
     if let AppleCommand::Platform { command: c } = &command
         && c.is_offline()
@@ -528,76 +632,11 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
     };
     let h = host::RealHost::new(api, &store, user)?;
     use host::Host;
+    if matches!(command, AppleCommand::Create { .. }) {
+        return json(&create_value(&h, &store, command).await?);
+    }
     match command {
-        AppleCommand::Create {
-            name,
-            vm,
-            binary,
-            api_port,
-            embedded_etcd,
-            tls_san,
-            kubeconfig,
-            servers,
-            endpoint,
-            vip,
-            cluster_cidr,
-            service_cidr,
-            cluster_dns,
-            cluster_domain,
-            mut disable,
-            secrets_encryption,
-            mut platform,
-            gateway,
-            no_gateway,
-        } => {
-            let install = resolve_install(&binary, None)?;
-            // The gateway choice is made before any VM exists, so a contradiction costs nothing.
-            let choice = gateway_choice::decide(
-                platform.addons.as_deref(),
-                gateway,
-                no_gateway,
-                std::io::IsTerminal::is_terminal(&std::io::stdin()),
-            )?;
-            let (addons, gateway_installed) = gateway_choice::resolve(platform.addons.take(), choice, || {
-                gateway_choice::ask(&mut std::io::stdin().lock(), &mut std::io::stderr())
-            })?;
-            platform.addons = addons;
-            // Platform flags are checked (and the registries file read) before any VM exists.
-            let platform_plan = if platform.is_empty() { None } else { Some(platform_cmd::plan_from_args(&platform)?) };
-            for d in platform_plan.iter().flat_map(|p| p.disable.iter()) {
-                if !disable.contains(d) {
-                    disable.push(d.clone());
-                }
-            }
-            let req = lifecycle::CreateReq {
-                name,
-                params: vm.params(),
-                api_port,
-                // More than one server only works with embedded etcd, so asking for several implies it.
-                datastore: if embedded_etcd || servers > 1 { Datastore::Etcd } else { Datastore::Sqlite },
-                tls_sans: tls_san,
-                install,
-                kubeconfig,
-                user: h.user(),
-                servers,
-                endpoint: endpoint.as_deref().map(|e| if e == "kube-vip" { EndpointKind::KubeVip } else { EndpointKind::Proxy }),
-                vip,
-                flags: SharedFlags { cluster_cidr, service_cidr, cluster_dns, cluster_domain, disable, secrets_encryption },
-            };
-            let report = lifecycle::create(&h, &store, &req).await?;
-            let note = gateway_choice::choice_note(choice, gateway_installed).replace("NAME", &req.name);
-            let Some(plan) = platform_plan else {
-                // Nothing was asked for, but the choice is still recorded so the report says why there is no gateway.
-                let mut v = serde_json::to_value(&report)?;
-                v["platform"] = serde_json::json!({ "choices": [note] });
-                return json(&v);
-            };
-            let mut v = serde_json::to_value(&report)?;
-            let mut applied = serde_json::to_value(platform_cmd::after_create(&h, &store, &req.name, &plan).await?)?;
-            applied["choices"] = serde_json::json!([note]);
-            v["platform"] = applied;
-            json(&v)
-        }
+        AppleCommand::Create { .. } => unreachable!("handled above"),
         AppleCommand::Join { cluster, vm, binary, node, role, url, token_file, keep_failed } => {
             let external = url.zip(token_file);
             let default = external.is_none().then_some(Install::FromServer);
