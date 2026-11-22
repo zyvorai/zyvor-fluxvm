@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type DockerContainer, USE_COMMAND, actionDone, contextCommand, contextLabel, contextTone, containerTone, filterContainers, fmtSize, portsText, summarize } from './docker';
+import { type DockerContainer, FULL_ENGINE_COMMAND, USE_COMMAND, actionDone, actionLabel, actionsFor, builtinNote, statsText, contextCommand, contextLabel, contextTone, containerTone, filterContainers, fmtSize, portsText, summarize } from './docker';
 
 const c = (name: string, state: string, status: string, image = 'nginx'): DockerContainer => ({ id: name + '0000', name, image, command: '', state, status, created: 0, ports: [] });
 
@@ -74,5 +74,39 @@ describe('docker context', () => {
     expect(contextTone('not-installed')).toBe('idle');
     expect(contextLabel('current')).toBe('in use');
     expect(contextLabel('no-docker-cli')).toBe('no docker command');
+  });
+});
+
+describe('actions', () => {
+  it('offers what the state allows', () => {
+    expect(actionsFor('running')).toEqual(['restart', 'pause', 'stop', 'kill']);
+    expect(actionsFor('paused')).toEqual(['unpause', 'stop', 'kill']);
+    expect(actionsFor('restarting')).toEqual(['stop', 'kill']);
+    expect(actionsFor('exited')).toEqual(['start']);
+    expect(actionsFor('created')).toEqual(['start']);
+  });
+  it('says what happened in plain words', () => {
+    expect(actionDone('web', 'kill', true)).toBe('web killed');
+    expect(actionDone('web', 'pause', true)).toBe('web paused');
+    expect(actionDone('web', 'unpause', true)).toBe('web resumed');
+    expect(actionDone('web', 'restart', true)).toBe('web restarted');
+    expect(actionDone('web', 'kill', false)).toBe('web was already stopped');
+    expect(actionLabel('unpause')).toBe('Unpause');
+  });
+});
+
+describe('stats', () => {
+  it('writes one line and leaves out what is missing', () => {
+    expect(statsText({ cpu_percent: 0.42, mem_usage: 12_300_000, mem_limit: 512_000_000, mem_percent: 2.4, net_rx: 1200, net_tx: 800, pids: 3 })).toBe('0.4% CPU · 12.3 MB of 512 MB (2.4%) · net 1.2 kB in, 800 B out · 3 processes');
+    expect(statsText({ cpu_percent: 1, mem_usage: 2000, mem_limit: 0, mem_percent: 0, net_rx: 0, net_tx: 0, pids: 0 })).toBe('1.0% CPU · 2.0 kB memory');
+    expect(statsText(null)).toBe('');
+  });
+});
+
+describe('the built-in engine note', () => {
+  it('names what is unsupported and the one command', () => {
+    expect(builtinNote()).toContain('docker build');
+    expect(builtinNote()).toContain(FULL_ENGINE_COMMAND);
+    expect(FULL_ENGINE_COMMAND).toBe('fluxctl docker up');
   });
 });

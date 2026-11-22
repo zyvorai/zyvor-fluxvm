@@ -5,7 +5,8 @@
 //!
 //! Maps containers to OCI sandboxes and images to the FluxVM OCI cache.
 //! Supported CLI: `docker pull|images|run|ps|rm|logs|exec|stop`.
-//! Not supported: `build`, Compose, bind mounts, Docker networks.
+//! Also: `restart|kill|pause|unpause|top|stats|rename|events|network ls|volume ls`.
+//! Not supported (a Docker-shaped error says what to do): `build`, Compose, bind mounts, user-defined networks, named volumes.
 
 use axum::{
     Json, Router,
@@ -95,7 +96,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         manager,
         execs: Arc::new(Mutex::new(BTreeMap::new())),
     };
-    Router::new()
+    let routes = Router::new()
         .route("/_ping", get(ping))
         .route("/version", get(version))
         .route("/info", get(info))
@@ -114,8 +115,30 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/images/json", get(images_list))
         .route("/images/create", post(images_create))
         .route("/images/{name}", delete(images_delete))
-        .layer(middleware::from_fn(strip_api_version))
-        .with_state(state)
+        .route("/containers/{id}/restart", post(extra::containers_restart))
+        .route("/containers/{id}/kill", post(extra::containers_kill))
+        .route("/containers/{id}/pause", post(extra::containers_pause))
+        .route("/containers/{id}/unpause", post(extra::containers_unpause))
+        .route("/containers/{id}/top", get(extra::containers_top))
+        .route("/containers/{id}/stats", get(extra::containers_stats))
+        .route("/containers/{id}/rename", post(extra::containers_rename))
+        .route("/events", get(extra::events_route))
+        .route("/networks", get(extra::networks_list))
+        .route("/networks/create", post(extra::networks_create))
+        .route("/networks/{id}", get(extra::networks_inspect))
+        .route("/volumes", get(extra::volumes_list))
+        .route("/volumes/create", post(extra::volumes_create))
+        .route(
+            "/volumes/{name}",
+            get(extra::volume_missing).delete(extra::volume_missing),
+        )
+        .route("/build", post(extra::build))
+        .fallback(extra::fallback)
+        .method_not_allowed_fallback(extra::fallback)
+        .with_state(state);
+    // The version prefix (`/v1.43/...`) must be removed before routing, so the middleware wraps the whole router.
+    use tower_layer::Layer as _;
+    Router::new().fallback_service(middleware::from_fn(strip_api_version).layer(routes))
 }
 
 /// Bind `{path}` and serve the Docker shim until the process exits.
@@ -1162,6 +1185,8 @@ async fn run_exec(
         ))),
     }
 }
+
+mod extra;
 
 #[cfg(test)]
 mod tests {
