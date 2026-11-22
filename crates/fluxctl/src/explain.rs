@@ -44,6 +44,12 @@ pub fn render(args: &ExplainArgs) -> Result<(String, i32)> {
         ));
     };
     let hits = find(query);
+    let mac = crate::mac_errors::find(query);
+    // MAC_SLOT_LIMIT, SSH_HOSTKEY_MISMATCH, ...: failures of `fluxctl mac`, `mac-fleet` and `kube` on a Mac. A bare status
+    // (409, 503) shows the API codes and the Mac ones together.
+    if hits.is_empty() && !mac.is_empty() {
+        return Ok((mac_out(&mac, args.json)?, 0));
+    }
     if hits.is_empty() {
         let mut msg = format!("unknown error code {query:?}");
         if let Some(s) = error_codes::suggest(query) {
@@ -60,8 +66,21 @@ pub fn render(args: &ExplainArgs) -> Result<(String, i32)> {
         };
         return Ok((serde_json::to_string_pretty(&v)? + "\n", 0));
     }
-    let text: Vec<String> = hits.iter().map(|e| card(e)).collect();
+    let mut text: Vec<String> = hits.iter().map(|e| card(e)).collect();
+    text.extend(mac.iter().map(|e| crate::mac_errors::card(e)));
     Ok((text.join("\n"), 0))
+}
+
+fn mac_out(found: &[&crate::mac_errors::MacCode], json: bool) -> Result<String> {
+    if json {
+        let v = if found.len() == 1 {
+            crate::mac_errors::entry(found[0])
+        } else {
+            Value::Array(found.iter().map(|e| crate::mac_errors::entry(e)).collect())
+        };
+        return Ok(serde_json::to_string_pretty(&v)? + "\n");
+    }
+    Ok(found.iter().map(|e| crate::mac_errors::card(e)).collect::<Vec<_>>().join("\n"))
 }
 
 /// A code name, an HTTP status, or a fragment of a code name.
