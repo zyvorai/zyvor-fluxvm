@@ -1,0 +1,105 @@
+# Demo fixture for `fluxctl gateway demo`, from the Zyvor Setura 0.1.0 example (namespace, GatewayClass, Gateway, one app,
+# one HTTPRoute). Needs Envoy Gateway in envoy-gateway-system (`--addons envoy-gateway`). Cluster-scoped: GatewayClass fluxvm-demo-envoy.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fluxvm-gateway-demo
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: fluxvm-demo-envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: local
+  namespace: fluxvm-gateway-demo
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: dev
+  namespace: fluxvm-gateway-demo
+spec:
+  gatewayClassName: fluxvm-demo-envoy
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: local
+  listeners:
+    - name: web
+      protocol: HTTP
+      port: 8080
+      hostname: orders.fluxvm.test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: fluxvm-gateway-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: orders}
+  template:
+    metadata:
+      labels: {app: orders}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: orders
+          image: python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
+          command: ["python3", "-B", "-u", "-c"]
+          args:
+            - |
+              from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+              class Orders(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200)
+                      self.send_header("X-Setura-Backend", "orders-v1")
+                      self.end_headers()
+                      self.wfile.write(b"orders-v1\n")
+              ThreadingHTTPServer(("", 8080), Orders).serve_forever()
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: "/", port: http}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: fluxvm-gateway-demo
+spec:
+  selector: {app: orders}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: orders
+  namespace: fluxvm-gateway-demo
+spec:
+  parentRefs: [{name: dev, sectionName: web}]
+  hostnames: [orders.fluxvm.test]
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /checkout}
+      backendRefs: [{name: orders, port: 80}]
