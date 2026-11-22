@@ -151,8 +151,16 @@ impl ContainerSpec {
 
     /// Reject specs the runtime cannot honour, before anything is created.
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.is_empty() || !self.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err(format!("container name {:?} must be alphanumeric and dashes", self.name));
+        if self.name.is_empty()
+            || !self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return Err(format!(
+                "container name {:?} must be alphanumeric and dashes",
+                self.name
+            ));
         }
         if self.argv.is_empty() {
             return Err("the container has no command: the image has no Entrypoint or Cmd and none was given".into());
@@ -170,7 +178,10 @@ impl ContainerSpec {
         }
         if !self.user.is_empty() {
             let ok = self.user.split(':').count() <= 2
-                && self.user.split(':').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+                && self
+                    .user
+                    .split(':')
+                    .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
             if !ok {
                 return Err(format!(
                     "user {:?} must be numeric uid[:gid]; names need the image's /etc/passwd, which the launcher does not read",
@@ -178,7 +189,10 @@ impl ContainerSpec {
                 ));
             }
         }
-        if self.limits.memory_mib == Some(0) || self.limits.pids == Some(0) || self.limits.cpu_percent == Some(0) {
+        if self.limits.memory_mib == Some(0)
+            || self.limits.pids == Some(0)
+            || self.limits.cpu_percent == Some(0)
+        {
             return Err("limits must be greater than zero".into());
         }
         if let Some(w) = self.limits.io_weight
@@ -205,7 +219,11 @@ mod tests {
     use super::*;
 
     fn ok() -> ContainerSpec {
-        ContainerSpec { name: "fx-1a2b3c4d".into(), argv: vec!["/bin/true".into()], ..Default::default() }
+        ContainerSpec {
+            name: "fx-1a2b3c4d".into(),
+            argv: vec!["/bin/true".into()],
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -253,7 +271,8 @@ mod tests {
     fn json_round_trip_keeps_defaults_for_missing_fields() {
         let s: ContainerSpec = serde_json::from_str(r#"{"name":"fx-a","argv":["x"]}"#).unwrap();
         assert!(s.hardening.read_only_root);
-        let back: ContainerSpec = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let back: ContainerSpec =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(s, back);
     }
 }

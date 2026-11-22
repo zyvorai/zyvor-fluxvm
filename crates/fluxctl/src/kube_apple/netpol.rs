@@ -27,7 +27,9 @@ pub struct NetpolOpts {
 pub const PROTECTED: [&str; 3] = ["kube-system", "kube-public", "kube-node-lease"];
 
 pub fn cidr_ok(c: &str) -> bool {
-    let Some((ip, bits)) = c.split_once('/') else { return false };
+    let Some((ip, bits)) = c.split_once('/') else {
+        return false;
+    };
     match (ip.parse::<std::net::IpAddr>(), bits.parse::<u8>()) {
         (Ok(std::net::IpAddr::V4(_)), Ok(b)) => b <= 32,
         (Ok(std::net::IpAddr::V6(_)), Ok(b)) => b <= 128,
@@ -82,7 +84,11 @@ pub fn baseline(o: &NetpolOpts) -> Result<String> {
         ));
     }
     if !o.allow_egress_cidr.is_empty() {
-        let blocks: String = o.allow_egress_cidr.iter().map(|c| format!("    - ipBlock:\n        cidr: {c}\n")).collect();
+        let blocks: String = o
+            .allow_egress_cidr
+            .iter()
+            .map(|c| format!("    - ipBlock:\n        cidr: {c}\n"))
+            .collect();
         docs.push(format!(
             "{}spec:\n  podSelector: {{}}\n  policyTypes:\n  - Egress\n  egress:\n  - to:\n{blocks}",
             header("baseline-allow-egress-cidrs", ns)
@@ -93,10 +99,25 @@ pub fn baseline(o: &NetpolOpts) -> Result<String> {
 
 pub async fn apply<R: Remote>(r: &R, o: &NetpolOpts) -> Result<String> {
     let yaml = baseline(o)?;
-    r.run_server(&format!(": fluxvm-op netpol-ns; set -eu; sudo -n {K3S_BIN} kubectl get namespace {} -o name", o.namespace), None)
-        .await
-        .map_err(|e| anyhow::anyhow!("namespace {} does not exist ({e:#}); create it first", o.namespace))?;
-    r.run_server(&format!(": fluxvm-op netpol-apply; set -eu; sudo -n {K3S_BIN} kubectl apply -f -"), Some(yaml.as_bytes())).await
+    r.run_server(
+        &format!(
+            ": fluxvm-op netpol-ns; set -eu; sudo -n {K3S_BIN} kubectl get namespace {} -o name",
+            o.namespace
+        ),
+        None,
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "namespace {} does not exist ({e:#}); create it first",
+            o.namespace
+        )
+    })?;
+    r.run_server(
+        &format!(": fluxvm-op netpol-apply; set -eu; sudo -n {K3S_BIN} kubectl apply -f -"),
+        Some(yaml.as_bytes()),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -105,7 +126,10 @@ mod tests {
     use super::*;
 
     fn opts() -> NetpolOpts {
-        NetpolOpts { namespace: "app".into(), ..Default::default() }
+        NetpolOpts {
+            namespace: "app".into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -120,7 +144,13 @@ apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: baseli
 
     #[test]
     fn options_add_and_remove_policies_and_every_document_parses() {
-        let o = NetpolOpts { no_dns: true, no_same_namespace: true, allow_from: vec!["ingress-nginx".into()], allow_egress_cidr: vec!["10.0.0.0/8".into(), "fd00::/8".into()], ..opts() };
+        let o = NetpolOpts {
+            no_dns: true,
+            no_same_namespace: true,
+            allow_from: vec!["ingress-nginx".into()],
+            allow_egress_cidr: vec!["10.0.0.0/8".into(), "fd00::/8".into()],
+            ..opts()
+        };
         let y = baseline(&o).unwrap();
         let names: Vec<String> = serde_yaml::Deserializer::from_str(&y)
             .map(|d| {
@@ -129,20 +159,59 @@ apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: baseli
                 v["metadata"]["name"].as_str().unwrap().to_owned()
             })
             .collect();
-        assert_eq!(names, ["baseline-default-deny", "baseline-allow-from-ingress-nginx", "baseline-allow-egress-cidrs"]);
+        assert_eq!(
+            names,
+            [
+                "baseline-default-deny",
+                "baseline-allow-from-ingress-nginx",
+                "baseline-allow-egress-cidrs"
+            ]
+        );
         assert!(y.contains("kubernetes.io/metadata.name: ingress-nginx"));
-        assert!(y.contains("    - ipBlock:\n        cidr: 10.0.0.0/8\n    - ipBlock:\n        cidr: fd00::/8\n"));
+        assert!(y.contains(
+            "    - ipBlock:\n        cidr: 10.0.0.0/8\n    - ipBlock:\n        cidr: fd00::/8\n"
+        ));
     }
 
     #[test]
     fn refuses_system_namespaces_and_odd_input() {
         for ns in PROTECTED {
-            assert!(baseline(&NetpolOpts { namespace: ns.into(), ..Default::default() }).is_err());
+            assert!(
+                baseline(&NetpolOpts {
+                    namespace: ns.into(),
+                    ..Default::default()
+                })
+                .is_err()
+            );
         }
-        assert!(baseline(&NetpolOpts { namespace: "A b".into(), ..Default::default() }).is_err());
-        assert!(baseline(&NetpolOpts { allow_from: vec!["x\ny".into()], ..opts() }).is_err());
-        assert!(baseline(&NetpolOpts { allow_egress_cidr: vec!["10.0.0.0".into()], ..opts() }).is_err());
-        assert!(baseline(&NetpolOpts { allow_egress_cidr: vec!["10.0.0.0/33".into()], ..opts() }).is_err());
+        assert!(
+            baseline(&NetpolOpts {
+                namespace: "A b".into(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            baseline(&NetpolOpts {
+                allow_from: vec!["x\ny".into()],
+                ..opts()
+            })
+            .is_err()
+        );
+        assert!(
+            baseline(&NetpolOpts {
+                allow_egress_cidr: vec!["10.0.0.0".into()],
+                ..opts()
+            })
+            .is_err()
+        );
+        assert!(
+            baseline(&NetpolOpts {
+                allow_egress_cidr: vec!["10.0.0.0/33".into()],
+                ..opts()
+            })
+            .is_err()
+        );
         assert!(cidr_ok("0.0.0.0/0") && cidr_ok("::/0"));
     }
 
@@ -151,10 +220,22 @@ apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: baseli
         let r = FakeRemote::cluster(1, 0);
         apply(&r, &opts()).await.unwrap();
         assert_eq!(r.ops(), ["c-s1:netpol-ns", "c-s1:netpol-apply"]);
-        assert!(r.log.borrow()[1].2.as_deref().unwrap().contains("baseline-default-deny"));
+        assert!(
+            r.log.borrow()[1]
+                .2
+                .as_deref()
+                .unwrap()
+                .contains("baseline-default-deny")
+        );
         let r = FakeRemote::cluster(1, 0);
         r.fail_on("netpol-ns", "NotFound");
-        assert!(apply(&r, &opts()).await.unwrap_err().to_string().contains("does not exist"));
+        assert!(
+            apply(&r, &opts())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
         assert_eq!(r.ops().len(), 1);
     }
 }

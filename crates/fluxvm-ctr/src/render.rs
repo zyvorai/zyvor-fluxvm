@@ -66,7 +66,10 @@ pub fn system_call_filter() -> String {
 }
 
 fn quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-:=@%+,".contains(c)) {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:=@%+,".contains(c))
+    {
         s.to_string()
     } else {
         format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -165,7 +168,12 @@ pub fn container_profile(spec: &ContainerSpec, rootless: bool) -> Vec<(String, S
     add("ProtectHostname", "yes".into());
     add(
         "NoNewPrivileges",
-        if spec.hardening.no_new_privileges { "yes" } else { "no" }.into(),
+        if spec.hardening.no_new_privileges {
+            "yes"
+        } else {
+            "no"
+        }
+        .into(),
     );
     add(
         "CapabilityBoundingSet",
@@ -184,7 +192,10 @@ pub fn container_profile(spec: &ContainerSpec, rootless: bool) -> Vec<(String, S
         Seccomp::Unconfined => add("SystemCallFilter", "(none: seccomp unconfined)".into()),
     }
     if !spec.user.is_empty() {
-        add("User", spec.user.split(':').next().unwrap_or("").to_string());
+        add(
+            "User",
+            spec.user.split(':').next().unwrap_or("").to_string(),
+        );
     }
     add("WorkingDirectory", spec.workdir.clone());
     for e in &spec.env {
@@ -207,7 +218,9 @@ pub fn unit_file(spec: &ContainerSpec, rootless: bool) -> String {
         out.push_str(&format!("{k}={v}\n"));
     }
     out.push_str(&format!("ExecStart={}\n", exec_start(spec)));
-    out.push_str("\n# Enforced by fluxvm-container-run inside the container, in systemd's own vocabulary.\n");
+    out.push_str(
+        "\n# Enforced by fluxvm-container-run inside the container, in systemd's own vocabulary.\n",
+    );
     out.push_str("# systemd ignores [X-...] sections, so this file loads as is.\n");
     out.push_str("[X-FluxVM-Container]\n");
     for (k, v) in container_profile(spec, rootless) {
@@ -222,8 +235,15 @@ pub fn systemd_run_argv(spec: &ContainerSpec, manager: Manager) -> Vec<String> {
     if manager == Manager::SystemdUser {
         a.push("--user".into());
     }
-    a.extend(["--quiet".into(), "--collect".into(), format!("--unit={}", spec.name)]);
-    for (k, v) in unit_properties(spec).into_iter().chain(service_properties(spec)) {
+    a.extend([
+        "--quiet".into(),
+        "--collect".into(),
+        format!("--unit={}", spec.name),
+    ]);
+    for (k, v) in unit_properties(spec)
+        .into_iter()
+        .chain(service_properties(spec))
+    {
         if k == "Type" {
             a.push("--service-type=exec".into());
         } else if k == "Description" {
@@ -249,7 +269,10 @@ pub fn cgroup_files(spec: &ContainerSpec) -> Vec<(String, String)> {
         f.push(("memory.oom.group".to_string(), "1".to_string()));
     }
     if let Some(c) = spec.limits.cpu_percent {
-        f.push(("cpu.max".to_string(), format!("{} 100000", u64::from(c) * 1000)));
+        f.push((
+            "cpu.max".to_string(),
+            format!("{} 100000", u64::from(c) * 1000),
+        ));
     }
     if let Some(n) = spec.limits.pids {
         f.push(("pids.max".to_string(), n.to_string()));
@@ -293,7 +316,12 @@ mod tests {
             env: vec!["A=b c".into()],
             workdir: "/".into(),
             user: "1000:1000".into(),
-            limits: Limits { memory_mib: Some(256), cpu_percent: Some(50), pids: Some(128), io_weight: Some(100) },
+            limits: Limits {
+                memory_mib: Some(256),
+                cpu_percent: Some(50),
+                pids: Some(128),
+                io_weight: Some(100),
+            },
             restart: Restart::OnFailure,
             ttl_seconds: Some(600),
             after: vec!["fx-db.service".into()],
@@ -363,7 +391,12 @@ Environment=\"A=b c\"
     fn rootless_and_host_net_and_unconfined_change_the_profile() {
         let mut s = spec();
         s.net = Net::Host;
-        s.hardening = Hardening { read_only_root: false, seccomp: Seccomp::Unconfined, no_new_privileges: false, capabilities: vec![] };
+        s.hardening = Hardening {
+            read_only_root: false,
+            seccomp: Seccomp::Unconfined,
+            no_new_privileges: false,
+            capabilities: vec![],
+        };
         let u = unit_file(&s, true);
         assert!(u.contains("PrivateUsers=yes\nPrivateNetwork=no\n"), "{u}");
         assert!(!u.contains("ReadOnlyPaths"));
@@ -377,7 +410,10 @@ Environment=\"A=b c\"
         let mut s = spec();
         s.after.clear();
         s.requires.clear();
-        s.limits = Limits { memory_mib: Some(64), ..Default::default() };
+        s.limits = Limits {
+            memory_mib: Some(64),
+            ..Default::default()
+        };
         s.restart = Restart::No;
         s.ttl_seconds = None;
         let got = systemd_run_argv(&s, Manager::SystemdUser).join("\n");
@@ -437,8 +473,15 @@ run
     #[cfg(target_os = "linux")]
     #[test]
     fn the_rendered_filter_is_the_one_the_launcher_applies() {
-        let launcher: Vec<&str> = fluxvm_procbox::seccomp::denied_syscalls().iter().map(|(n, _)| *n).collect();
-        let rendered: Vec<&str> = SECCOMP_DENIED.iter().copied().take(launcher.len()).collect();
+        let launcher: Vec<&str> = fluxvm_procbox::seccomp::denied_syscalls()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        let rendered: Vec<&str> = SECCOMP_DENIED
+            .iter()
+            .copied()
+            .take(launcher.len())
+            .collect();
         assert_eq!(launcher, rendered);
         assert_eq!(&SECCOMP_DENIED[launcher.len()..], ["unshare", "setns"]);
     }

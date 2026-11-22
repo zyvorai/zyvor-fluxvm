@@ -56,14 +56,28 @@ pub fn render(args: &ExplainArgs) -> Result<(String, i32)> {
         let q = query.trim().to_ascii_uppercase().replace('-', "_");
         let found: Vec<&HealthCode> = match health::code(query) {
             Some(c) => vec![c],
-            None => health::CODES.iter().filter(|c| c.code.contains(q.as_str())).collect(),
+            None => health::CODES
+                .iter()
+                .filter(|c| c.code.contains(q.as_str()))
+                .collect(),
         };
         if !found.is_empty() {
             if args.json {
-                let v = if found.len() == 1 { health_entry(found[0]) } else { Value::Array(found.iter().map(|e| health_entry(e)).collect()) };
+                let v = if found.len() == 1 {
+                    health_entry(found[0])
+                } else {
+                    Value::Array(found.iter().map(|e| health_entry(e)).collect())
+                };
                 return Ok((serde_json::to_string_pretty(&v)? + "\n", 0));
             }
-            return Ok((found.iter().map(|e| health_card(e)).collect::<Vec<_>>().join("\n"), 0));
+            return Ok((
+                found
+                    .iter()
+                    .map(|e| health_card(e))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                0,
+            ));
         }
     }
     if hits.is_empty() {
@@ -96,7 +110,11 @@ fn mac_out(found: &[&crate::mac_errors::MacCode], json: bool) -> Result<String> 
         };
         return Ok(serde_json::to_string_pretty(&v)? + "\n");
     }
-    Ok(found.iter().map(|e| crate::mac_errors::card(e)).collect::<Vec<_>>().join("\n"))
+    Ok(found
+        .iter()
+        .map(|e| crate::mac_errors::card(e))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// A code name, an HTTP status, or a fragment of a code name.
@@ -160,7 +178,11 @@ fn list(json: bool) -> Result<String> {
         let v = Value::Array(
             rows.iter()
                 .map(|e| json!({"code": e.code, "status": e.status, "summary": e.summary}))
-                .chain(health::CODES.iter().map(|e| json!({"code": e.code, "status": null, "summary": e.summary})))
+                .chain(
+                    health::CODES
+                        .iter()
+                        .map(|e| json!({"code": e.code, "status": null, "summary": e.summary})),
+                )
                 .collect(),
         );
         return Ok(serde_json::to_string_pretty(&v)? + "\n");
@@ -256,7 +278,10 @@ mod tests {
         // a fragment finds the codes that contain it
         let (out, code) = render(&args(Some("backup"), false, false)).unwrap();
         assert_eq!(code, 0);
-        assert!(out.contains("NO_BACKUP") && out.contains("STALE_BACKUP"), "{out}");
+        assert!(
+            out.contains("NO_BACKUP") && out.contains("STALE_BACKUP"),
+            "{out}"
+        );
     }
 
     #[test]

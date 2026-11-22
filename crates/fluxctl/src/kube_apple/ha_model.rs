@@ -182,8 +182,14 @@ impl SnapshotPolicy {
         let mut put = |k: &str, v: Value| {
             m.insert(Value::String(k.into()), v);
         };
-        put("etcd-snapshot-schedule-cron", Value::String(self.cron.clone()));
-        put("etcd-snapshot-retention", Value::Number(self.retention.into()));
+        put(
+            "etcd-snapshot-schedule-cron",
+            Value::String(self.cron.clone()),
+        );
+        put(
+            "etcd-snapshot-retention",
+            Value::Number(self.retention.into()),
+        );
         put("etcd-snapshot-compress", Value::Bool(self.compress));
         if let Some(s) = &self.s3 {
             put("etcd-s3", Value::Bool(true));
@@ -329,7 +335,12 @@ mod tests {
             service_cidr: Some("10.43.0.0/16".into()),
             cluster_dns: Some("10.43.0.10".into()),
             cluster_domain: Some("cluster.local".into()),
-            disable: vec!["servicelb".into(), "traefik".into(), "coredns".into(), "coredns".into()],
+            disable: vec![
+                "servicelb".into(),
+                "traefik".into(),
+                "coredns".into(),
+                "coredns".into(),
+            ],
             secrets_encryption: true,
         };
         f.validate().unwrap();
@@ -340,11 +351,26 @@ mod tests {
         );
         assert_eq!(SharedFlags::default().args().join(" "), "--disable traefik");
         for bad in [
-            SharedFlags { cluster_cidr: Some("10.0.0.0".into()), ..Default::default() },
-            SharedFlags { cluster_cidr: Some("10.0.0.0/8;id".into()), ..Default::default() },
-            SharedFlags { cluster_dns: Some("dns.local".into()), ..Default::default() },
-            SharedFlags { cluster_domain: Some("a b".into()), ..Default::default() },
-            SharedFlags { disable: vec!["x;y".into()], ..Default::default() },
+            SharedFlags {
+                cluster_cidr: Some("10.0.0.0".into()),
+                ..Default::default()
+            },
+            SharedFlags {
+                cluster_cidr: Some("10.0.0.0/8;id".into()),
+                ..Default::default()
+            },
+            SharedFlags {
+                cluster_dns: Some("dns.local".into()),
+                ..Default::default()
+            },
+            SharedFlags {
+                cluster_domain: Some("a b".into()),
+                ..Default::default()
+            },
+            SharedFlags {
+                disable: vec!["x;y".into()],
+                ..Default::default()
+            },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
@@ -404,10 +430,18 @@ mod tests {
         std::fs::write(&f, "# c\naccess_key=AKIA1\nsecret_key = \"abc/def\"\n").unwrap();
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
         let none = |_: &str| None;
-        assert!(S3Secret::load(Some(&f), &none).unwrap_err().to_string().contains("readable by others"));
+        assert!(
+            S3Secret::load(Some(&f), &none)
+                .unwrap_err()
+                .to_string()
+                .contains("readable by others")
+        );
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
         let s = S3Secret::load(Some(&f), &none).unwrap();
-        assert_eq!((s.access_key.as_str(), s.secret_key.as_str()), ("AKIA1", "abc/def"));
+        assert_eq!(
+            (s.access_key.as_str(), s.secret_key.as_str()),
+            ("AKIA1", "abc/def")
+        );
         let env = |k: &str| match k {
             "AWS_ACCESS_KEY_ID" => Some("AKIA2".to_owned()),
             "AWS_SECRET_ACCESS_KEY" => Some("zzz".to_owned()),

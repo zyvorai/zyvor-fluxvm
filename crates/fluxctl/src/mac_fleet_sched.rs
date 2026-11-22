@@ -388,12 +388,11 @@ pub fn evaluate(
         }
     }
     match (r.is_empty(), fit) {
-        (true, Some(s)) => Ok(s
-            + if holds(&h.templates, &job.template) == Holds::Yes {
-                TEMPLATE_PRESENT_BONUS
-            } else {
-                0
-            }),
+        (true, Some(s)) => Ok(s + if holds(&h.templates, &job.template) == Holds::Yes {
+            TEMPLATE_PRESENT_BONUS
+        } else {
+            0
+        }),
         _ => Err(r),
     }
 }
@@ -426,7 +425,12 @@ pub fn decide(
     let mut blocked = vec![];
     let mut waitable = false;
     for (i, h) in views.iter().enumerate() {
-        match evaluate(h, job, leases.usage(&h.name, now), drain.is_drained(&h.name)) {
+        match evaluate(
+            h,
+            job,
+            leases.usage(&h.name, now),
+            drain.is_drained(&h.name),
+        ) {
             Ok(s) => {
                 if best.as_ref().is_none_or(|b| s > b.score) {
                     best = Some(Candidate { index: i, score: s });
@@ -455,7 +459,10 @@ pub fn explain(blocked: &[(String, Vec<Reason>)]) -> String {
         .map(|(n, rs)| {
             format!(
                 "{n}: {}",
-                rs.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("; ")
+                rs.iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
             )
         })
         .collect::<Vec<_>>()
@@ -622,7 +629,11 @@ impl FleetState {
 
 /// A `--host-label`/`--label` value for placement: `key=value` or a bare word, no shell characters.
 pub fn check_label(l: &str) -> Result<()> {
-    if !(valid_label(l) || (!l.is_empty() && l.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_.=/".contains(&c)))) {
+    if !(valid_label(l)
+        || (!l.is_empty()
+            && l.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.=/".contains(&c))))
+    {
         bail!("label {l:?} must be a word or key=value without spaces or shell characters");
     }
     Ok(())
@@ -728,15 +739,15 @@ pub mod tests {
     #[test]
     fn a_missing_or_stale_template_is_a_permanent_reason_that_names_the_fix() {
         let t = pinned();
-        let v = vec![
-            view("a", &[]),
-            view("b", &[("reg.example/xcode:15", D2)]),
-        ];
+        let v = vec![view("a", &[]), view("b", &[("reg.example/xcode:15", D2)])];
         match decide(&v, &job(&t), &Leases::default(), &FleetState::default(), 0) {
             Decision::Never(b) => {
                 let text = explain(&b);
                 assert!(text.contains("a: does not hold"), "{text}");
-                assert!(text.contains("b: holds reg.example/xcode:15 at sha256:2222"), "{text}");
+                assert!(
+                    text.contains("b: holds reg.example/xcode:15 at sha256:2222"),
+                    "{text}"
+                );
                 assert!(text.contains("templates distribute"), "{text}");
             }
             d => panic!("{d:?}"),
@@ -748,7 +759,13 @@ pub mod tests {
         let t = pinned();
         let mut a = view("a", &[("reg.example/xcode:15", D1)]);
         a.caps.macos_guests = 2;
-        match decide(&[a], &job(&t), &Leases::default(), &FleetState::default(), 0) {
+        match decide(
+            &[a],
+            &job(&t),
+            &Leases::default(),
+            &FleetState::default(),
+            0,
+        ) {
             Decision::Wait(b) => assert!(explain(&b).contains("both macOS slots"), "{b:?}"),
             d => panic!("{d:?}"),
         }
@@ -768,7 +785,13 @@ pub mod tests {
         ));
         // expired: the probe is trusted again
         assert!(matches!(
-            decide(&[a.clone()], &j, &l, &FleetState::default(), 100 + LEASE_TTL_SECS),
+            decide(
+                &[a.clone()],
+                &j,
+                &l,
+                &FleetState::default(),
+                100 + LEASE_TTL_SECS
+            ),
             Decision::Place(_)
         ));
         l.release("job-1");
@@ -844,7 +867,11 @@ pub mod tests {
             fluxctl_version: Some("0.4.21".into()),
             ..Default::default()
         };
-        assert!(HostView::from_facts(&target, &down, &sf).unavailable.is_some());
+        assert!(
+            HostView::from_facts(&target, &down, &sf)
+                .unavailable
+                .is_some()
+        );
     }
 
     #[test]

@@ -153,7 +153,13 @@ pub fn check_daemon(
 /// `present` pairs a binary name with whether it was found.
 /// The fix for missing required programs: the packages for the VM tools, otherwise the FluxVM package itself.
 pub fn binaries_fix(missing: &[&str]) -> String {
-    let vm_tools = ["qemu-system-x86_64", "qemu-system-aarch64", "qemu-img", "cloud-localds", "ip"];
+    let vm_tools = [
+        "qemu-system-x86_64",
+        "qemu-system-aarch64",
+        "qemu-img",
+        "cloud-localds",
+        "ip",
+    ];
     if missing.iter().any(|m| vm_tools.contains(m)) {
         let mut apt: Vec<&str> = vec![];
         let mut dnf: Vec<&str> = vec![];
@@ -686,18 +692,17 @@ pub async fn gather(listen: &str, state_dir: &Path, host_only: bool) -> Vec<Chec
     let (required, optional): (&[&'static str], &[&'static str]) = (
         &[
             "fluxctl",
-            if cfg!(target_arch = "aarch64") { "qemu-system-aarch64" } else { "qemu-system-x86_64" },
+            if cfg!(target_arch = "aarch64") {
+                "qemu-system-aarch64"
+            } else {
+                "qemu-system-x86_64"
+            },
             "qemu-img",
             "ip",
             // creating a VM seeds cloud-init with it: required, not optional
             "cloud-localds",
         ],
-        &[
-            "dnsmasq",
-            "cloud-hypervisor",
-            "firecracker",
-            "bpftool",
-        ],
+        &["dnsmasq", "cloud-hypervisor", "firecracker", "bpftool"],
     );
     let req: Vec<_> = required.iter().map(|n| (*n, which(n).is_some())).collect();
     let opt: Vec<_> = optional.iter().map(|n| (*n, which(n).is_some())).collect();
@@ -809,7 +814,10 @@ mod tests {
         let c = check_binaries(&[("qemu-img", false), ("cloud-localds", false)], &[]);
         assert_eq!(level(&c), Level::Fail);
         let fix = binaries_fix(&["qemu-img", "cloud-localds"]);
-        assert!(fix.contains("apt-get install qemu-utils cloud-image-utils"), "{fix}");
+        assert!(
+            fix.contains("apt-get install qemu-utils cloud-image-utils"),
+            "{fix}"
+        );
         assert!(fix.contains("dnf install qemu-img cloud-utils") && fix.contains("--server --yes"));
         assert!(binaries_fix(&["fluxctl"]).contains("brew install"));
     }

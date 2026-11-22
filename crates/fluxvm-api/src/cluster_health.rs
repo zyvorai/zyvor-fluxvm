@@ -49,7 +49,9 @@ async fn cluster_health(State(m): State<Arc<VmManager>>) -> Json<ClusterHealth> 
             last_backup_epoch: health::newest_mtime(&state_dir.join("backups")),
             ..Default::default()
         };
-        let cpus = std::thread::available_parallelism().ok().and_then(|n| u32::try_from(n.get()).ok());
+        let cpus = std::thread::available_parallelism()
+            .ok()
+            .and_then(|n| u32::try_from(n.get()).ok());
         health::apply_vm_list(&mut f, &vms, cpus);
         f
     })

@@ -41,7 +41,9 @@ pub struct DetailRow {
 
 pub fn headless_script() -> String {
     // The command exits 1 on a failed check but still prints the document; keep it.
-    format!("{PRELUDE}[ -n \"$FLUXCTL\" ] && \"$FLUXCTL\" mac host headless-check --json 2>/dev/null; true\n")
+    format!(
+        "{PRELUDE}[ -n \"$FLUXCTL\" ] && \"$FLUXCTL\" mac host headless-check --json 2>/dev/null; true\n"
+    )
 }
 
 pub fn parse_headless(out: &str) -> Option<Vec<HeadlessCheck>> {
@@ -60,7 +62,12 @@ pub fn parse_headless(out: &str) -> Option<Vec<HeadlessCheck>> {
     )
 }
 
-pub fn detail_row(target: &Target, v: &HostView, state: &FleetState, headless: Option<Vec<HeadlessCheck>>) -> DetailRow {
+pub fn detail_row(
+    target: &Target,
+    v: &HostView,
+    state: &FleetState,
+    headless: Option<Vec<HeadlessCheck>>,
+) -> DetailRow {
     DetailRow {
         host: target.label(),
         name: target.name.clone(),
@@ -77,7 +84,12 @@ pub fn detail_row(target: &Target, v: &HostView, state: &FleetState, headless: O
     }
 }
 
-pub fn detail_host(tr: &dyn Transport, target: &Target, state: &FleetState, timeout: Duration) -> DetailRow {
+pub fn detail_host(
+    tr: &dyn Transport,
+    target: &Target,
+    state: &FleetState,
+    timeout: Duration,
+) -> DetailRow {
     let v = view_host(tr, target, timeout);
     let headless = if v.unavailable.is_none() {
         tr.run_timed(target, &remote(&headless_script()), None, Some(timeout))
@@ -90,7 +102,13 @@ pub fn detail_host(tr: &dyn Transport, target: &Target, state: &FleetState, time
     detail_row(target, &v, state, headless)
 }
 
-pub fn detail(tr: &dyn Transport, targets: &[Target], state: &FleetState, jobs: usize, timeout: Duration) -> Vec<DetailRow> {
+pub fn detail(
+    tr: &dyn Transport,
+    targets: &[Target],
+    state: &FleetState,
+    jobs: usize,
+    timeout: Duration,
+) -> Vec<DetailRow> {
     par_map(targets, jobs, |t| detail_host(tr, t, state, timeout))
 }
 
@@ -106,7 +124,15 @@ fn since(now: u64, then: u64) -> String {
 
 pub fn render_detail(rows: &[DetailRow], now: u64) -> String {
     let mut out = render_table(
-        &["HOST", "DRAIN", "GUESTS", "AC", "DISK", "TEMPLATES", "HEADLESS"],
+        &[
+            "HOST",
+            "DRAIN",
+            "GUESTS",
+            "AC",
+            "DISK",
+            "TEMPLATES",
+            "HEADLESS",
+        ],
         &rows
             .iter()
             .map(|r| {
@@ -115,7 +141,11 @@ pub fn render_detail(rows: &[DetailRow], now: u64) -> String {
                     Some(c) => {
                         let f = c.iter().filter(|c| c.status == "fail").count();
                         let w = c.iter().filter(|c| c.status == "warn").count();
-                        if f + w == 0 { "ok".into() } else { format!("{f} fail, {w} warn") }
+                        if f + w == 0 {
+                            "ok".into()
+                        } else {
+                            format!("{f} fail, {w} warn")
+                        }
                     }
                 };
                 vec![
@@ -125,10 +155,20 @@ pub fn render_detail(rows: &[DetailRow], now: u64) -> String {
                         _ if r.drained => "drained".into(),
                         _ => "-".into(),
                     },
-                    if r.reachable { format!("{}/2", r.macos_guests) } else { "-".into() },
-                    r.on_ac.map_or("?", |a| if a { "ac" } else { "battery" }).into(),
+                    if r.reachable {
+                        format!("{}/2", r.macos_guests)
+                    } else {
+                        "-".into()
+                    },
+                    r.on_ac
+                        .map_or("?", |a| if a { "ac" } else { "battery" })
+                        .into(),
                     r.disk_free_gib.map_or("-".into(), |g| format!("{g}G")),
-                    if !r.templates_known { "?".into() } else { r.templates.len().to_string() },
+                    if !r.templates_known {
+                        "?".into()
+                    } else {
+                        r.templates.len().to_string()
+                    },
                     headless,
                 ]
             })
@@ -143,11 +183,18 @@ pub fn render_detail(rows: &[DetailRow], now: u64) -> String {
                 "\n{}: template {}{}",
                 r.host,
                 t.reference,
-                if t.digest.is_empty() { String::new() } else { format!(" ({})", t.digest.chars().take(19).collect::<String>()) }
+                if t.digest.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", t.digest.chars().take(19).collect::<String>())
+                }
             ));
         }
         for c in r.headless.iter().flatten().filter(|c| c.status != "ok") {
-            out.push_str(&format!("\n{}: headless {} {}: {}", r.host, c.status, c.name, c.detail));
+            out.push_str(&format!(
+                "\n{}: headless {} {}: {}",
+                r.host, c.status, c.name, c.detail
+            ));
             if let Some(f) = &c.fix {
                 out.push_str(&format!(" (fix: {f})"));
             }
@@ -170,10 +217,19 @@ pub fn status_detail_cmd(
         for t in targets {
             let _ = tr.run(t, &remote(&headless_script()), None);
         }
-        println!("dry run: the probe and the headless check would be sent to {} Mac(s)", targets.len());
+        println!(
+            "dry run: the probe and the headless check would be sent to {} Mac(s)",
+            targets.len()
+        );
         return Ok(());
     }
-    let rows = detail(tr.as_ref(), targets, &state, crate::mac_fleet::jobs(conn), Duration::from_secs(30));
+    let rows = detail(
+        tr.as_ref(),
+        targets,
+        &state,
+        crate::mac_fleet::jobs(conn),
+        Duration::from_secs(30),
+    );
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -182,11 +238,16 @@ pub fn status_detail_cmd(
     if conn.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"hosts": rows, "leases": leases.len()}))?
+            serde_json::to_string_pretty(
+                &serde_json::json!({"hosts": rows, "leases": leases.len()})
+            )?
         );
     } else {
         print!("{}", render_detail(&rows, now));
-        println!("shared leases held by running placements on this machine: {}", leases.len());
+        println!(
+            "shared leases held by running placements on this machine: {}",
+            leases.len()
+        );
     }
     let bad = rows.iter().filter(|r| !r.reachable).count();
     if bad > 0 {
@@ -214,11 +275,25 @@ mod tests {
     #[test]
     fn detail_shows_drain_templates_and_headless_facts() {
         // The shared probe script now also asks the Mac for its headless-check, so tell the two commands apart by the probe marker.
-        let tr = FakeTransport::new(|_, c| if c.contains("daemon_healthy") { ok(&reply()) } else if c.contains("headless-check") { ok(HEADLESS) } else { ok(&reply()) });
+        let tr = FakeTransport::new(|_, c| {
+            if c.contains("daemon_healthy") {
+                ok(&reply())
+            } else if c.contains("headless-check") {
+                ok(HEADLESS)
+            } else {
+                ok(&reply())
+            }
+        });
         let t = Target::parse("admin@mini-1.local").unwrap();
         let mut st = FleetState::default();
         st.drain("mini-1", 1000);
-        let rows = detail(&tr, std::slice::from_ref(&t), &st, 1, Duration::from_secs(5));
+        let rows = detail(
+            &tr,
+            std::slice::from_ref(&t),
+            &st,
+            1,
+            Duration::from_secs(5),
+        );
         let r = &rows[0];
         assert!(r.reachable && r.drained && r.macos_guests == 1);
         assert_eq!(r.templates.len(), 1);
@@ -235,11 +310,25 @@ mod tests {
 
     #[test]
     fn an_unreachable_mac_is_reported_not_probed_for_headless() {
-        let tr = FakeTransport::new(|_, _| crate::mac_fleet_ssh::ExecOut { code: 255, stdout: String::new(), stderr: "Connection refused".into() });
+        let tr = FakeTransport::new(|_, _| crate::mac_fleet_ssh::ExecOut {
+            code: 255,
+            stdout: String::new(),
+            stderr: "Connection refused".into(),
+        });
         let t = Target::parse("admin@down.local").unwrap();
-        let rows = detail(&tr, std::slice::from_ref(&t), &FleetState::default(), 1, Duration::from_secs(5));
+        let rows = detail(
+            &tr,
+            std::slice::from_ref(&t),
+            &FleetState::default(),
+            1,
+            Duration::from_secs(5),
+        );
         assert!(!rows[0].reachable && rows[0].headless.is_none());
-        assert_eq!(tr.calls_for("down.local").len(), 1, "one probe, no headless call");
+        assert_eq!(
+            tr.calls_for("down.local").len(),
+            1,
+            "one probe, no headless call"
+        );
         assert!(render_detail(&rows, 0).contains("Remote Login"));
     }
 

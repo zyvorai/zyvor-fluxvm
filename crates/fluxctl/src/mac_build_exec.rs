@@ -75,7 +75,9 @@ pub async fn execute<H: BuildHost>(host: &mut H, steps: &[Step]) -> Result<()> {
                     .await
             }
             Step::StoreTemplate => host.stop_and_store().await,
-            Step::InstallIpswLatest | Step::InstallIpswPath { .. } | Step::Snapshot { .. } => unreachable!("checked above"),
+            Step::InstallIpswLatest | Step::InstallIpswPath { .. } | Step::Snapshot { .. } => {
+                unreachable!("checked above")
+            }
         };
         if let Err(e) = r {
             outcome = Err(e.context(format!("build failed at step {n} ({what})")));

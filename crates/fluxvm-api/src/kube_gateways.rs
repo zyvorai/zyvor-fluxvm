@@ -89,7 +89,10 @@ fn match_text(m: &Value) -> String {
         parts.push(method.to_owned());
     }
     if let Some(v) = m["path"]["value"].as_str() {
-        parts.push(format!("{} {v}", m["path"]["type"].as_str().unwrap_or("PathPrefix")));
+        parts.push(format!(
+            "{} {v}",
+            m["path"]["type"].as_str().unwrap_or("PathPrefix")
+        ));
     }
     let h = m["headers"].as_array().map_or(0, Vec::len);
     if h > 0 {
@@ -174,7 +177,12 @@ fn attached(route: &Value, gw_ns: &str, gw: &str) -> bool {
 }
 
 /// The answer for lists read from the cluster. `envoy` is the `envoy-gateway` Deployment when it exists.
-pub(crate) fn parse(gateways: &Value, routes: &Value, slices: &Value, envoy: Option<&Value>) -> Value {
+pub(crate) fn parse(
+    gateways: &Value,
+    routes: &Value,
+    slices: &Value,
+    envoy: Option<&Value>,
+) -> Value {
     let slices = items(slices);
     let routes = items(routes);
     let mut out: Vec<Value> = items(gateways)
@@ -211,7 +219,10 @@ pub(crate) fn parse(gateways: &Value, routes: &Value, slices: &Value, envoy: Opt
             })
         })
         .collect();
-    out.sort_by(|a, b| (a["namespace"].as_str(), a["name"].as_str()).cmp(&(b["namespace"].as_str(), b["name"].as_str())));
+    out.sort_by(|a, b| {
+        (a["namespace"].as_str(), a["name"].as_str())
+            .cmp(&(b["namespace"].as_str(), b["name"].as_str()))
+    });
     json!({
         "schema": 1,
         "gateway_api_installed": true,
@@ -286,7 +297,12 @@ pub(crate) async fn get_gateways(
         }
         (Err(e), _) | (_, Err(e)) => return Ok(Json(failure(&name, &e.message))),
     };
-    let mut v = parse(&gws, &routes, &slices.unwrap_or_else(|_| json!({})), envoy.as_ref());
+    let mut v = parse(
+        &gws,
+        &routes,
+        &slices.unwrap_or_else(|_| json!({})),
+        envoy.as_ref(),
+    );
     v["cluster"] = json!(name);
     Ok(Json(v))
 }
@@ -332,17 +348,27 @@ mod tests {
         let (g, r, sl) = fixtures();
         let v = parse(&g, &r, &sl, Some(&json!({"status": {"readyReplicas": 1}})));
         assert_eq!(v["schema"], 1);
-        assert_eq!(v["envoy_gateway"], json!({"installed": true, "ready": true}));
+        assert_eq!(
+            v["envoy_gateway"],
+            json!({"installed": true, "ready": true})
+        );
         let gw = &v["gateways"][0];
         assert_eq!(gw["state"], "ready");
         assert_eq!(gw["listeners"][0]["port"], 80);
         assert_eq!(gw["programmed"]["current"], true);
-        assert_eq!(gw["routes"].as_array().unwrap().len(), 2, "the route for another gateway is not attached");
+        assert_eq!(
+            gw["routes"].as_array().unwrap().len(),
+            2,
+            "the route for another gateway is not attached"
+        );
         let web = &gw["routes"][1];
         assert_eq!(web["name"], "web");
         assert_eq!(web["state"], "ready");
         assert_eq!(web["matches"][0], "GET PathPrefix /api");
-        assert_eq!(web["backends"][0]["ready_endpoints"], 2, "a not-ready endpoint and another namespace's slice do not count");
+        assert_eq!(
+            web["backends"][0]["ready_endpoints"], 2,
+            "a not-ready endpoint and another namespace's slice do not count"
+        );
         assert_eq!(web["inspect"], "fluxctl gateway inspect web -n shop");
     }
 
@@ -369,8 +395,12 @@ mod tests {
         assert_eq!(gw["accepted"]["current"], false);
         assert_eq!(gw["state"], "waiting");
         assert_eq!(gw["summary"], "Waiting for the controller");
-        let none = json!({"items": [{"metadata": {"namespace": "default", "name": "eg"}, "spec": {}}]});
-        assert_eq!(parse(&none, &json!({}), &json!({}), None)["gateways"][0]["state"], "waiting");
+        let none =
+            json!({"items": [{"metadata": {"namespace": "default", "name": "eg"}, "spec": {}}]});
+        assert_eq!(
+            parse(&none, &json!({}), &json!({}), None)["gateways"][0]["state"],
+            "waiting"
+        );
     }
 
     #[test]
@@ -378,7 +408,10 @@ mod tests {
         let g = json!({"items": [{"metadata": {"namespace": "d", "name": "eg", "generation": 1},
             "status": {"conditions": [cond("Accepted", "False", "InvalidParameters", 1)]}}]});
         let v = parse(&g, &json!({}), &json!({}), None);
-        assert_eq!(v["gateways"][0]["summary"], "Not accepted: InvalidParameters");
+        assert_eq!(
+            v["gateways"][0]["summary"],
+            "Not accepted: InvalidParameters"
+        );
     }
 
     #[test]
@@ -386,7 +419,12 @@ mod tests {
         let v = failure("dev", "the server VM dev is stopped");
         assert_eq!(v["schema"], 1);
         assert_eq!(v["error"]["next"], "fluxctl kube up dev");
-        assert!(v["error"]["message"].as_str().unwrap().contains("not running"));
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not running")
+        );
         assert_eq!(failure("dev", "timeout")["error"]["next"], "fluxctl doctor");
         assert!(v["gateways"].as_array().unwrap().is_empty());
     }

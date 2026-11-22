@@ -125,7 +125,9 @@ fn s(v: &[&str]) -> Vec<String> {
 fn yes_no(env: &mut dyn Env, q: &str, default_yes: bool) -> bool {
     let d = if default_yes { "Y/n" } else { "y/N" };
     match env.ask(&format!("{q} [{d}]")) {
-        Some(a) if !a.trim().is_empty() => matches!(a.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        Some(a) if !a.trim().is_empty() => {
+            matches!(a.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+        }
         _ => default_yes,
     }
 }
@@ -149,21 +151,31 @@ pub fn quickstart(a: &QuickstartArgs, env: &mut dyn Env, tty: bool) -> Result<()
         let (code, out) = env.fluxctl(&s(&["mac", "doctor"]), false)?;
         env.say(out.trim_end());
         if code != 0 && !a.ignore_doctor {
-            let go = interactive && yes_no(env, "mac doctor found problems. Continue anyway?", false);
+            let go =
+                interactive && yes_no(env, "mac doctor found problems. Continue anyway?", false);
             if !go {
-                bail!("mac doctor found problems: apply the `fix:` lines above and run `fluxctl mac quickstart` again (or pass --ignore-doctor)");
+                bail!(
+                    "mac doctor found problems: apply the `fix:` lines above and run `fluxctl mac quickstart` again (or pass --ignore-doctor)"
+                );
             }
         }
     }
 
     env.say("== 2/4  A macOS template");
     if !a.dry_run && env.has_image(&tmpl) {
-        env.say(&format!("   {tmpl} is already in the local store, nothing to do"));
+        env.say(&format!(
+            "   {tmpl} is already in the local store, nothing to do"
+        ));
     } else {
         let (mut from, mut pull) = (a.from.clone(), a.pull.clone());
         if from.is_none() && pull.is_none() && interactive {
-            let q = "Directory of a template to import, or registry reference to pull (empty to stop)";
-            if let Some(ans) = env.ask(q).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()) {
+            let q =
+                "Directory of a template to import, or registry reference to pull (empty to stop)";
+            if let Some(ans) = env
+                .ask(q)
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+            {
                 if Path::new(&ans).is_dir() {
                     from = Some(PathBuf::from(ans));
                 } else {
@@ -193,7 +205,8 @@ pub fn quickstart(a: &QuickstartArgs, env: &mut dyn Env, tty: bool) -> Result<()
                 bail!(
                     "fluxctl {} failed (exit {code})\n{}",
                     step[..2].join(" "),
-                    mac_errors::friendly(&out).unwrap_or_else(|| "see `fluxctl explain MAC_TEMPLATE_MISSING`".into())
+                    mac_errors::friendly(&out)
+                        .unwrap_or_else(|| "see `fluxctl explain MAC_TEMPLATE_MISSING`".into())
                 );
             }
         }
@@ -203,15 +216,29 @@ pub fn quickstart(a: &QuickstartArgs, env: &mut dyn Env, tty: bool) -> Result<()
     if a.no_hello {
         env.say("   skipped (--no-hello)");
     } else {
-        let step = s(&["mac", "run", "--rm", "--name", "quickstart-hello", &tmpl, "--", "sw_vers"]);
-        env.say(&format!("   fluxctl {}   (boots a VM: allow a minute or two)", step.join(" ")));
+        let step = s(&[
+            "mac",
+            "run",
+            "--rm",
+            "--name",
+            "quickstart-hello",
+            &tmpl,
+            "--",
+            "sw_vers",
+        ]);
+        env.say(&format!(
+            "   fluxctl {}   (boots a VM: allow a minute or two)",
+            step.join(" ")
+        ));
         if !a.dry_run {
             let (code, out) = env.fluxctl(&step, false)?;
             env.say(out.trim_end());
             if code != 0 {
                 bail!(
                     "the hello-world instance failed (exit {code})\n{}",
-                    mac_errors::friendly(&out).unwrap_or_else(|| "see `fluxctl mac doctor` and `fluxctl mac cheatsheet`".into())
+                    mac_errors::friendly(&out).unwrap_or_else(|| {
+                        "see `fluxctl mac doctor` and `fluxctl mac cheatsheet`".into()
+                    })
                 );
             }
             env.say("   hello from FluxVM: the guest answered over SSH");
@@ -226,7 +253,9 @@ pub fn quickstart(a: &QuickstartArgs, env: &mut dyn Env, tty: bool) -> Result<()
             if code != 0 {
                 bail!(
                     "kube up failed (exit {code})\n{}",
-                    mac_errors::friendly(&out).unwrap_or_else(|| "see `fluxctl kube status` and `fluxctl explain --list`".into())
+                    mac_errors::friendly(&out).unwrap_or_else(|| {
+                        "see `fluxctl kube status` and `fluxctl explain --list`".into()
+                    })
                 );
             }
         }
@@ -236,7 +265,9 @@ pub fn quickstart(a: &QuickstartArgs, env: &mut dyn Env, tty: bool) -> Result<()
 
     env.say("");
     env.say("Done. Next:");
-    env.say(&format!("  fluxctl mac run -d --name dev {tmpl}      start an instance that keeps running"));
+    env.say(&format!(
+        "  fluxctl mac run -d --name dev {tmpl}      start an instance that keeps running"
+    ));
     env.say("  fluxctl mac ps                           see it");
     env.say("  fluxctl mac exec dev -- uname -a         run something in it");
     env.say("  fluxctl mac cheatsheet                   everything else");
@@ -297,8 +328,14 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
     (
         "First time",
         &[
-            ("fluxctl mac quickstart", "guided: doctor, template, hello world, optional k3s"),
-            ("fluxctl mac doctor", "what is wrong with this Mac, and the fix"),
+            (
+                "fluxctl mac quickstart",
+                "guided: doctor, template, hello world, optional k3s",
+            ),
+            (
+                "fluxctl mac doctor",
+                "what is wrong with this Mac, and the fix",
+            ),
         ],
     ),
     (
@@ -306,15 +343,24 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
         &[
             ("fluxctl mac images", "list local templates"),
             ("fluxctl mac pull REGISTRY/REPO:TAG", "download one"),
-            ("fluxctl mac import DIR NAME:TAG", "add a template directory (instant clone)"),
+            (
+                "fluxctl mac import DIR NAME:TAG",
+                "add a template directory (instant clone)",
+            ),
             ("fluxctl mac rmi NAME:TAG", "remove one"),
         ],
     ),
     (
         "Instances (2 macOS VMs per Mac at most)",
         &[
-            ("fluxctl mac run --rm NAME:TAG -- sw_vers", "run one command in a fresh VM, then delete it"),
-            ("fluxctl mac run -d --name dev NAME:TAG", "start one that keeps running"),
+            (
+                "fluxctl mac run --rm NAME:TAG -- sw_vers",
+                "run one command in a fresh VM, then delete it",
+            ),
+            (
+                "fluxctl mac run -d --name dev NAME:TAG",
+                "start one that keeps running",
+            ),
             ("fluxctl mac ps -a", "list instances"),
             ("fluxctl mac exec dev -- uname -a", "run a command in it"),
             ("fluxctl mac rm dev", "stop and delete it"),
@@ -323,28 +369,61 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
     (
         "Fleet of Macs over SSH",
         &[
-            ("fluxctl mac-fleet doctor -f hosts.yaml", "preflight every Mac"),
-            ("fluxctl mac-fleet apply hosts.yaml", "install and converge to the inventory"),
-            ("fluxctl mac-fleet status -f hosts.yaml", "one table for the fleet"),
-            ("fluxctl mac-fleet templates distribute -f hosts.yaml --template REG/REPO:TAG@sha256:HEX", "put a template on every Mac, digest-verified"),
-            ("fluxctl mac-fleet run -f hosts.yaml --template NAME:TAG -- sw_vers", "run on whichever Mac has a free slot"),
+            (
+                "fluxctl mac-fleet doctor -f hosts.yaml",
+                "preflight every Mac",
+            ),
+            (
+                "fluxctl mac-fleet apply hosts.yaml",
+                "install and converge to the inventory",
+            ),
+            (
+                "fluxctl mac-fleet status -f hosts.yaml",
+                "one table for the fleet",
+            ),
+            (
+                "fluxctl mac-fleet templates distribute -f hosts.yaml --template REG/REPO:TAG@sha256:HEX",
+                "put a template on every Mac, digest-verified",
+            ),
+            (
+                "fluxctl mac-fleet run -f hosts.yaml --template NAME:TAG -- sw_vers",
+                "run on whichever Mac has a free slot",
+            ),
         ],
     ),
     (
         "k3s on a Mac",
         &[
             ("fluxctl kube up", "create or start the cluster"),
-            ("fluxctl kube status", "is it up, and where is the kubeconfig"),
+            (
+                "fluxctl kube status",
+                "is it up, and where is the kubeconfig",
+            ),
         ],
     ),
     (
         "When something fails",
         &[
-            ("fluxctl explain MAC_SLOT_LIMIT", "409: both macOS slots are taken"),
-            ("fluxctl explain MAC_SESSION_LOCKED", "503: the Mac's screen is locked"),
-            ("fluxctl explain SSH_HOSTKEY_MISMATCH", "ssh host key refused"),
-            ("fluxctl explain MAC_TEMPLATE_MISSING", "image not in the store"),
-            ("fluxctl explain MAC_DISK_FULL", "no room for the image or clone"),
+            (
+                "fluxctl explain MAC_SLOT_LIMIT",
+                "409: both macOS slots are taken",
+            ),
+            (
+                "fluxctl explain MAC_SESSION_LOCKED",
+                "503: the Mac's screen is locked",
+            ),
+            (
+                "fluxctl explain SSH_HOSTKEY_MISMATCH",
+                "ssh host key refused",
+            ),
+            (
+                "fluxctl explain MAC_TEMPLATE_MISSING",
+                "image not in the store",
+            ),
+            (
+                "fluxctl explain MAC_DISK_FULL",
+                "no room for the image or clone",
+            ),
         ],
     ),
 ];
@@ -359,7 +438,12 @@ pub fn cheatsheet(json: bool) -> String {
             .collect();
         return serde_json::to_string_pretty(&v).unwrap_or_default() + "\n";
     }
-    let width = SHEET.iter().flat_map(|(_, r)| r.iter()).map(|(c, _)| c.len()).max().unwrap_or(0);
+    let width = SHEET
+        .iter()
+        .flat_map(|(_, r)| r.iter())
+        .map(|(c, _)| c.len())
+        .max()
+        .unwrap_or(0);
     let mut out = String::new();
     for (g, rows) in SHEET {
         out.push_str(&format!("{g}\n"));
@@ -392,7 +476,9 @@ impl Source for RealSource {
             .unwrap_or_default()
     }
     fn instances(&self) -> Vec<String> {
-        let Ok(exe) = std::env::current_exe() else { return vec![] };
+        let Ok(exe) = std::env::current_exe() else {
+            return vec![];
+        };
         std::process::Command::new(exe)
             .args(["mac", "ps", "-a", "-q"])
             .output()
@@ -419,14 +505,29 @@ impl Source for RealSource {
 }
 
 /// `mac` subcommands whose positional is an image name (`run` takes it after its flags; any non-flag word is offered).
-const IMAGE_CMDS: &[&str] = &["run", "rmi", "tag", "push", "pull", "verify", "sign", "label", "sbom"];
-const INSTANCE_CMDS: &[&str] = &["rm", "exec", "wait-ready", "inspect", "logs", "stop", "start", "restart"];
-const FLEET_HOST_CMDS: &[&str] = &["up", "add", "status", "exec", "upgrade", "remove", "doctor", "drain", "resume", "run"];
+const IMAGE_CMDS: &[&str] = &[
+    "run", "rmi", "tag", "push", "pull", "verify", "sign", "label", "sbom",
+];
+const INSTANCE_CMDS: &[&str] = &[
+    "rm",
+    "exec",
+    "wait-ready",
+    "inspect",
+    "logs",
+    "stop",
+    "start",
+    "restart",
+];
+const FLEET_HOST_CMDS: &[&str] = &[
+    "up", "add", "status", "exec", "upgrade", "remove", "doctor", "drain", "resume", "run",
+];
 
 /// Candidates for the word being completed. `words` is the whole command line so far, program name first, the word under the
 /// cursor (possibly empty) last. Empty when this position has no dynamic candidates.
 pub fn candidates(words: &[String], src: &dyn Source) -> Vec<String> {
-    let Some(cur) = words.last() else { return vec![] };
+    let Some(cur) = words.last() else {
+        return vec![];
+    };
     if cur.starts_with('-') || words.len() < 4 {
         return vec![];
     }
@@ -435,8 +536,14 @@ pub fn candidates(words: &[String], src: &dyn Source) -> Vec<String> {
     if prev.starts_with('-') && !prev.contains('=') {
         return vec![];
     }
-    let Some(at) = words.iter().position(|w| w == "mac" || w == "mac-fleet") else { return vec![] };
-    let Some(sub_at) = words[at + 1..].iter().position(|w| !w.starts_with('-')).map(|i| at + 1 + i) else {
+    let Some(at) = words.iter().position(|w| w == "mac" || w == "mac-fleet") else {
+        return vec![];
+    };
+    let Some(sub_at) = words[at + 1..]
+        .iter()
+        .position(|w| !w.starts_with('-'))
+        .map(|i| at + 1 + i)
+    else {
         return vec![];
     };
     // The subcommand itself is the word under the cursor: nothing dynamic.
@@ -470,7 +577,8 @@ pub fn candidates(words: &[String], src: &dyn Source) -> Vec<String> {
 
 pub fn complete_script(shell: ScriptShell) -> String {
     match shell {
-        ScriptShell::Zsh => r#"# fluxctl: image, instance and host names (source after `fluxctl completions zsh`)
+        ScriptShell::Zsh => {
+            r#"# fluxctl: image, instance and host names (source after `fluxctl completions zsh`)
 _fluxctl_dynamic() {
   local -a c
   c=("${(@f)$(fluxctl mac complete -- "${words[@]}" 2>/dev/null)}")
@@ -482,8 +590,10 @@ _fluxctl_dynamic() {
 }
 compdef _fluxctl_dynamic fluxctl
 "#
-        .into(),
-        ScriptShell::Bash => r#"# fluxctl: image, instance and host names (source after `fluxctl completions bash`)
+            .into()
+        }
+        ScriptShell::Bash => {
+            r#"# fluxctl: image, instance and host names (source after `fluxctl completions bash`)
 _fluxctl_dynamic() {
   local out
   out=$(fluxctl mac complete -- "${COMP_WORDS[@]:0:$((COMP_CWORD+1))}" 2>/dev/null)
@@ -496,7 +606,8 @@ _fluxctl_dynamic() {
 }
 complete -o nosort -o bashdefault -o default -F _fluxctl_dynamic fluxctl
 "#
-        .into(),
+            .into()
+        }
     }
 }
 
@@ -529,7 +640,11 @@ mod tests {
         }
         fn ask(&mut self, _q: &str) -> Option<String> {
             self.asked += 1;
-            if self.answers.is_empty() { None } else { Some(self.answers.remove(0)) }
+            if self.answers.is_empty() {
+                None
+            } else {
+                Some(self.answers.remove(0))
+            }
         }
         fn say(&mut self, l: &str) {
             self.said.push(l.into());
@@ -539,7 +654,11 @@ mod tests {
         f.calls.iter().map(|c| c.join(" ")).collect()
     }
     fn args(pull: Option<&str>) -> QuickstartArgs {
-        QuickstartArgs { pull: pull.map(Into::into), yes: true, ..Default::default() }
+        QuickstartArgs {
+            pull: pull.map(Into::into),
+            yes: true,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -548,21 +667,35 @@ mod tests {
         quickstart(&args(Some("reg.example/macos:15")), &mut f, true).unwrap();
         assert_eq!(
             cmds(&f),
-            ["mac doctor", "mac pull reg.example/macos:15", "mac run --rm --name quickstart-hello reg.example/macos:15 -- sw_vers"]
+            [
+                "mac doctor",
+                "mac pull reg.example/macos:15",
+                "mac run --rm --name quickstart-hello reg.example/macos:15 -- sw_vers"
+            ]
         );
         assert_eq!(f.asked, 0, "--yes never prompts");
     }
 
     #[test]
     fn existing_template_is_not_fetched_and_k3s_is_opt_in() {
-        let mut f = Fake { images: vec!["macos-base:latest".into()], ..Default::default() };
+        let mut f = Fake {
+            images: vec!["macos-base:latest".into()],
+            ..Default::default()
+        };
         let mut a = args(None);
         a.k3s = true;
         quickstart(&a, &mut f, false).unwrap();
         assert_eq!(cmds(&f).len(), 3);
         assert_eq!(cmds(&f)[2], "kube up");
-        assert!(cmds(&f).iter().all(|c| !c.contains("pull") && !c.contains("import")));
-        let mut f = Fake { images: vec!["macos-base:latest".into()], ..Default::default() };
+        assert!(
+            cmds(&f)
+                .iter()
+                .all(|c| !c.contains("pull") && !c.contains("import"))
+        );
+        let mut f = Fake {
+            images: vec!["macos-base:latest".into()],
+            ..Default::default()
+        };
         quickstart(&args(None), &mut f, false).unwrap();
         assert!(!cmds(&f).contains(&"kube up".to_string()));
     }
@@ -581,25 +714,48 @@ mod tests {
     #[test]
     fn no_source_off_a_terminal_is_a_clear_error_with_the_fix() {
         let mut f = Fake::default();
-        let e = quickstart(&args(None), &mut f, false).unwrap_err().to_string();
-        assert!(e.contains("--from DIR") && e.contains("--pull") && e.contains("MAC_TEMPLATE_MISSING"), "{e}");
+        let e = quickstart(&args(None), &mut f, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("--from DIR") && e.contains("--pull") && e.contains("MAC_TEMPLATE_MISSING"),
+            "{e}"
+        );
         assert_eq!(f.asked, 0);
     }
 
     #[test]
     fn failing_doctor_stops_unless_ignored_or_confirmed() {
         let have = vec!["macos-base:latest".to_string()];
-        let mut f = Fake { fail_on: Some(("mac doctor", 1, "[FAIL] x")), images: have.clone(), ..Default::default() };
-        assert!(quickstart(&args(None), &mut f, true).unwrap_err().to_string().contains("fix:"));
+        let mut f = Fake {
+            fail_on: Some(("mac doctor", 1, "[FAIL] x")),
+            images: have.clone(),
+            ..Default::default()
+        };
+        assert!(
+            quickstart(&args(None), &mut f, true)
+                .unwrap_err()
+                .to_string()
+                .contains("fix:")
+        );
         assert_eq!(cmds(&f), ["mac doctor"], "stopped before touching anything");
 
-        let mut f = Fake { fail_on: Some(("mac doctor", 1, "x")), images: have.clone(), ..Default::default() };
+        let mut f = Fake {
+            fail_on: Some(("mac doctor", 1, "x")),
+            images: have.clone(),
+            ..Default::default()
+        };
         let mut a = args(None);
         a.ignore_doctor = true;
         quickstart(&a, &mut f, false).unwrap();
 
         // on a terminal without --yes: answer y to "continue anyway", n to k3s
-        let mut f = Fake { fail_on: Some(("mac doctor", 1, "x")), images: have, answers: vec!["y".into(), "n".into()], ..Default::default() };
+        let mut f = Fake {
+            fail_on: Some(("mac doctor", 1, "x")),
+            images: have,
+            answers: vec!["y".into(), "n".into()],
+            ..Default::default()
+        };
         let mut a = args(None);
         a.yes = false;
         quickstart(&a, &mut f, true).unwrap();
@@ -608,19 +764,35 @@ mod tests {
 
     #[test]
     fn prompts_for_a_source_on_a_terminal_and_pulls_a_reference() {
-        let mut f = Fake { answers: vec!["reg.example/m:1".into(), "".into()], ..Default::default() };
+        let mut f = Fake {
+            answers: vec!["reg.example/m:1".into(), "".into()],
+            ..Default::default()
+        };
         let mut a = args(None);
         a.yes = false;
         quickstart(&a, &mut f, true).unwrap();
         assert!(cmds(&f).contains(&"mac pull reg.example/m:1".to_string()));
-        assert!(cmds(&f).iter().any(|c| c.contains("mac run --rm --name quickstart-hello reg.example/m:1")));
+        assert!(
+            cmds(&f)
+                .iter()
+                .any(|c| c.contains("mac run --rm --name quickstart-hello reg.example/m:1"))
+        );
     }
 
     #[test]
     fn a_failed_hello_explains_itself() {
-        let mut f = Fake { fail_on: Some(("mac run", 1, "Error: 409 conflict: slot limit")), images: vec!["macos-base:latest".into()], ..Default::default() };
-        let e = quickstart(&args(None), &mut f, false).unwrap_err().to_string();
-        assert!(e.contains("MAC_SLOT_LIMIT") && e.contains("mac ps -a"), "{e}");
+        let mut f = Fake {
+            fail_on: Some(("mac run", 1, "Error: 409 conflict: slot limit")),
+            images: vec!["macos-base:latest".into()],
+            ..Default::default()
+        };
+        let e = quickstart(&args(None), &mut f, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("MAC_SLOT_LIMIT") && e.contains("mac ps -a"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -649,10 +821,15 @@ mod tests {
     #[test]
     fn quickstart_and_setup_both_parse() {
         for w in ["quickstart", "setup"] {
-            let c = crate::Cli::try_parse_from(["fluxctl", "mac", w, "--yes", "--pull", "r/m:1", "--k3s"]).unwrap();
+            let c = crate::Cli::try_parse_from([
+                "fluxctl", "mac", w, "--yes", "--pull", "r/m:1", "--k3s",
+            ])
+            .unwrap();
             assert!(matches!(
                 c.command,
-                crate::Command::Mac { command: crate::mac_cmd::MacCommand::Ux(MacUx::Quickstart(_)) }
+                crate::Command::Mac {
+                    command: crate::mac_cmd::MacCommand::Ux(MacUx::Quickstart(_))
+                }
             ));
         }
     }
@@ -677,11 +854,17 @@ mod tests {
 
     #[test]
     fn completes_templates_instances_and_hosts() {
-        assert_eq!(candidates(&w("fluxctl mac run macos-x"), &Fs), ["macos-xcode:15"]);
+        assert_eq!(
+            candidates(&w("fluxctl mac run macos-x"), &Fs),
+            ["macos-xcode:15"]
+        );
         assert_eq!(candidates(&w("fluxctl mac rmi _"), &Fs).len(), 2);
         assert_eq!(candidates(&w("fluxctl mac rm d"), &Fs), ["dev"]);
         assert_eq!(candidates(&w("fluxctl mac exec _"), &Fs), ["ci", "dev"]);
-        assert_eq!(candidates(&w("fluxctl mac-fleet status -f h.yaml mini-2"), &Fs), ["mini-2"]);
+        assert_eq!(
+            candidates(&w("fluxctl mac-fleet status -f h.yaml mini-2"), &Fs),
+            ["mini-2"]
+        );
     }
 
     #[test]

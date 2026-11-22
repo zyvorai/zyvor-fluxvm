@@ -16,7 +16,12 @@ use anyhow::Result;
 
 const SERVER_DIR: &str = "/var/lib/rancher/k3s/server";
 const PLATFORM_DROPIN: &str = "/etc/rancher/k3s/config.yaml.d/40-fluxvm-platform.yaml";
-const SYSCTLS: [&str; 4] = ["vm.panic_on_oom", "vm.overcommit_memory", "kernel.panic", "kernel.panic_on_oops"];
+const SYSCTLS: [&str; 4] = [
+    "vm.panic_on_oom",
+    "vm.overcommit_memory",
+    "kernel.panic",
+    "kernel.panic_on_oops",
+];
 
 /// Prints the settings the audit needs in three marked sections. The k3s settings come from the platform drop-in when one
 /// exists (what `kube apple platform apply --harden cis` writes), otherwise from `config.yaml` (what `kube addons config` writes).
@@ -31,7 +36,9 @@ pub fn gather_script() -> String {
     s.push_str("echo '@@files'; ");
     for f in ["psa.yaml", "audit.yaml"] {
         let p = format!("{SERVER_DIR}/{f}");
-        s.push_str(&format!("if sudo -n test -f {p}; then echo '{p} yes'; else echo '{p} no'; fi; "));
+        s.push_str(&format!(
+            "if sudo -n test -f {p}; then echo '{p} yes'; else echo '{p} no'; fi; "
+        ));
     }
     s
 }
@@ -99,7 +106,11 @@ pub fn to_checks(f: &CisFacts, fix: &str) -> Vec<Check> {
                 Sev::Warn => Level::Warn,
                 Sev::Fail => Level::Fail,
             },
-            fix: if c.sev == Sev::Ok { String::new() } else { fix.to_owned() },
+            fix: if c.sev == Sev::Ok {
+                String::new()
+            } else {
+                fix.to_owned()
+            },
             detail: c.detail,
             remedy: None,
         })
@@ -108,7 +119,10 @@ pub fn to_checks(f: &CisFacts, fix: &str) -> Vec<Check> {
 
 /// `kube doctor --cis`: the audit of the `kube up` server VM.
 pub async fn run_kube<A: VmApi>(api: &A, o: &KubeOptions) -> Result<Vec<Check>> {
-    let fix = format!("fluxctl kube addons config --cis --ssh USER@HOST --restart k3s (and harden-files first); see docs/apple-k3s-addons.md ({})", o.name);
+    let fix = format!(
+        "fluxctl kube addons config --cis --ssh USER@HOST --restart k3s (and harden-files first); see docs/apple-k3s-addons.md ({})",
+        o.name
+    );
     match kube_host::guest_sh(api, o, &gather_script()).await {
         Ok(out) => Ok(to_checks(&parse_facts(&out), &fix)),
         Err(e) => Ok(vec![Check {
@@ -132,7 +146,9 @@ mod tests {
         for k in SYSCTLS {
             assert!(s.contains(&format!("sysctl -n {k}")));
         }
-        assert!(s.contains("/var/lib/rancher/k3s/server/psa.yaml") && s.contains("/server/audit.yaml"));
+        assert!(
+            s.contains("/var/lib/rancher/k3s/server/psa.yaml") && s.contains("/server/audit.yaml")
+        );
     }
 
     const GOOD: &str = "@@config\nprotect-kernel-defaults: true\nsecrets-encryption: true\n\
@@ -156,13 +172,25 @@ kube-controller-manager-arg:\n- use-service-account-credentials=true\nkubelet-ar
         assert!(f.config.is_none());
         let checks = to_checks(&f, "apply it");
         assert_eq!(checks.len(), 1);
-        assert_eq!((checks[0].name, checks[0].level), ("CIS config", Level::Fail));
+        assert_eq!(
+            (checks[0].name, checks[0].level),
+            ("CIS config", Level::Fail)
+        );
         assert_eq!(checks[0].fix, "apply it");
         // with a config but missing settings, each missing setting is its own failure
         let f2 = parse_facts("@@config\nsecrets-encryption: true\n@@sysctl\n@@files\n");
         let c2 = to_checks(&f2, "apply it");
-        assert!(c2.iter().any(|c| c.name == "CIS kernel defaults" && c.level == Level::Fail));
-        assert!(c2.iter().any(|c| c.name == "CIS secrets-encryption" && c.level == Level::Ok));
-        assert!(c2.iter().any(|c| c.name == "CIS sysctl" && c.level == Level::Fail));
+        assert!(
+            c2.iter()
+                .any(|c| c.name == "CIS kernel defaults" && c.level == Level::Fail)
+        );
+        assert!(
+            c2.iter()
+                .any(|c| c.name == "CIS secrets-encryption" && c.level == Level::Ok)
+        );
+        assert!(
+            c2.iter()
+                .any(|c| c.name == "CIS sysctl" && c.level == Level::Fail)
+        );
     }
 }

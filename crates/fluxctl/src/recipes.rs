@@ -90,7 +90,11 @@ pub const CATALOG: &[Info] = &[
         params: &[
             ("os", "linux", "macos or linux"),
             ("repo", "", "OWNER/REPO"),
-            ("template", "", "macOS only: the guest image with the Actions runner in it"),
+            (
+                "template",
+                "",
+                "macOS only: the guest image with the Actions runner in it",
+            ),
         ],
     },
     Info {
@@ -189,7 +193,11 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
     let info = info(name).with_context(|| {
         format!(
             "no recipe named {name}; the recipes are: {}",
-            CATALOG.iter().map(|i| i.name).collect::<Vec<_>>().join(", ")
+            CATALOG
+                .iter()
+                .map(|i| i.name)
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     })?;
     for k in set.keys() {
@@ -243,11 +251,19 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
             let dumpable = engine != "redis";
             plan.backup_schedule = "daily at 03:00".into();
             plan.backup_command = if dumpable {
-                format!("fluxctl kube db-backup {engine} \"$HOME/db-backups/{engine}-$(date +%F).sql\"")
+                format!(
+                    "fluxctl kube db-backup {engine} \"$HOME/db-backups/{engine}-$(date +%F).sql\""
+                )
             } else {
                 "redis persists to its volume; copy the volume with `fluxctl kube` snapshots".into()
             };
-            plan.uninstall = vec![argv(&["fluxctl", "kube", "remove", &engine, "--delete-data"])];
+            plan.uninstall = vec![argv(&[
+                "fluxctl",
+                "kube",
+                "remove",
+                &engine,
+                "--delete-data",
+            ])];
             plan.notes.push(
                 "The password is the development default shown in the connection string; the port is open on 127.0.0.1 only."
                     .into(),
@@ -278,10 +294,13 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
                 stdout_to: None,
             });
             plan.url = format!("http://localhost:{port}");
-            plan.backup_schedule = "the folder is the source of truth; back it up with the rest of your files".into();
+            plan.backup_schedule =
+                "the folder is the source of truth; back it up with the rest of your files".into();
             plan.backup_command = format!("tar czf \"$HOME/site-$(date +%F).tgz\" -C \"{dir}\" .");
             plan.uninstall = vec![argv(&["docker", "rm", "-f", "fluxvm-website"])];
-            plan.notes.push("Needs a Docker engine: `fluxctl docker up` on a Mac, or Docker on Linux.".into());
+            plan.notes.push(
+                "Needs a Docker engine: `fluxctl docker up` on a Mac, or Docker on Linux.".into(),
+            );
         }
         "ci-runner" => {
             let os = param(info, set, "os")?;
@@ -301,7 +320,8 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
                     });
                     plan.url = format!("https://github.com/{repo}/settings/actions/runners");
                     plan.uninstall = vec![argv(&["fluxctl", "mac", "ps"])];
-                    plan.notes.push("Workflow: `runs-on: [self-hosted, macOS, ARM64, fluxvm]`.".into());
+                    plan.notes
+                        .push("Workflow: `runs-on: [self-hosted, macOS, ARM64, fluxvm]`.".into());
                 }
                 "linux" => {
                     let env = format!("{rd}/runner.env");
@@ -312,7 +332,18 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
                     });
                     plan.steps.push(Step::Run {
                         what: "start the runner container".into(),
-                        argv: argv(&["docker", "run", "-d", "--name", "fluxvm-ci-runner", "--restart", "unless-stopped", "--env-file", &env, "myoung34/github-runner:latest"]),
+                        argv: argv(&[
+                            "docker",
+                            "run",
+                            "-d",
+                            "--name",
+                            "fluxvm-ci-runner",
+                            "--restart",
+                            "unless-stopped",
+                            "--env-file",
+                            &env,
+                            "myoung34/github-runner:latest",
+                        ]),
                         stdin: None,
                         stdout_to: None,
                     });
@@ -342,13 +373,25 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
             plan.steps.push(Step::Run {
                 what: "start the registry".into(),
                 argv: argv(&[
-                    "docker", "run", "-d", "--name", "fluxvm-registry", "--restart", "unless-stopped",
-                    "-p", &format!("{port}:5000"),
-                    "-v", "fluxvm-registry-data:/var/lib/registry",
-                    "-v", &format!("{rd}:/auth:ro"),
-                    "-e", "REGISTRY_AUTH=htpasswd",
-                    "-e", "REGISTRY_AUTH_HTPASSWD_REALM=FluxVM",
-                    "-e", "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
+                    "docker",
+                    "run",
+                    "-d",
+                    "--name",
+                    "fluxvm-registry",
+                    "--restart",
+                    "unless-stopped",
+                    "-p",
+                    &format!("{port}:5000"),
+                    "-v",
+                    "fluxvm-registry-data:/var/lib/registry",
+                    "-v",
+                    &format!("{rd}:/auth:ro"),
+                    "-e",
+                    "REGISTRY_AUTH=htpasswd",
+                    "-e",
+                    "REGISTRY_AUTH_HTPASSWD_REALM=FluxVM",
+                    "-e",
+                    "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
                     "registry:2",
                 ]),
                 stdin: None,
@@ -374,10 +417,19 @@ pub fn render(name: &str, set: &BTreeMap<String, String>, home: &Path) -> Result
             });
             plan.url = "http://localhost:3000".into();
             plan.defaults.push(("user".into(), "admin".into()));
-            plan.defaults.push(("password".into(), "admin (the development default: change it at first sign-in)".into()));
+            plan.defaults.push((
+                "password".into(),
+                "admin (the development default: change it at first sign-in)".into(),
+            ));
             plan.backup_schedule = "weekly, Sunday 03:00".into();
             plan.backup_command = "export dashboards from Grafana (Share, Export); the volume is kept on `kube remove` without --delete-data".into();
-            plan.uninstall = vec![argv(&["fluxctl", "kube", "remove", "grafana", "--delete-data"])];
+            plan.uninstall = vec![argv(&[
+                "fluxctl",
+                "kube",
+                "remove",
+                "grafana",
+                "--delete-data",
+            ])];
             plan.notes.push("Fleet metrics to scrape: docs/fleet-metrics.md. Needs the local cluster: `fluxctl kube up` once.".into());
         }
         _ => unreachable!("every catalog entry has a renderer"),
@@ -392,7 +444,12 @@ impl Plan {
         s.push_str("\nSteps\n");
         for (i, st) in self.steps.iter().enumerate() {
             match st {
-                Step::Run { what, argv, stdin, stdout_to } => {
+                Step::Run {
+                    what,
+                    argv,
+                    stdin,
+                    stdout_to,
+                } => {
                     s.push_str(&format!("  {}. {what}\n       {}", i + 1, shell_line(argv)));
                     if stdin.is_some() {
                         s.push_str("   (secret on stdin)");
@@ -403,7 +460,10 @@ impl Plan {
                     s.push('\n');
                 }
                 Step::WriteFile { what, path, .. } => {
-                    s.push_str(&format!("  {}. {what}\n       write {path} (mode 0600)\n", i + 1));
+                    s.push_str(&format!(
+                        "  {}. {what}\n       write {path} (mode 0600)\n",
+                        i + 1
+                    ));
                 }
             }
         }
@@ -416,7 +476,12 @@ impl Plan {
         for (k, v) in &self.defaults {
             s.push_str(&format!("  {k}: {v}\n"));
         }
-        let gen_: Vec<&str> = self.generated.iter().map(String::as_str).filter(|g| *g != "github_token").collect();
+        let gen_: Vec<&str> = self
+            .generated
+            .iter()
+            .map(String::as_str)
+            .filter(|g| *g != "github_token")
+            .collect();
         if !gen_.is_empty() {
             s.push_str(&format!(
                 "  generated ({}), kept in {} (mode 0600); show with `fluxctl recipe credentials {}`\n",
@@ -425,7 +490,10 @@ impl Plan {
                 self.name
             ));
         }
-        s.push_str(&format!("Backup       {}\n             {}\n", self.backup_schedule, self.backup_command));
+        s.push_str(&format!(
+            "Backup       {}\n             {}\n",
+            self.backup_schedule, self.backup_command
+        ));
         s.push_str("Uninstall\n");
         for u in &self.uninstall {
             s.push_str(&format!("  {}\n", shell_line(u)));
@@ -441,7 +509,12 @@ impl Plan {
         self.steps
             .iter()
             .filter_map(|s| match s {
-                Step::Run { argv, stdin: None, stdout_to: None, .. } => Some(shell_line(argv)),
+                Step::Run {
+                    argv,
+                    stdin: None,
+                    stdout_to: None,
+                    ..
+                } => Some(shell_line(argv)),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -453,7 +526,10 @@ impl Plan {
 pub fn shell_line(argv: &[String]) -> String {
     argv.iter()
         .map(|a| {
-            if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c)) {
+            if !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./:=@%+,".contains(c))
+            {
                 a.clone()
             } else {
                 format!("'{}'", a.replace('\'', "'\\''"))
@@ -481,7 +557,10 @@ fn write_private(path: &Path, content: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     if let Some(d) = path.parent() {
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(d)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(d)?;
     }
     let tmp = path.with_extension("tmp");
     let mut f = std::fs::OpenOptions::new()
@@ -500,7 +579,10 @@ fn read_private(path: &Path) -> Result<String> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::metadata(path).with_context(|| format!("{} is missing", path.display()))?;
     if m.mode() & 0o077 != 0 {
-        bail!("{} is readable by group or others; run chmod 600 on it", path.display());
+        bail!(
+            "{} is readable by group or others; run chmod 600 on it",
+            path.display()
+        );
     }
     Ok(std::fs::read_to_string(path)?)
 }
@@ -518,7 +600,9 @@ fn fill(template: &str, creds: &BTreeMap<String, String>) -> Result<String> {
     while let Some(i) = out.find("{{") {
         let j = out[i..].find("}}").context("unterminated {{")? + i;
         let key = out[i + 2..j].to_owned();
-        let v = creds.get(&key).with_context(|| format!("no stored credential {key}"))?;
+        let v = creds
+            .get(&key)
+            .with_context(|| format!("no stored credential {key}"))?;
         out.replace_range(i..j + 2, v);
     }
     Ok(out)
@@ -543,11 +627,19 @@ impl Runner for Process {
         c.args(&argv[1..]);
         c.stderr(Stdio::inherit());
         let capture = stdin.is_some();
-        c.stdin(if capture { Stdio::piped() } else { Stdio::inherit() });
+        c.stdin(if capture {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        });
         c.stdout(Stdio::piped());
         let mut child = c.spawn().with_context(|| format!("starting {}", argv[0]))?;
         if let Some(s) = stdin {
-            child.stdin.take().context("stdin")?.write_all(s.as_bytes())?;
+            child
+                .stdin
+                .take()
+                .context("stdin")?
+                .write_all(s.as_bytes())?;
         }
         let out = child.wait_with_output()?;
         if !out.status.success() {
@@ -571,7 +663,10 @@ pub fn execute(plan: &Plan, home: &Path, runner: &mut dyn Runner) -> Result<Stri
         if g == "github_token" {
             let tf = dir.join("github.token");
             let t = read_private(&tf).with_context(|| {
-                format!("save a GitHub token that may create runners in {} (chmod 600) first", tf.display())
+                format!(
+                    "save a GitHub token that may create runners in {} (chmod 600) first",
+                    tf.display()
+                )
             })?;
             creds.insert(g.clone(), t.trim().to_owned());
         } else if !creds.contains_key(g) {
@@ -598,7 +693,12 @@ pub fn execute(plan: &Plan, home: &Path, runner: &mut dyn Runner) -> Result<Stri
             Step::WriteFile { path, template, .. } => {
                 write_private(Path::new(path), fill(template, &creds)?.as_bytes())?;
             }
-            Step::Run { argv, stdin, stdout_to, .. } => {
+            Step::Run {
+                argv,
+                stdin,
+                stdout_to,
+                ..
+            } => {
                 let stdin = stdin.as_deref().map(|t| fill(t, &creds)).transpose()?;
                 let out = runner.run(argv, stdin.as_deref())?;
                 if let Some(p) = stdout_to {
@@ -615,13 +715,18 @@ pub fn execute(plan: &Plan, home: &Path, runner: &mut dyn Runner) -> Result<Stri
             plan.name
         ));
     }
-    msg.push_str(&format!("  backup: {}\n    {}\n", plan.backup_schedule, plan.backup_command));
+    msg.push_str(&format!(
+        "  backup: {}\n    {}\n",
+        plan.backup_schedule, plan.backup_command
+    ));
     msg.push_str(&format!("  undo: fluxctl recipe uninstall {}\n", plan.name));
     Ok(msg)
 }
 
 pub fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
 }
 
 pub fn run(cmd: RecipeCommand) -> Result<()> {
@@ -632,7 +737,9 @@ pub fn run(cmd: RecipeCommand) -> Result<()> {
             for i in CATALOG {
                 println!("{:<14} {:<28} {}", i.name, i.title, i.summary);
             }
-            println!("\nfluxctl recipe show NAME     what it would do\nfluxctl recipe run NAME      do it");
+            println!(
+                "\nfluxctl recipe show NAME     what it would do\nfluxctl recipe run NAME      do it"
+            );
         }
         RecipeCommand::Show { name, set, json } => {
             let i = info(&name);
@@ -640,7 +747,10 @@ pub fn run(cmd: RecipeCommand) -> Result<()> {
             if json {
                 let i = i.with_context(|| format!("no recipe named {name}"))?;
                 let p = p.ok();
-                println!("{}", serde_json::to_string_pretty(&plan_json(i, p.as_ref(), &home))?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&plan_json(i, p.as_ref(), &home))?
+                );
             } else {
                 match p {
                     Ok(p) => print!("{}", p.text(&home)),
@@ -648,7 +758,10 @@ pub fn run(cmd: RecipeCommand) -> Result<()> {
                         if let Some(i) = i {
                             println!("{}: {}\n", i.title, i.summary);
                             for (k, d, h) in i.params {
-                                println!("  --set {k}={}   {h}", if d.is_empty() { "<required>" } else { d });
+                                println!(
+                                    "  --set {k}={}   {h}",
+                                    if d.is_empty() { "<required>" } else { d }
+                                );
                             }
                             println!();
                         }
@@ -669,9 +782,10 @@ pub fn run(cmd: RecipeCommand) -> Result<()> {
             info(&name).with_context(|| format!("no recipe named {name}"))?;
             let path = dir_for(&home, &name).join("credentials");
             // The registry login line pipes this, so a bare password is printed when that is all there is.
-            let creds = parse_credentials(&read_private(&path).with_context(|| {
-                format!("{name} has no stored credentials; run it first")
-            })?);
+            let creds = parse_credentials(
+                &read_private(&path)
+                    .with_context(|| format!("{name} has no stored credentials; run it first"))?,
+            );
             if creds.len() == 1 {
                 println!("{}", creds.values().next().expect("one"));
             } else if let Some(pw) = creds.get("password").filter(|_| name == "registry") {
@@ -682,7 +796,12 @@ pub fn run(cmd: RecipeCommand) -> Result<()> {
                 }
             }
         }
-        RecipeCommand::Uninstall { name, set, keep_data, dry_run } => {
+        RecipeCommand::Uninstall {
+            name,
+            set,
+            keep_data,
+            dry_run,
+        } => {
             let p = render(&name, &map(set), &home)?;
             for u in &p.uninstall {
                 let mut u = u.clone();
@@ -719,19 +838,27 @@ mod tests {
     use super::*;
 
     fn set(kv: &[(&str, &str)]) -> BTreeMap<String, String> {
-        kv.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        kv.iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
     }
 
     const HOME: &str = "/home/demo";
 
     fn golden(name: &str, got: &str) {
-        let path = format!("{}/src/recipes_golden/{name}.txt", env!("CARGO_MANIFEST_DIR"));
+        let path = format!(
+            "{}/src/recipes_golden/{name}.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
         if std::env::var_os("UPDATE_GOLDEN").is_some() {
             std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
             std::fs::write(&path, got).unwrap();
         }
         let want = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(got, want, "golden file {path} differs; rerun with UPDATE_GOLDEN=1 to accept");
+        assert_eq!(
+            got, want,
+            "golden file {path} differs; rerun with UPDATE_GOLDEN=1 to accept"
+        );
     }
 
     #[test]
@@ -741,7 +868,15 @@ mod tests {
             ("dev-database", "dev-database-mysql", &[("engine", "mysql")]),
             ("website", "website", &[("dir", "/srv/site")]),
             ("ci-runner", "ci-runner-linux", &[("repo", "acme/app")]),
-            ("ci-runner", "ci-runner-macos", &[("repo", "acme/app"), ("os", "macos"), ("template", "registry.example/ci-mac:1")]),
+            (
+                "ci-runner",
+                "ci-runner-macos",
+                &[
+                    ("repo", "acme/app"),
+                    ("os", "macos"),
+                    ("template", "registry.example/ci-mac:1"),
+                ],
+            ),
             ("registry", "registry", &[]),
             ("monitoring", "monitoring", &[]),
         ];
@@ -754,13 +889,29 @@ mod tests {
 
     #[test]
     fn required_parameters_and_typos_are_explained() {
-        let e = render("website", &set(&[]), Path::new(HOME)).unwrap_err().to_string();
+        let e = render("website", &set(&[]), Path::new(HOME))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("--set dir="), "{e}");
-        let e = render("website", &set(&[("dri", "x")]), Path::new(HOME)).unwrap_err().to_string();
-        assert!(e.contains("no parameter dri") && e.contains("dir, port"), "{e}");
-        let e = render("nope", &set(&[]), Path::new(HOME)).unwrap_err().to_string();
+        let e = render("website", &set(&[("dri", "x")]), Path::new(HOME))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("no parameter dri") && e.contains("dir, port"),
+            "{e}"
+        );
+        let e = render("nope", &set(&[]), Path::new(HOME))
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("dev-database, website"), "{e}");
-        assert!(render("dev-database", &set(&[("engine", "oracle")]), Path::new(HOME)).is_err());
+        assert!(
+            render(
+                "dev-database",
+                &set(&[("engine", "oracle")]),
+                Path::new(HOME)
+            )
+            .is_err()
+        );
         assert!(render("website", &set(&[("dir", "a:b")]), Path::new(HOME)).is_err());
         assert!(render("registry", &set(&[("port", "99999")]), Path::new(HOME)).is_err());
         assert!(render("ci-runner", &set(&[("repo", "acme")]), Path::new(HOME)).is_err());
@@ -787,17 +938,26 @@ mod tests {
         let pw = parse_credentials(&raw)["password"].clone();
         assert_eq!(pw.len(), 24);
         assert_eq!(std::fs::metadata(&creds).unwrap().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::metadata(creds.parent().unwrap()).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(creds.parent().unwrap()).unwrap().mode() & 0o777,
+            0o700
+        );
         // The password reached the hasher through stdin only.
         assert_eq!(r.0[0].1.as_deref(), Some(pw.as_str()));
-        assert!(r.0.iter().all(|(argv, _)| argv.iter().all(|a| !a.contains(&pw))));
+        assert!(
+            r.0.iter()
+                .all(|(argv, _)| argv.iter().all(|a| !a.contains(&pw)))
+        );
         // The hashed result was saved private, and the report never shows the secret.
         let htpasswd = dir_for(home.path(), "registry").join("htpasswd");
         assert_eq!(std::fs::metadata(&htpasswd).unwrap().mode() & 0o777, 0o600);
         assert!(!msg.contains(&pw) && !p.text(home.path()).contains(&pw));
         // Running again keeps the same password (idempotent, so a restart does not lock clients out).
         execute(&p, home.path(), &mut Rec::default()).unwrap();
-        assert_eq!(parse_credentials(&std::fs::read_to_string(&creds).unwrap())["password"], pw);
+        assert_eq!(
+            parse_credentials(&std::fs::read_to_string(&creds).unwrap())["password"],
+            pw
+        );
     }
 
     #[test]
@@ -811,28 +971,45 @@ mod tests {
         std::fs::create_dir_all(tf.parent().unwrap()).unwrap();
         std::fs::write(&tf, "ghp_SECRET\n").unwrap();
         std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(execute(&p, home.path(), &mut Rec::default()).is_err(), "a world-readable token is refused");
+        assert!(
+            execute(&p, home.path(), &mut Rec::default()).is_err(),
+            "a world-readable token is refused"
+        );
         std::fs::set_permissions(&tf, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut r = Rec::default();
         let msg = execute(&p, home.path(), &mut r).unwrap();
-        let env = std::fs::read_to_string(dir_for(home.path(), "ci-runner").join("runner.env")).unwrap();
+        let env =
+            std::fs::read_to_string(dir_for(home.path(), "ci-runner").join("runner.env")).unwrap();
         assert!(env.contains("ACCESS_TOKEN=ghp_SECRET"));
         assert!(!msg.contains("ghp_SECRET"));
-        assert!(r.0.iter().all(|(a, _)| a.iter().all(|x| !x.contains("ghp_SECRET"))));
+        assert!(
+            r.0.iter()
+                .all(|(a, _)| a.iter().all(|x| !x.contains("ghp_SECRET")))
+        );
         // The token is not copied into the credentials file either.
-        assert!(!dir_for(home.path(), "ci-runner").join("credentials").exists());
+        assert!(
+            !dir_for(home.path(), "ci-runner")
+                .join("credentials")
+                .exists()
+        );
     }
 
     #[test]
     fn shell_lines_are_quoted() {
-        assert_eq!(shell_line(&argv(&["a", "b c", "it's", ""])), "a 'b c' 'it'\\''s' ''");
+        assert_eq!(
+            shell_line(&argv(&["a", "b c", "it's", ""])),
+            "a 'b c' 'it'\\''s' ''"
+        );
     }
 
     #[test]
     fn copy_as_fluxctl_lists_only_commands_without_secrets() {
         let p = render("registry", &set(&[]), Path::new(HOME)).unwrap();
         let c = p.as_commands();
-        assert!(c.contains("fluxvm-registry") && !c.contains("-Bin") && !c.contains("httpd"), "{c}");
+        assert!(
+            c.contains("fluxvm-registry") && !c.contains("-Bin") && !c.contains("httpd"),
+            "{c}"
+        );
         let p = render("monitoring", &set(&[]), Path::new(HOME)).unwrap();
         assert_eq!(p.as_commands(), "fluxctl kube add grafana");
     }

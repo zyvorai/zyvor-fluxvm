@@ -29,9 +29,11 @@ use uuid::Uuid;
 mod agent_session;
 mod backup_verify_cmd;
 mod cloud;
-mod cluster_cmd;
 mod cluster;
+mod cluster_cmd;
+mod cluster_pair;
 mod cluster_remote;
+mod cluster_report;
 mod compose;
 mod config_check;
 mod contexts;
@@ -40,16 +42,15 @@ mod docker_host;
 mod doctor;
 mod exec_policy_check;
 mod explain;
-mod gateway;
 mod fleet_cli;
 mod fleet_client;
+mod gateway;
 mod guard_cmd;
 mod guest_cmd;
 mod image_mgmt;
 mod infer;
 mod instancetype_cmd;
 mod kube_addons;
-mod vm_net;
 mod kube_apple;
 mod kube_apps;
 mod kube_backup;
@@ -92,55 +93,53 @@ mod mac_build;
 mod mac_build_exec;
 mod mac_cache;
 mod mac_cmd;
-mod mac_errors;
-mod mac_ux;
 mod mac_compose;
 mod mac_config;
 mod mac_cp;
+mod mac_doctor;
+mod mac_errors;
 mod mac_events;
-mod mac_health;
-mod mac_imgstat;
-mod mac_ipsw;
-mod mac_ops;
-mod mac_reap;
-mod mac_supervise;
 mod mac_fleet;
-mod mac_fleet_inv;
 mod mac_fleet_agg;
+mod mac_fleet_inv;
 mod mac_fleet_lease;
-mod mac_fleet_roll;
-mod mac_fleet_status;
 mod mac_fleet_remote;
+mod mac_fleet_roll;
 mod mac_fleet_run;
 mod mac_fleet_sched;
 mod mac_fleet_ssh;
-mod mac_host;
+mod mac_fleet_status;
 mod mac_fleet_timed;
+mod mac_health;
+mod mac_host;
 mod mac_ignore;
 mod mac_image_ops;
+mod mac_imgstat;
 mod mac_inspect;
-mod mac_doctor;
 mod mac_instance;
+mod mac_ipsw;
+mod mac_json;
 mod mac_mcp;
 mod mac_metrics;
-mod mac_json;
+mod mac_more;
+mod mac_ops;
+mod mac_plus;
 mod mac_queue;
 mod mac_ready;
+mod mac_reap;
 mod mac_runner;
 mod mac_runner_life;
 mod mac_runner_pool;
-mod mac_more;
-mod mac_plus;
 mod mac_store;
+mod mac_supervise;
 mod mac_trust;
+mod mac_ux;
 mod mcp;
 mod mcp_install;
 mod netobs;
-mod cluster_pair;
-mod cluster_report;
 mod node_agent;
-mod recipes;
 mod output;
+mod recipes;
 mod remote;
 mod run;
 mod sandbox_run;
@@ -149,6 +148,7 @@ mod stack;
 mod stack_fleet;
 mod status;
 mod styles;
+mod vm_net;
 mod vm_spec;
 mod vz_doctor;
 mod whatif;
@@ -6276,7 +6276,8 @@ async fn main() -> Result<()> {
         };
         return tokio::task::block_in_place(|| mac_fleet::run(command));
     }
-    if matches!(&cli.command, Command::Cluster { command } if !matches!(command, cluster::ClusterCommand::Status(_))) {
+    if matches!(&cli.command, Command::Cluster { command } if !matches!(command, cluster::ClusterCommand::Status(_)))
+    {
         let Command::Cluster { command } = cli.command else {
             unreachable!()
         };
@@ -10481,7 +10482,9 @@ mod sandbox_cli_tests {
         assert!(unit);
         assert!(matches!(
             parse(&["sandbox", "runtimes"]),
-            Command::Sandbox { command: SandboxCommand::Runtimes }
+            Command::Sandbox {
+                command: SandboxCommand::Runtimes
+            }
         ));
     }
 

@@ -22,10 +22,14 @@ pub enum PinSrc {
 /// Gets one manifest onto a server, verifies it and applies it. Nothing is applied on a digest mismatch.
 pub async fn apply_pin<R: Remote>(r: &R, pin: &Pin, src: PinSrc) -> Result<String> {
     match src {
-        PinSrc::Download => r.run_server(&pins::apply_script(pin, Source::Download, pin.sha256), None).await,
+        PinSrc::Download => {
+            r.run_server(&pins::apply_script(pin, Source::Download, pin.sha256), None)
+                .await
+        }
         PinSrc::File { data, sha } => {
             pins::verify_bytes(&data, &sha)?;
-            r.run_server(&pins::apply_script(pin, Source::Stdin, &sha), Some(&data)).await
+            r.run_server(&pins::apply_script(pin, Source::Stdin, &sha), Some(&data))
+                .await
         }
     }
 }
@@ -62,10 +66,14 @@ fn kubectl(op: &str, args: &str) -> String {
 /// One address entry of a pool: an IPv4 CIDR (`10.89.0.192/28`) or a range (`10.89.0.200-10.89.0.220`).
 pub fn pool_address_ok(a: &str) -> bool {
     if let Some((ip, bits)) = a.split_once('/') {
-        return ip.parse::<std::net::Ipv4Addr>().is_ok() && bits.parse::<u8>().is_ok_and(|b| (8..=32).contains(&b));
+        return ip.parse::<std::net::Ipv4Addr>().is_ok()
+            && bits.parse::<u8>().is_ok_and(|b| (8..=32).contains(&b));
     }
     match a.split_once('-') {
-        Some((lo, hi)) => match (lo.parse::<std::net::Ipv4Addr>(), hi.parse::<std::net::Ipv4Addr>()) {
+        Some((lo, hi)) => match (
+            lo.parse::<std::net::Ipv4Addr>(),
+            hi.parse::<std::net::Ipv4Addr>(),
+        ) {
             (Ok(l), Ok(h)) => u32::from(l) <= u32::from(h),
             _ => false,
         },
@@ -76,7 +84,8 @@ pub fn pool_address_ok(a: &str) -> bool {
 pub fn dns_label_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
-        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         && !s.starts_with('-')
         && !s.ends_with('-')
 }
@@ -87,7 +96,9 @@ pub fn metallb_pool_yaml(name: &str, addresses: &[String], auto_assign: bool) ->
         bail!("pool name {name:?} must be a DNS label (lowercase letters, digits, -)");
     }
     if addresses.is_empty() {
-        bail!("give at least one --address (a CIDR such as 10.89.0.192/28 or a range 10.89.0.200-10.89.0.220)");
+        bail!(
+            "give at least one --address (a CIDR such as 10.89.0.192/28 or a range 10.89.0.200-10.89.0.220)"
+        );
     }
     for a in addresses {
         if !pool_address_ok(a) {
@@ -120,16 +131,33 @@ pub struct MetalLbReq {
 pub async fn metallb<R: Remote>(r: &R, req: MetalLbReq) -> Result<RecipeReport> {
     // Validate everything before the first install.
     let pool = metallb_pool_yaml(&req.name, &req.addresses, req.auto_assign)?;
-    let mut rep = RecipeReport { recipe: "metallb".into(), version: pins::METALLB.version.into(), ..Default::default() };
+    let mut rep = RecipeReport {
+        recipe: "metallb".into(),
+        version: pins::METALLB.version.into(),
+        ..Default::default()
+    };
     if !req.disabled.iter().any(|d| d == "servicelb") {
         rep.notes.push("ServiceLB is still enabled and also answers for LoadBalancer Services; create the cluster with --disable servicelb (or --addons metallb) so the two do not compete".into());
     }
     apply_pin(r, &pins::METALLB, req.src).await?;
-    rep.applied.push(format!("metallb {}", pins::METALLB.version));
+    rep.applied
+        .push(format!("metallb {}", pins::METALLB.version));
     // The pool is checked by MetalLB's admission webhook, which exists only once the controller runs.
-    r.run_server(&kubectl("metallb-rollout", "-n metallb-system rollout status deployment/controller --timeout=180s"), None).await?;
-    r.run_server(&kubectl("metallb-pool", "apply -f -"), Some(pool.as_bytes())).await?;
-    rep.applied.push(format!("IPAddressPool and L2Advertisement {}", req.name));
+    r.run_server(
+        &kubectl(
+            "metallb-rollout",
+            "-n metallb-system rollout status deployment/controller --timeout=180s",
+        ),
+        None,
+    )
+    .await?;
+    r.run_server(
+        &kubectl("metallb-pool", "apply -f -"),
+        Some(pool.as_bytes()),
+    )
+    .await?;
+    rep.applied
+        .push(format!("IPAddressPool and L2Advertisement {}", req.name));
     rep.notes.push("the addresses must be unused and on the nodes' own network (for kube apple, the private 10.89.x.y network); they are not reachable from the Mac unless you route to that network".into());
     Ok(rep)
 }
@@ -137,33 +165,70 @@ pub async fn metallb<R: Remote>(r: &R, req: MetalLbReq) -> Result<RecipeReport> 
 // ---------------------------------------------------------------- cert-manager and metrics-server
 
 pub async fn cert_manager<R: Remote>(r: &R, src: PinSrc) -> Result<RecipeReport> {
-    let mut rep = RecipeReport { recipe: "cert-manager".into(), version: pins::CERT_MANAGER.version.into(), ..Default::default() };
+    let mut rep = RecipeReport {
+        recipe: "cert-manager".into(),
+        version: pins::CERT_MANAGER.version.into(),
+        ..Default::default()
+    };
     apply_pin(r, &pins::CERT_MANAGER, src).await?;
-    rep.applied.push(format!("cert-manager {}", pins::CERT_MANAGER.version));
-    for d in ["cert-manager", "cert-manager-cainjector", "cert-manager-webhook"] {
-        r.run_server(&kubectl("cert-manager-rollout", &format!("-n cert-manager rollout status deployment/{d} --timeout=180s")), None).await?;
+    rep.applied
+        .push(format!("cert-manager {}", pins::CERT_MANAGER.version));
+    for d in [
+        "cert-manager",
+        "cert-manager-cainjector",
+        "cert-manager-webhook",
+    ] {
+        r.run_server(
+            &kubectl(
+                "cert-manager-rollout",
+                &format!("-n cert-manager rollout status deployment/{d} --timeout=180s"),
+            ),
+            None,
+        )
+        .await?;
     }
-    rep.notes.push("create an Issuer or ClusterIssuer next; the webhook is ready, so it is accepted at once".into());
+    rep.notes.push(
+        "create an Issuer or ClusterIssuer next; the webhook is ready, so it is accepted at once"
+            .into(),
+    );
     Ok(rep)
 }
 
-pub const INSECURE_TLS_PATCH: &str =
-    r#"[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]"#;
+pub const INSECURE_TLS_PATCH: &str = r#"[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]"#;
 
-pub async fn metrics_server<R: Remote>(r: &R, src: PinSrc, kubelet_insecure_tls: bool, disabled: &[String]) -> Result<RecipeReport> {
-    let mut rep = RecipeReport { recipe: "metrics-server".into(), version: pins::METRICS_SERVER.version.into(), ..Default::default() };
+pub async fn metrics_server<R: Remote>(
+    r: &R,
+    src: PinSrc,
+    kubelet_insecure_tls: bool,
+    disabled: &[String],
+) -> Result<RecipeReport> {
+    let mut rep = RecipeReport {
+        recipe: "metrics-server".into(),
+        version: pins::METRICS_SERVER.version.into(),
+        ..Default::default()
+    };
     if !disabled.iter().any(|d| d == "metrics-server") {
-        bail!("k3s's bundled metrics-server is still on and owns the same objects; create the cluster with --disable metrics-server (or --addons minimal) if you want this one");
+        bail!(
+            "k3s's bundled metrics-server is still on and owns the same objects; create the cluster with --disable metrics-server (or --addons minimal) if you want this one"
+        );
     }
     apply_pin(r, &pins::METRICS_SERVER, src).await?;
-    rep.applied.push(format!("metrics-server {}", pins::METRICS_SERVER.version));
+    rep.applied
+        .push(format!("metrics-server {}", pins::METRICS_SERVER.version));
     if kubelet_insecure_tls {
         r.run_server(&kubectl("metrics-patch", &format!("-n kube-system patch deployment metrics-server --type=json -p '{INSECURE_TLS_PATCH}'")), None).await?;
         rep.applied.push("added --kubelet-insecure-tls (the kubelet serving certificates are signed by the k3s CA, which metrics-server does not trust; the connection to the kubelets is not verified)".into());
     } else {
         rep.notes.push("if `kubectl top nodes` reports certificate errors, the kubelet certificates are signed by the k3s CA; re-run with --kubelet-insecure-tls to skip that verification (a security trade-off)".into());
     }
-    r.run_server(&kubectl("metrics-rollout", "-n kube-system rollout status deployment/metrics-server --timeout=180s"), None).await?;
+    r.run_server(
+        &kubectl(
+            "metrics-rollout",
+            "-n kube-system rollout status deployment/metrics-server --timeout=180s",
+        ),
+        None,
+    )
+    .await?;
     Ok(rep)
 }
 
@@ -172,9 +237,14 @@ pub async fn metrics_server<R: Remote>(r: &R, src: PinSrc, kubelet_insecure_tls:
 /// Envoy Gateway (pinned `install.yaml`), then waits for its controller. It brings the Gateway API CRDs with it. Use
 /// `fluxctl gateway demo` and `fluxctl gateway publish` from the Mac afterwards (docs/gateway.md).
 pub async fn envoy_gateway<R: Remote>(r: &R, src: PinSrc) -> Result<RecipeReport> {
-    let mut rep = RecipeReport { recipe: "envoy-gateway".into(), version: pins::ENVOY_GATEWAY.version.into(), ..Default::default() };
+    let mut rep = RecipeReport {
+        recipe: "envoy-gateway".into(),
+        version: pins::ENVOY_GATEWAY.version.into(),
+        ..Default::default()
+    };
     apply_pin(r, &pins::ENVOY_GATEWAY, src).await?;
-    rep.applied.push(format!("envoy-gateway {}", pins::ENVOY_GATEWAY.version));
+    rep.applied
+        .push(format!("envoy-gateway {}", pins::ENVOY_GATEWAY.version));
     r.run_server(
         &kubectl("envoy-gateway-rollout", "-n envoy-gateway-system wait deployment/envoy-gateway --for=condition=Available --timeout=300s"),
         None,
@@ -191,17 +261,36 @@ mod tests {
 
     #[test]
     fn pool_addresses() {
-        for ok in ["10.89.0.192/28", "10.89.0.200-10.89.0.220", "10.0.0.5-10.0.0.5", "192.168.1.1/32"] {
+        for ok in [
+            "10.89.0.192/28",
+            "10.89.0.200-10.89.0.220",
+            "10.0.0.5-10.0.0.5",
+            "192.168.1.1/32",
+        ] {
             assert!(pool_address_ok(ok), "{ok}");
         }
-        for bad in ["10.89.0.0/7", "10.89.0.0/33", "10.89.0.220-10.89.0.200", "10.89.0.1", "fe80::/64", "a-b", "10.89.0.1/x", ""] {
+        for bad in [
+            "10.89.0.0/7",
+            "10.89.0.0/33",
+            "10.89.0.220-10.89.0.200",
+            "10.89.0.1",
+            "fe80::/64",
+            "a-b",
+            "10.89.0.1/x",
+            "",
+        ] {
             assert!(!pool_address_ok(bad), "{bad}");
         }
     }
 
     #[test]
     fn pool_golden() {
-        let y = metallb_pool_yaml("lan", &["10.89.0.200-10.89.0.220".into(), "10.89.1.0/28".into()], true).unwrap();
+        let y = metallb_pool_yaml(
+            "lan",
+            &["10.89.0.200-10.89.0.220".into(), "10.89.1.0/28".into()],
+            true,
+        )
+        .unwrap();
         assert_eq!(
             y,
             "apiVersion: metallb.io/v1beta1\n\
@@ -225,49 +314,132 @@ spec:\n  ipAddressPools:\n  - lan\n"
     #[tokio::test]
     async fn metallb_installs_pinned_manifest_waits_for_the_controller_then_adds_the_pool() {
         let r = FakeRemote::cluster(1, 0);
-        let rep = metallb(&r, MetalLbReq { name: "lan".into(), addresses: vec!["10.89.0.200-10.89.0.220".into()], auto_assign: true, src: PinSrc::Download, disabled: vec![] }).await.unwrap();
+        let rep = metallb(
+            &r,
+            MetalLbReq {
+                name: "lan".into(),
+                addresses: vec!["10.89.0.200-10.89.0.220".into()],
+                auto_assign: true,
+                src: PinSrc::Download,
+                disabled: vec![],
+            },
+        )
+        .await
+        .unwrap();
         let ops = r.ops();
-        assert_eq!(ops, ["c-s1:pin-apply", "c-s1:metallb-rollout", "c-s1:metallb-pool"]);
+        assert_eq!(
+            ops,
+            [
+                "c-s1:pin-apply",
+                "c-s1:metallb-rollout",
+                "c-s1:metallb-pool"
+            ]
+        );
         assert!(r.log.borrow()[0].1.contains(pins::METALLB.sha256));
-        assert!(rep.notes.iter().any(|n| n.contains("ServiceLB is still enabled")));
-        let rep = metallb(&FakeRemote::cluster(1, 0), MetalLbReq { name: "lan".into(), addresses: vec!["10.0.0.0/24".into()], auto_assign: false, src: PinSrc::Download, disabled: vec!["servicelb".into()] }).await.unwrap();
+        assert!(
+            rep.notes
+                .iter()
+                .any(|n| n.contains("ServiceLB is still enabled"))
+        );
+        let rep = metallb(
+            &FakeRemote::cluster(1, 0),
+            MetalLbReq {
+                name: "lan".into(),
+                addresses: vec!["10.0.0.0/24".into()],
+                auto_assign: false,
+                src: PinSrc::Download,
+                disabled: vec!["servicelb".into()],
+            },
+        )
+        .await
+        .unwrap();
         assert!(!rep.notes.iter().any(|n| n.contains("ServiceLB")));
     }
 
     #[tokio::test]
     async fn bad_pool_installs_nothing() {
         let r = FakeRemote::cluster(1, 0);
-        assert!(metallb(&r, MetalLbReq { name: "lan".into(), addresses: vec!["nope".into()], auto_assign: true, src: PinSrc::Download, disabled: vec![] }).await.is_err());
+        assert!(
+            metallb(
+                &r,
+                MetalLbReq {
+                    name: "lan".into(),
+                    addresses: vec!["nope".into()],
+                    auto_assign: true,
+                    src: PinSrc::Download,
+                    disabled: vec![]
+                }
+            )
+            .await
+            .is_err()
+        );
         assert!(r.log.borrow().is_empty());
     }
 
     #[tokio::test]
     async fn local_manifest_must_match_its_digest_before_anything_is_sent() {
         let r = FakeRemote::cluster(1, 0);
-        let bad = PinSrc::File { data: b"apiVersion: v1\n".to_vec(), sha: pins::CERT_MANAGER.sha256.into() };
-        assert!(cert_manager(&r, bad).await.unwrap_err().to_string().contains("nothing was sent"));
+        let bad = PinSrc::File {
+            data: b"apiVersion: v1\n".to_vec(),
+            sha: pins::CERT_MANAGER.sha256.into(),
+        };
+        assert!(
+            cert_manager(&r, bad)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("nothing was sent")
+        );
         assert!(r.log.borrow().is_empty());
         let data = b"apiVersion: v1\n".to_vec();
         let sha = super::super::model::sha256_hex(&data);
-        cert_manager(&r, PinSrc::File { data: data.clone(), sha: sha.clone() }).await.unwrap();
+        cert_manager(
+            &r,
+            PinSrc::File {
+                data: data.clone(),
+                sha: sha.clone(),
+            },
+        )
+        .await
+        .unwrap();
         let log = r.log.borrow();
         assert_eq!(log[0].2.as_deref(), Some("apiVersion: v1\n"));
         assert!(log[0].1.contains(&sha) && log[0].1.contains("cat > \"$T\""));
-        assert_eq!(r.ops().iter().filter(|o| o.ends_with("cert-manager-rollout")).count(), 3);
+        assert_eq!(
+            r.ops()
+                .iter()
+                .filter(|o| o.ends_with("cert-manager-rollout"))
+                .count(),
+            3
+        );
     }
 
     #[tokio::test]
     async fn metrics_server_refuses_while_the_bundled_one_runs_and_patches_only_when_asked() {
         let r = FakeRemote::cluster(1, 0);
-        assert!(metrics_server(&r, PinSrc::Download, false, &[]).await.is_err());
+        assert!(
+            metrics_server(&r, PinSrc::Download, false, &[])
+                .await
+                .is_err()
+        );
         assert!(r.log.borrow().is_empty());
         let d = vec!["metrics-server".to_owned()];
-        let rep = metrics_server(&r, PinSrc::Download, false, &d).await.unwrap();
+        let rep = metrics_server(&r, PinSrc::Download, false, &d)
+            .await
+            .unwrap();
         assert!(!r.ops().iter().any(|o| o.ends_with("metrics-patch")));
         assert!(rep.notes[0].contains("--kubelet-insecure-tls"));
         let r = FakeRemote::cluster(1, 0);
-        metrics_server(&r, PinSrc::Download, true, &d).await.unwrap();
-        assert!(r.log.borrow().iter().any(|(_, s, _)| s.contains("--kubelet-insecure-tls") && s.contains("patch deployment metrics-server")));
+        metrics_server(&r, PinSrc::Download, true, &d)
+            .await
+            .unwrap();
+        assert!(
+            r.log
+                .borrow()
+                .iter()
+                .any(|(_, s, _)| s.contains("--kubelet-insecure-tls")
+                    && s.contains("patch deployment metrics-server"))
+        );
     }
 
     #[tokio::test]
@@ -276,8 +448,13 @@ spec:\n  ipAddressPools:\n  - lan\n"
         let rep = envoy_gateway(&r, PinSrc::Download).await.unwrap();
         assert_eq!(r.ops(), ["c-s1:pin-apply", "c-s1:envoy-gateway-rollout"]);
         let log = r.log.borrow();
-        assert!(log[0].1.contains(pins::ENVOY_GATEWAY.sha256) && log[0].1.contains("--server-side"));
-        assert!(log[1].1.contains("deployment/envoy-gateway") && log[1].1.contains("envoy-gateway-system"));
+        assert!(
+            log[0].1.contains(pins::ENVOY_GATEWAY.sha256) && log[0].1.contains("--server-side")
+        );
+        assert!(
+            log[1].1.contains("deployment/envoy-gateway")
+                && log[1].1.contains("envoy-gateway-system")
+        );
         assert_eq!(rep.version, "v1.10.0");
     }
 }

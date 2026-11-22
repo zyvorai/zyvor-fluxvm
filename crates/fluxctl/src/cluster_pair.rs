@@ -96,10 +96,16 @@ pub fn normalize_server(s: &str) -> Result<String> {
         Some(_) => bail!("the server must be http:// or https://"),
         None => ("http", s),
     };
-    if rest.is_empty() || rest.contains('/') || rest.contains('@') || rest.chars().any(char::is_whitespace) {
+    if rest.is_empty()
+        || rest.contains('/')
+        || rest.contains('@')
+        || rest.chars().any(char::is_whitespace)
+    {
         bail!("{s:?} is not a host, host:port or URL");
     }
-    let has_port = rest.rsplit_once(':').is_some_and(|(_, p)| p.parse::<u16>().is_ok());
+    let has_port = rest
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| p.parse::<u16>().is_ok());
     Ok(if has_port {
         format!("{scheme}://{rest}")
     } else {
@@ -149,18 +155,36 @@ impl Http {
     pub fn new(base: String) -> Result<Http> {
         Ok(Http {
             base,
-            client: reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?,
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()?,
         })
     }
-    fn post(&self, path: &str, body: serde_json::Value) -> Result<(u16, serde_json::Value, Option<u64>)> {
+    fn post(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<(u16, serde_json::Value, Option<u64>)> {
         let url = format!("{}{path}", self.base);
         let c = self.client.clone();
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
-                let r = c.post(&url).json(&body).send().await.with_context(|| format!("contacting {url}"))?;
+                let r = c
+                    .post(&url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .with_context(|| format!("contacting {url}"))?;
                 let st = r.status().as_u16();
-                let retry = r.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok());
-                let v = r.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
+                let retry = r
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok());
+                let v = r
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or(serde_json::Value::Null);
                 Ok::<_, anyhow::Error>((st, v, retry))
             })
         })
@@ -169,29 +193,49 @@ impl Http {
 
 impl Transport for Http {
     fn request(&self, name: &str, ed_pub: &str, x_pub: &str) -> Result<OfferResp> {
-        let (st, v, _) = self.post("/fleet/pair/request", serde_json::json!({"name": name, "ed_pub": ed_pub, "x_pub": x_pub}))?;
+        let (st, v, _) = self.post(
+            "/fleet/pair/request",
+            serde_json::json!({"name": name, "ed_pub": ed_pub, "x_pub": x_pub}),
+        )?;
         match st {
             200 => Ok(serde_json::from_value(v)?),
-            404 => bail!("that server is not accepting pairing (start it with `fluxvm-agent central --pairing`)"),
+            404 => bail!(
+                "that server is not accepting pairing (start it with `fluxvm-agent central --pairing`)"
+            ),
             429 => bail!("the server has too many open requests; try again in a minute"),
-            _ => bail!("the server refused ({st}): {}", v["error"].as_str().unwrap_or("no reason given")),
+            _ => bail!(
+                "the server refused ({st}): {}",
+                v["error"].as_str().unwrap_or("no reason given")
+            ),
         }
     }
     fn claim(&self, id: &str, sig: &str) -> Result<ClaimResp> {
-        let (st, v, retry) = self.post("/fleet/pair/claim", serde_json::json!({"id": id, "sig": sig}))?;
+        let (st, v, retry) = self.post(
+            "/fleet/pair/claim",
+            serde_json::json!({"id": id, "sig": sig}),
+        )?;
         Ok(match (st, v["state"].as_str()) {
             (200, Some("pending")) => ClaimResp::Pending,
             (200, Some("denied")) => ClaimResp::Denied,
             (200, Some("approved")) => {
-                let hexs = v["sealed"].as_str().context("the server sent no credential")?;
+                let hexs = v["sealed"]
+                    .as_str()
+                    .context("the server sent no credential")?;
                 if hexs.len() % 2 != 0 || !hexs.is_ascii() {
                     bail!("the server sent a malformed credential");
                 }
-                ClaimResp::Approved((0..hexs.len() / 2).map(|i| u8::from_str_radix(&hexs[i * 2..i * 2 + 2], 16)).collect::<Result<_, _>>()?)
+                ClaimResp::Approved(
+                    (0..hexs.len() / 2)
+                        .map(|i| u8::from_str_radix(&hexs[i * 2..i * 2 + 2], 16))
+                        .collect::<Result<_, _>>()?,
+                )
             }
             (429, _) => ClaimResp::Slow(retry.unwrap_or(5).clamp(1, 60)),
             (404 | 409 | 410, _) => ClaimResp::Gone,
-            _ => bail!("the server refused ({st}): {}", v["error"].as_str().unwrap_or("no reason given")),
+            _ => bail!(
+                "the server refused ({st}): {}",
+                v["error"].as_str().unwrap_or("no reason given")
+            ),
         })
     }
 }
@@ -217,13 +261,17 @@ impl Io for Term {
         print!("{q} [Y/n] ");
         let _ = std::io::stdout().flush();
         let mut l = String::new();
-        std::io::stdin().lock().read_line(&mut l).is_ok() && !l.trim().to_lowercase().starts_with('n')
+        std::io::stdin().lock().read_line(&mut l).is_ok()
+            && !l.trim().to_lowercase().starts_with('n')
     }
     fn sleep(&mut self, d: Duration) {
         std::thread::sleep(d);
     }
     fn now(&self) -> i64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
     }
 }
 
@@ -231,10 +279,18 @@ fn write_private(path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     if let Some(d) = path.parent() {
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(d)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(d)?;
     }
     let tmp = path.with_extension("tmp");
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
     f.write_all(content.as_bytes())?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)?;
@@ -246,7 +302,10 @@ fn read_private(path: &Path) -> Result<Option<String>> {
     match std::fs::metadata(path) {
         Ok(m) => {
             if m.mode() & 0o077 != 0 {
-                bail!("{} is readable by group or others; chmod 600 it", path.display());
+                bail!(
+                    "{} is readable by group or others; chmod 600 it",
+                    path.display()
+                );
             }
             Ok(Some(std::fs::read_to_string(path)?.trim().to_owned()))
         }
@@ -259,7 +318,9 @@ fn read_private(path: &Path) -> Result<Option<String>> {
 pub fn load_keys(dir: &Path) -> Result<NodeKeys> {
     let p = dir.join("pair-key");
     let seed = match read_private(&p)? {
-        Some(h) => Some(unhex::<32>(&h).context("pair-key is damaged; delete it to make a new identity")?),
+        Some(h) => {
+            Some(unhex::<32>(&h).context("pair-key is damaged; delete it to make a new identity")?)
+        }
         None => None,
     };
     let keys = NodeKeys::new(seed);
@@ -270,7 +331,11 @@ pub fn load_keys(dir: &Path) -> Result<NodeKeys> {
 }
 
 /// Picks the server: the one given, else the one found on the LAN.
-pub fn choose_server(a: &PairArgs, browser: &dyn Browser, io: &mut dyn Io) -> Result<(String, String)> {
+pub fn choose_server(
+    a: &PairArgs,
+    browser: &dyn Browser,
+    io: &mut dyn Io,
+) -> Result<(String, String)> {
     if let Some(s) = &a.server {
         let u = normalize_server(s)?;
         return Ok((u.clone(), u));
@@ -289,14 +354,23 @@ pub fn choose_server(a: &PairArgs, browser: &dyn Browser, io: &mut dyn Io) -> Re
         1 => {
             let f = &found[0];
             let url = url_of(f).expect("filtered");
-            let q = format!("Found the fleet \"{}\" at {url}. Ask to join it?", f.instance);
+            let q = format!(
+                "Found the fleet \"{}\" at {url}. Ask to join it?",
+                f.instance
+            );
             if !a.yes && !io.confirm(&q) {
-                bail!("not contacting {url}; run again with --yes if that is the fleet you mean, or name it with --fleet");
+                bail!(
+                    "not contacting {url}; run again with --yes if that is the fleet you mean, or name it with --fleet"
+                );
             }
             Ok((url, f.instance.clone()))
         }
         _ => {
-            let list = found.iter().map(|f| format!("  \"{}\" at {}", f.instance, url_of(f).unwrap_or_default())).collect::<Vec<_>>().join("\n");
+            let list = found
+                .iter()
+                .map(|f| format!("  \"{}\" at {}", f.instance, url_of(f).unwrap_or_default()))
+                .collect::<Vec<_>>()
+                .join("\n");
             bail!("more than one fleet answered; pick one with --fleet NAME:\n{list}")
         }
     }
@@ -312,12 +386,19 @@ pub struct Paired {
 /// The whole machine-side flow. Returns once the credential is stored.
 pub fn pair(t: &dyn Transport, name: &str, dir: &Path, io: &mut dyn Io) -> Result<Paired> {
     if !fluxvm_core::pairing::valid_name(name) {
-        bail!("{name:?} cannot be a node name: use lowercase letters, digits, dashes and dots (--name)");
+        bail!(
+            "{name:?} cannot be a node name: use lowercase letters, digits, dashes and dots (--name)"
+        );
     }
     let keys = load_keys(dir)?;
-    if let Some(existing) = read_private(&dir.join("node-credential"))?.filter(|c| c.starts_with("fvnc_")) {
+    if let Some(existing) =
+        read_private(&dir.join("node-credential"))?.filter(|c| c.starts_with("fvnc_"))
+    {
         let _ = existing;
-        bail!("this machine already has a credential in {}; remove node-credential there to pair again", dir.display());
+        bail!(
+            "this machine already has a credential in {}; remove node-credential there to pair again",
+            dir.display()
+        );
     }
     let offer = t.request(name, &hex(&keys.ed_pub()), &hex(&keys.x_pub()))?;
     let sp: [u8; 32] = unhex(&offer.server_pub).context("the server sent a bad key")?;
@@ -336,17 +417,25 @@ pub fn pair(t: &dyn Transport, name: &str, dir: &Path, io: &mut dyn Io) -> Resul
             ClaimResp::Pending => wait = 2,
             ClaimResp::Slow(s) => wait = s,
             ClaimResp::Denied => bail!("the request was denied"),
-            ClaimResp::Gone => bail!("the request expired or was already used; run `fluxctl cluster pair` again"),
+            ClaimResp::Gone => {
+                bail!("the request expired or was already used; run `fluxctl cluster pair` again")
+            }
             ClaimResp::Approved(sealed) => {
                 let node_id = keys.node_id();
                 let cred = keys
                     .open_credential(&offer.id, &sp, &sealed)
                     .filter(|c| c.starts_with("fvnc_"))
-                    .context("the credential could not be opened: it was not sealed for this machine")?;
+                    .context(
+                        "the credential could not be opened: it was not sealed for this machine",
+                    )?;
                 write_private(&dir.join("node-id"), &node_id)?;
                 write_private(&dir.join("node-credential"), &cred)?;
                 io.say("Approved. This machine has its credential.");
-                return Ok(Paired { name: name.to_owned(), node_id, state_dir: dir.to_path_buf() });
+                return Ok(Paired {
+                    name: name.to_owned(),
+                    node_id,
+                    state_dir: dir.to_path_buf(),
+                });
             }
         }
         io.sleep(Duration::from_secs(wait));
@@ -365,13 +454,17 @@ pub fn next_step(p: &Paired, central: &str) -> String {
 
 pub async fn run_pair(a: PairArgs) -> Result<()> {
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let dir = a.state_dir.clone().unwrap_or_else(|| default_state_dir(&home, unsafe { libc::geteuid() } == 0));
+    let dir = a
+        .state_dir
+        .clone()
+        .unwrap_or_else(|| default_state_dir(&home, unsafe { libc::geteuid() } == 0));
     let name = match &a.name {
         Some(n) => n.clone(),
         None => host_name(),
     };
     let mut term = Term;
-    let (base, fleet) = tokio::task::block_in_place(|| choose_server(&a, &mdns::UdpBrowser::default(), &mut term))?;
+    let (base, fleet) =
+        tokio::task::block_in_place(|| choose_server(&a, &mdns::UdpBrowser::default(), &mut term))?;
     let http = Http::new(base.clone())?;
     let p = tokio::task::block_in_place(|| pair(&http, &name, &dir, &mut term))?;
     println!("\nJoined \"{fleet}\" as {}.", p.name);
@@ -396,14 +489,24 @@ pub async fn run_pair(a: PairArgs) -> Result<()> {
             return Ok(());
         }
         #[cfg(not(target_os = "macos"))]
-        println!("--install is for macOS; on Linux start the agent with the line below (or the installer's service).");
+        println!(
+            "--install is for macOS; on Linux start the agent with the line below (or the installer's service)."
+        );
     }
-    println!("Start it with:\n  {line}\n(on Linux: fluxvm-agent node --name {} --central {base} --state-dir '{}')", p.name, p.state_dir.display());
+    println!(
+        "Start it with:\n  {line}\n(on Linux: fluxvm-agent node --name {} --central {base} --state-dir '{}')",
+        p.name,
+        p.state_dir.display()
+    );
     Ok(())
 }
 
 fn host_name() -> String {
-    let raw = std::process::Command::new("hostname").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+    let raw = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
     let n: String = raw
         .trim()
         .split('.')
@@ -411,7 +514,13 @@ fn host_name() -> String {
         .unwrap_or("")
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let n = n.trim_matches('-').to_owned();
     if n.is_empty() { "machine".into() } else { n }
@@ -446,7 +555,13 @@ async fn admin(a: &ServerArgs, method: reqwest::Method, path: &str) -> Result<se
     let st = r.status();
     let v: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
     if !st.is_success() {
-        bail!("{}", v["error"].as_str().map(str::to_owned).unwrap_or_else(|| format!("the server answered {st}")));
+        bail!(
+            "{}",
+            v["error"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("the server answered {st}"))
+        );
     }
     Ok(v)
 }
@@ -465,7 +580,10 @@ pub fn pending_table(v: &serde_json::Value) -> String {
             "No machines are asking to join.\n".into()
         };
     }
-    let mut s = format!("{:<13} {:<20} {:<16} {}\n", "CODE", "NAME", "FROM", "EXPIRES IN");
+    let mut s = format!(
+        "{:<13} {:<20} {:<16} {}\n",
+        "CODE", "NAME", "FROM", "EXPIRES IN"
+    );
     for i in items {
         s.push_str(&format!(
             "{:<13} {:<20} {:<16} {}s\n",
@@ -475,7 +593,9 @@ pub fn pending_table(v: &serde_json::Value) -> String {
             i["expires_in"].as_i64().unwrap_or(0)
         ));
     }
-    s.push_str("\nApprove the one whose code matches the machine's screen: fluxctl cluster approve CODE\n");
+    s.push_str(
+        "\nApprove the one whose code matches the machine's screen: fluxctl cluster approve CODE\n",
+    );
     s
 }
 
@@ -483,16 +603,32 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
     match cmd {
         ClusterCommand::Pair(a) => run_pair(a).await,
         ClusterCommand::Pending(s) => {
-            print!("{}", pending_table(&admin(&s, reqwest::Method::GET, "/fleet/pair/pending").await?));
+            print!(
+                "{}",
+                pending_table(&admin(&s, reqwest::Method::GET, "/fleet/pair/pending").await?)
+            );
             Ok(())
         }
         ClusterCommand::Approve { code, server } => {
-            let v = admin(&server, reqwest::Method::POST, &format!("/fleet/pair/{}/approve", enc(&code))).await?;
-            println!("Approved {}. The machine receives its credential in a few seconds.", v["approved"].as_str().unwrap_or("it"));
+            let v = admin(
+                &server,
+                reqwest::Method::POST,
+                &format!("/fleet/pair/{}/approve", enc(&code)),
+            )
+            .await?;
+            println!(
+                "Approved {}. The machine receives its credential in a few seconds.",
+                v["approved"].as_str().unwrap_or("it")
+            );
             Ok(())
         }
         ClusterCommand::Deny { code, server } => {
-            admin(&server, reqwest::Method::POST, &format!("/fleet/pair/{}/deny", enc(&code))).await?;
+            admin(
+                &server,
+                reqwest::Method::POST,
+                &format!("/fleet/pair/{}/deny", enc(&code)),
+            )
+            .await?;
             println!("Denied.");
             Ok(())
         }
@@ -501,7 +637,15 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
 }
 
 fn enc(s: &str) -> String {
-    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b == b'-' { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -522,14 +666,32 @@ mod tests {
 
     impl Local {
         fn new() -> Self {
-            Local { book: RefCell::new(PairBook::new(PairConfig { claim_interval_secs: 0, ..Default::default() })), clock: RefCell::new(1_000), approve_after: RefCell::new(Some(2)), claims: RefCell::new(0), deny: false, approved_code: RefCell::new(None) }
+            Local {
+                book: RefCell::new(PairBook::new(PairConfig {
+                    claim_interval_secs: 0,
+                    ..Default::default()
+                })),
+                clock: RefCell::new(1_000),
+                approve_after: RefCell::new(Some(2)),
+                claims: RefCell::new(0),
+                deny: false,
+                approved_code: RefCell::new(None),
+            }
         }
     }
 
     impl Transport for Local {
         fn request(&self, name: &str, e: &str, x: &str) -> Result<OfferResp> {
-            let o = self.book.borrow_mut().request(*self.clock.borrow(), "10.0.0.2", name, e, x).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            Ok(OfferResp { id: o.id, server_pub: o.server_pub, expires_in: o.expires_in })
+            let o = self
+                .book
+                .borrow_mut()
+                .request(*self.clock.borrow(), "10.0.0.2", name, e, x)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            Ok(OfferResp {
+                id: o.id,
+                server_pub: o.server_pub,
+                expires_in: o.expires_in,
+            })
         }
         fn claim(&self, id: &str, sig: &str) -> Result<ClaimResp> {
             let n = {
@@ -544,10 +706,18 @@ mod tests {
                 if self.deny {
                     b.deny(now, &code).unwrap();
                 } else {
-                    b.approve(now, &code.to_lowercase(), |_, _| Ok("fvnc_abc.1.def".into())).unwrap();
+                    b.approve(
+                        now,
+                        &code.to_lowercase(),
+                        |_, _| Ok("fvnc_abc.1.def".into()),
+                    )
+                    .unwrap();
                 }
             }
-            let r = self.book.borrow_mut().claim(*self.clock.borrow(), "10.0.0.2", id, sig);
+            let r = self
+                .book
+                .borrow_mut()
+                .claim(*self.clock.borrow(), "10.0.0.2", id, sig);
             Ok(match r {
                 Ok(Claim::Pending) => ClaimResp::Pending,
                 Ok(Claim::Denied) => ClaimResp::Denied,
@@ -583,17 +753,31 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let srv = Local::new();
         let dir = tempfile::tempdir().unwrap();
-        let mut io = Script { said: vec![], answer: true, clock: &srv.clock };
+        let mut io = Script {
+            said: vec![],
+            answer: true,
+            clock: &srv.clock,
+        };
         let p = pair(&srv, "mini-2", dir.path(), &mut io).unwrap();
         let cred = std::fs::read_to_string(dir.path().join("node-credential")).unwrap();
         assert_eq!(cred, "fvnc_abc.1.def");
         for f in ["node-credential", "node-id", "pair-key"] {
-            assert_eq!(std::fs::metadata(dir.path().join(f)).unwrap().mode() & 0o777, 0o600, "{f}");
+            assert_eq!(
+                std::fs::metadata(dir.path().join(f)).unwrap().mode() & 0o777,
+                0o600,
+                "{f}"
+            );
         }
-        assert_eq!(std::fs::read_to_string(dir.path().join("node-id")).unwrap(), p.node_id);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("node-id")).unwrap(),
+            p.node_id
+        );
         // The code on this screen is the one the server's operator was shown.
         let shown = io.said.join("\n");
-        assert!(shown.contains(srv.approved_code.borrow().as_deref().unwrap()), "{shown}");
+        assert!(
+            shown.contains(srv.approved_code.borrow().as_deref().unwrap()),
+            "{shown}"
+        );
         // The same identity again: the key is kept, so the node id is stable.
         assert_eq!(load_keys(dir.path()).unwrap().node_id(), p.node_id);
         // A machine that already has a credential does not pair twice.
@@ -608,8 +792,14 @@ mod tests {
         let mut srv = Local::new();
         srv.deny = true;
         let dir = tempfile::tempdir().unwrap();
-        let mut io = Script { said: vec![], answer: true, clock: &srv.clock };
-        let e = pair(&srv, "mini-2", dir.path(), &mut io).unwrap_err().to_string();
+        let mut io = Script {
+            said: vec![],
+            answer: true,
+            clock: &srv.clock,
+        };
+        let e = pair(&srv, "mini-2", dir.path(), &mut io)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("denied"), "{e}");
         assert!(!dir.path().join("node-credential").exists());
     }
@@ -619,8 +809,14 @@ mod tests {
         let srv = Local::new();
         *srv.approve_after.borrow_mut() = None;
         let dir = tempfile::tempdir().unwrap();
-        let mut io = Script { said: vec![], answer: true, clock: &srv.clock };
-        let e = pair(&srv, "mini-2", dir.path(), &mut io).unwrap_err().to_string();
+        let mut io = Script {
+            said: vec![],
+            answer: true,
+            clock: &srv.clock,
+        };
+        let e = pair(&srv, "mini-2", dir.path(), &mut io)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("in time") || e.contains("expired"), "{e}");
         assert!(!dir.path().join("node-credential").exists());
     }
@@ -629,45 +825,104 @@ mod tests {
     fn a_bad_name_is_refused_before_anything_is_sent() {
         let srv = Local::new();
         let dir = tempfile::tempdir().unwrap();
-        let mut io = Script { said: vec![], answer: true, clock: &srv.clock };
+        let mut io = Script {
+            said: vec![],
+            answer: true,
+            clock: &srv.clock,
+        };
         assert!(pair(&srv, "Mini 2", dir.path(), &mut io).is_err());
         assert!(srv.book.borrow_mut().pending(1_000).is_empty());
         assert!(!dir.path().join("pair-key").exists());
     }
 
     fn found(name: &str, ip: [u8; 4]) -> Found {
-        Found { instance: name.into(), host: "h.local".into(), port: 7799, addrs: vec![std::net::Ipv4Addr::from(ip)], txt: Default::default() }
+        Found {
+            instance: name.into(),
+            host: "h.local".into(),
+            port: 7799,
+            addrs: vec![std::net::Ipv4Addr::from(ip)],
+            txt: Default::default(),
+        }
     }
 
     fn args(fleet: Option<&str>, yes: bool) -> PairArgs {
-        PairArgs { server: None, fleet: fleet.map(str::to_owned), name: None, yes, state_dir: None, discover_secs: 0, install: false }
+        PairArgs {
+            server: None,
+            fleet: fleet.map(str::to_owned),
+            name: None,
+            yes,
+            state_dir: None,
+            discover_secs: 0,
+            install: false,
+        }
     }
 
     #[test]
     fn discovery_asks_before_contacting_and_handles_none_or_many() {
         let clock = RefCell::new(0);
-        let mut io = Script { said: vec![], answer: false, clock: &clock };
+        let mut io = Script {
+            said: vec![],
+            answer: false,
+            clock: &clock,
+        };
         let one = mdns::FakeBrowser(vec![found("Home Lab", [192, 168, 1, 20])]);
         // Declining means nothing is sent.
         assert!(choose_server(&args(None, false), &one, &mut io).is_err());
         io.answer = true;
-        assert_eq!(choose_server(&args(None, false), &one, &mut io).unwrap().0, "http://192.168.1.20:7799");
-        assert_eq!(choose_server(&args(None, true), &one, &mut Script { said: vec![], answer: false, clock: &clock }).unwrap().1, "Home Lab");
+        assert_eq!(
+            choose_server(&args(None, false), &one, &mut io).unwrap().0,
+            "http://192.168.1.20:7799"
+        );
+        assert_eq!(
+            choose_server(
+                &args(None, true),
+                &one,
+                &mut Script {
+                    said: vec![],
+                    answer: false,
+                    clock: &clock
+                }
+            )
+            .unwrap()
+            .1,
+            "Home Lab"
+        );
         let none = mdns::FakeBrowser(vec![]);
-        let e = choose_server(&args(None, true), &none, &mut io).unwrap_err().to_string();
+        let e = choose_server(&args(None, true), &none, &mut io)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("--server") && e.contains("--pairing"), "{e}");
         let two = mdns::FakeBrowser(vec![found("A", [10, 0, 0, 1]), found("B", [10, 0, 0, 2])]);
-        let e = choose_server(&args(None, true), &two, &mut io).unwrap_err().to_string();
+        let e = choose_server(&args(None, true), &two, &mut io)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("--fleet") && e.contains("10.0.0.2"), "{e}");
-        assert_eq!(choose_server(&args(Some("b"), true), &two, &mut io).unwrap().0, "http://10.0.0.2:7799");
+        assert_eq!(
+            choose_server(&args(Some("b"), true), &two, &mut io)
+                .unwrap()
+                .0,
+            "http://10.0.0.2:7799"
+        );
     }
 
     #[test]
     fn server_addresses_are_normalised_and_junk_is_refused() {
-        assert_eq!(normalize_server("10.0.0.5").unwrap(), "http://10.0.0.5:7799");
-        assert_eq!(normalize_server("mini.local:8000").unwrap(), "http://mini.local:8000");
-        assert_eq!(normalize_server("https://c.example/").unwrap(), "https://c.example:7799");
-        assert_eq!(normalize_server("https://c.example:443").unwrap(), "https://c.example:443");
+        assert_eq!(
+            normalize_server("10.0.0.5").unwrap(),
+            "http://10.0.0.5:7799"
+        );
+        assert_eq!(
+            normalize_server("mini.local:8000").unwrap(),
+            "http://mini.local:8000"
+        );
+        assert_eq!(
+            normalize_server("https://c.example/").unwrap(),
+            "https://c.example:7799"
+        );
+        assert_eq!(
+            normalize_server("https://c.example:443").unwrap(),
+            "https://c.example:443"
+        );
         assert!(normalize_server("ftp://x").is_err());
         assert!(normalize_server("http://u:p@x").is_err());
         assert!(normalize_server("a b").is_err());
@@ -678,8 +933,19 @@ mod tests {
     fn the_pending_table_shows_code_name_and_where_from() {
         let v = serde_json::json!({"enabled": true, "items": [{"code": "ABCDE-FGHJK", "name": "mini-2", "address": "10.0.0.2", "expires_in": 540}]});
         let t = pending_table(&v);
-        assert!(t.contains("ABCDE-FGHJK") && t.contains("mini-2") && t.contains("10.0.0.2") && t.contains("cluster approve"));
-        assert!(pending_table(&serde_json::json!({"enabled": false, "items": []})).contains("--pairing"));
-        assert!(pending_table(&serde_json::json!({"enabled": true, "items": []})).contains("No machines"));
+        assert!(
+            t.contains("ABCDE-FGHJK")
+                && t.contains("mini-2")
+                && t.contains("10.0.0.2")
+                && t.contains("cluster approve")
+        );
+        assert!(
+            pending_table(&serde_json::json!({"enabled": false, "items": []}))
+                .contains("--pairing")
+        );
+        assert!(
+            pending_table(&serde_json::json!({"enabled": true, "items": []}))
+                .contains("No machines")
+        );
     }
 }

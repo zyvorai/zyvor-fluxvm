@@ -38,9 +38,20 @@ mod tests_backend {
 
     #[test]
     fn the_old_name_is_noted_but_the_forwarder_and_the_new_name_are_not() {
-        assert!(wants_deprecation_note(&a(&["fluxctl", "kube", "apple", "list"])));
-        assert!(!wants_deprecation_note(&a(&["fluxctl", "kube", "cluster", "list"])));
-        assert!(!wants_deprecation_note(&a(&["fluxctl", "kube", "apple", "tunnel", "dev", "--foreground"])));
+        assert!(wants_deprecation_note(&a(&[
+            "fluxctl", "kube", "apple", "list"
+        ])));
+        assert!(!wants_deprecation_note(&a(&[
+            "fluxctl", "kube", "cluster", "list"
+        ])));
+        assert!(!wants_deprecation_note(&a(&[
+            "fluxctl",
+            "kube",
+            "apple",
+            "tunnel",
+            "dev",
+            "--foreground"
+        ])));
     }
 }
 
@@ -49,9 +60,9 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use lifecycle::Install;
 use model::*;
-use std::path::PathBuf;
 pub use platform::PlatformArgs;
 pub use platform_cmd::PlatformCommand;
+use std::path::PathBuf;
 
 #[derive(Args, Debug, Clone)]
 pub struct BinaryArgs {
@@ -478,7 +489,9 @@ pub fn resolve_install(b: &BinaryArgs, default: Option<Install>) -> Result<Insta
 /// output goes to a log). Machine output on stdout is never touched.
 pub fn deprecation_note(args: &[String]) {
     if wants_deprecation_note(args) {
-        eprintln!("note: `fluxctl kube apple` is now `fluxctl kube cluster` (the same command on a Mac and on Linux); the old name still works.");
+        eprintln!(
+            "note: `fluxctl kube apple` is now `fluxctl kube cluster` (the same command on a Mac and on Linux); the old name still works."
+        );
     }
 }
 
@@ -491,7 +504,9 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
     if let AppleCommand::Platform { command: c } = &command
         && c.is_offline()
     {
-        let AppleCommand::Platform { command: c } = command else { unreachable!() };
+        let AppleCommand::Platform { command: c } = command else {
+            unreachable!()
+        };
         return platform_cmd::run_offline(c);
     }
     let store = Store::new(default_root()?);

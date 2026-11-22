@@ -135,7 +135,13 @@ pub struct PullOptions {
 }
 
 /// The raw bytes of a chunk if a seed holds exactly them at the same place.
-fn seed_chunk(seeds: &[PathBuf], file: &str, offset: u64, size: usize, digest: &str) -> Option<Vec<u8>> {
+fn seed_chunk(
+    seeds: &[PathBuf],
+    file: &str,
+    offset: u64,
+    size: usize,
+    digest: &str,
+) -> Option<Vec<u8>> {
     for s in seeds {
         let Ok(f) = fs::File::open(s.join(file)) else {
             continue;
@@ -1148,7 +1154,9 @@ mod tests {
         };
         let reference = format!("{host}/vm/macos:27");
         push(&src, &reference, None, &opts).await.unwrap();
-        let plain = pull(&reference, &d.path().join("plain"), None).await.unwrap();
+        let plain = pull(&reference, &d.path().join("plain"), None)
+            .await
+            .unwrap();
         assert_eq!(plain.chunks_reused, 0);
 
         // A seed that is identical except for one corrupted chunk: only that chunk is downloaded.
@@ -1161,16 +1169,9 @@ mod tests {
         disk[0] ^= 0xff;
         fs::write(seed.join("disk.raw"), &disk).unwrap();
         let dest = d.path().join("seeded");
-        let got = pull_with(
-            &reference,
-            &dest,
-            None,
-            &PullOptions {
-                seeds: vec![seed],
-            },
-        )
-        .await
-        .unwrap();
+        let got = pull_with(&reference, &dest, None, &PullOptions { seeds: vec![seed] })
+            .await
+            .unwrap();
         assert_eq!(got.chunks_reused, 3, "4 chunk layers, one differs");
         assert!(got.bytes_downloaded < plain.bytes_downloaded);
         for f in ["disk.raw", "hardware.bin", "auxiliary.bin"] {

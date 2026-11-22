@@ -240,7 +240,14 @@ pub fn execute_with(
                 yes,
                 dry_run,
             };
-            expose::expose(&opts, &target.selection(), &c, env, out, &mut std::io::stderr())
+            expose::expose(
+                &opts,
+                &target.selection(),
+                &c,
+                env,
+                out,
+                &mut std::io::stderr(),
+            )
         }
         GatewayCommand::Unexpose {
             service,
@@ -277,7 +284,8 @@ pub fn execute_with(
                     "local port {p} is already in use (or not a valid port). Leave out --port to let fluxctl pick a free one, or choose another with --port N"
                 );
             }
-            let command = c.publication(&namespace, &gateway, &listener, &proxy_namespace, local)?;
+            let command =
+                c.publication(&namespace, &gateway, &listener, &proxy_namespace, local)?;
             if dry_run {
                 writeln!(out, "{}", shell_join(&command))?;
                 return Ok(0);
@@ -287,9 +295,8 @@ pub fn execute_with(
                 "Forwarding http://127.0.0.1:{local}/ to {gateway}/{listener} until Ctrl-C."
             )?;
             out.flush()?;
-            let mut find = || {
-                c.publication(&namespace, &gateway, &listener, &proxy_namespace, local)
-            };
+            let mut find =
+                || c.publication(&namespace, &gateway, &listener, &proxy_namespace, local);
             expose::forward_loop(command, &mut find, env, &mut std::io::stderr())
         }
         GatewayCommand::Inspect {
@@ -537,22 +544,83 @@ mod tests {
         let gw = serde_json::json!({"spec": {"listeners": [{"name": "web", "protocol": "HTTP", "port": 8080}]}});
         let svc = serde_json::json!({"items": [{"metadata": {"name": "envoy-x"}, "spec": {"ports": [{"port": 8080}]}}]});
         let f = FakeKubectl::default().json(gw.clone()).json(svc.clone());
-        let (code, out) = run_ok(parse(&["publish", "dev", "--listener", "web", "--dry-run"]).unwrap(), &f);
+        let (code, out) = run_ok(
+            parse(&["publish", "dev", "--listener", "web", "--dry-run"]).unwrap(),
+            &f,
+        );
         assert_eq!(code, 0);
-        let local: u16 = out.trim().rsplit(' ').next().unwrap().split(':').next().unwrap().parse().unwrap();
+        let local: u16 = out
+            .trim()
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .split(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!(expose::port_is_free(local), "{out}");
         let f = FakeKubectl::default().json(gw).json(svc);
-        let cmd = parse(&["publish", "dev", "--listener", "web", "--port", &busy.to_string()]).unwrap();
-        let e = execute(cmd, &f, &mut Vec::<u8>::new()).unwrap_err().to_string();
+        let cmd = parse(&[
+            "publish",
+            "dev",
+            "--listener",
+            "web",
+            "--port",
+            &busy.to_string(),
+        ])
+        .unwrap();
+        let e = execute(cmd, &f, &mut Vec::<u8>::new())
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("already in use") && e.contains("--port"), "{e}");
-        assert!(f.calls.borrow().is_empty(), "refused before any kubectl call");
+        assert!(
+            f.calls.borrow().is_empty(),
+            "refused before any kubectl call"
+        );
     }
 
     #[test]
     fn expose_unexpose_and_list_parse() {
-        match parse(&["expose", "web", "-n", "shop", "--port", "8000", "--host", "w.localhost", "--local-port", "9001", "--yes", "--dry-run", "--cluster", "dev"]).unwrap() {
-            GatewayCommand::Expose { service, namespace, port, host, local_port, yes, dry_run, target } => {
-                assert_eq!((service.as_str(), namespace.as_str(), port, local_port, yes, dry_run), ("web", "shop", Some(8000), Some(9001), true, true));
+        match parse(&[
+            "expose",
+            "web",
+            "-n",
+            "shop",
+            "--port",
+            "8000",
+            "--host",
+            "w.localhost",
+            "--local-port",
+            "9001",
+            "--yes",
+            "--dry-run",
+            "--cluster",
+            "dev",
+        ])
+        .unwrap()
+        {
+            GatewayCommand::Expose {
+                service,
+                namespace,
+                port,
+                host,
+                local_port,
+                yes,
+                dry_run,
+                target,
+            } => {
+                assert_eq!(
+                    (
+                        service.as_str(),
+                        namespace.as_str(),
+                        port,
+                        local_port,
+                        yes,
+                        dry_run
+                    ),
+                    ("web", "shop", Some(8000), Some(9001), true, true)
+                );
                 assert_eq!(host.as_deref(), Some("w.localhost"));
                 assert_eq!(target.cluster.as_deref(), Some("dev"));
             }

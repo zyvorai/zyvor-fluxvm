@@ -114,7 +114,11 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacOps) -> Result<()> {
     match cmd {
         MacOps::Health { name, json } => crate::mac_health::health_once(r, &name, json).await,
         MacOps::Supervise(a) => crate::mac_supervise::run(r, a).await,
-        MacOps::Reap { dry_run, all, owner } => crate::mac_reap::reap(r, dry_run, all, owner).await,
+        MacOps::Reap {
+            dry_run,
+            all,
+            owner,
+        } => crate::mac_reap::reap(r, dry_run, all, owner).await,
         MacOps::Ttl { name, ttl } => crate::mac_reap::set_ttl(r, &name, &ttl).await,
         MacOps::Ipsw { .. } => anyhow::bail!("internal: mac ipsw is client side"),
     }
@@ -138,10 +142,19 @@ pub fn preflight(image: &str, x: &RunExtra) -> Result<()> {
 }
 
 /// What `mac run` does after the instance is up.
-pub async fn after_run(r: &crate::remote::Remote, name: &str, started: u64, x: &RunExtra) -> Result<()> {
+pub async fn after_run(
+    r: &crate::remote::Remote,
+    name: &str,
+    started: u64,
+    x: &RunExtra,
+) -> Result<()> {
     // Ownership always; the expiry only with --ttl. The instance may already be gone (`--rm`): then there is nothing to stamp.
     if let Ok(vm) = crate::mac_cmd::find_instance(r, name).await {
-        let ttl = x.ttl.as_deref().map(crate::mac_reap::parse_ttl).transpose()?;
+        let ttl = x
+            .ttl
+            .as_deref()
+            .map(crate::mac_reap::parse_ttl)
+            .transpose()?;
         let me = crate::mac_reap::current_user();
         let patch = crate::mac_reap::stamp(Some(&me), ttl, started);
         r.call(

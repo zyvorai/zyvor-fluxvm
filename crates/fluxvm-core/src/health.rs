@@ -119,7 +119,8 @@ impl Fix {
         if self.safe {
             self.action.is_some() && !self.needs_sudo && !self.changes_security && !self.needs_login
         } else {
-            self.action.is_none() && !(self.changes_security && self.command.is_none() && self.steps.is_none())
+            self.action.is_none()
+                && !(self.changes_security && self.command.is_none() && self.steps.is_none())
         }
     }
 }
@@ -292,102 +293,306 @@ macro_rules! hc {
 }
 
 pub const CODES: &[HealthCode] = &[
-    hc!("HOST_UNREACHABLE", "FluxVM could not reach the machine over ssh.",
-        ["the machine is off, asleep or on another network", "ssh is off on it, or the key or host key is not accepted"],
-        ["check the power and the network", "try `ssh USER@HOST` yourself and read its error", "add the host key the first time with --accept-new-hostkey"]),
-    hc!("NOT_INSTALLED", "FluxVM is not installed on the machine.",
+    hc!(
+        "HOST_UNREACHABLE",
+        "FluxVM could not reach the machine over ssh.",
+        [
+            "the machine is off, asleep or on another network",
+            "ssh is off on it, or the key or host key is not accepted"
+        ],
+        [
+            "check the power and the network",
+            "try `ssh USER@HOST` yourself and read its error",
+            "add the host key the first time with --accept-new-hostkey"
+        ]
+    ),
+    hc!(
+        "NOT_INSTALLED",
+        "FluxVM is not installed on the machine.",
         ["the machine was added to the inventory but never set up"],
-        ["`fluxctl mac-fleet up HOST` installs it over ssh", "on this machine, follow docs/install.md"]),
-    hc!("DAEMON_DOWN", "The FluxVM daemon is not answering on the machine.",
-        ["the service is stopped or was never loaded", "it started and crashed (see its log)", "another program holds its port"],
-        ["macOS: `launchctl kickstart -k gui/$(id -u)/dev.zyvor.fluxvm` (`fluxctl fix` does this)", "Linux: `sudo systemctl start fluxvm`, then `journalctl -u fluxvm -n 50`"]),
-    hc!("NO_KVM", "Hardware virtualization (/dev/kvm) is missing or not usable.",
-        ["virtualization is off in the firmware, or this is a VM without nested virtualization", "your user is not in the kvm group"],
-        ["enable VT-x/AMD-V in the BIOS", "`sudo usermod -aG kvm $USER`, then log out and in"]),
-    hc!("CGROUPS", "The kernel control groups FluxVM needs are not all available.",
+        [
+            "`fluxctl mac-fleet up HOST` installs it over ssh",
+            "on this machine, follow docs/install.md"
+        ]
+    ),
+    hc!(
+        "DAEMON_DOWN",
+        "The FluxVM daemon is not answering on the machine.",
+        [
+            "the service is stopped or was never loaded",
+            "it started and crashed (see its log)",
+            "another program holds its port"
+        ],
+        [
+            "macOS: `launchctl kickstart -k gui/$(id -u)/dev.zyvor.fluxvm` (`fluxctl fix` does this)",
+            "Linux: `sudo systemctl start fluxvm`, then `journalctl -u fluxvm -n 50`"
+        ]
+    ),
+    hc!(
+        "NO_KVM",
+        "Hardware virtualization (/dev/kvm) is missing or not usable.",
+        [
+            "virtualization is off in the firmware, or this is a VM without nested virtualization",
+            "your user is not in the kvm group"
+        ],
+        [
+            "enable VT-x/AMD-V in the BIOS",
+            "`sudo usermod -aG kvm $USER`, then log out and in"
+        ]
+    ),
+    hc!(
+        "CGROUPS",
+        "The kernel control groups FluxVM needs are not all available.",
         ["cgroup v2 is not mounted, or the cpu/memory/io controllers are not delegated"],
-        ["boot with systemd.unified_cgroup_hierarchy=1", "see docs/host-hardening.md"]),
-    hc!("OPEN_FILES", "The limit on open files is low for a busy host.",
+        [
+            "boot with systemd.unified_cgroup_hierarchy=1",
+            "see docs/host-hardening.md"
+        ]
+    ),
+    hc!(
+        "OPEN_FILES",
+        "The limit on open files is low for a busy host.",
         ["the service runs with the default 1024 limit"],
-        ["raise LimitNOFILE in the service unit, then restart FluxVM"]),
-    hc!("NET_DEVICES", "Kernel networking pieces (tun, vhost_net) are not loaded.",
+        ["raise LimitNOFILE in the service unit, then restart FluxVM"]
+    ),
+    hc!(
+        "NET_DEVICES",
+        "Kernel networking pieces (tun, vhost_net) are not loaded.",
         ["the modules are not loaded"],
-        ["`sudo modprobe tun vhost_net`; add them to /etc/modules-load.d to keep them"]),
-    hc!("IP_FORWARD", "IP forwarding is off, so VMs cannot reach the network through this host.",
+        ["`sudo modprobe tun vhost_net`; add them to /etc/modules-load.d to keep them"]
+    ),
+    hc!(
+        "IP_FORWARD",
+        "IP forwarding is off, so VMs cannot reach the network through this host.",
         ["net.ipv4.ip_forward is 0"],
-        ["`sudo sysctl -w net.ipv4.ip_forward=1`; set it in /etc/sysctl.d to keep it"]),
-    hc!("MISSING_BINARIES", "A program FluxVM needs is not installed.",
+        ["`sudo sysctl -w net.ipv4.ip_forward=1`; set it in /etc/sysctl.d to keep it"]
+    ),
+    hc!(
+        "MISSING_BINARIES",
+        "A program FluxVM needs is not installed.",
         ["the package or its dependency was not installed"],
-        ["install the missing program with the system package manager, or re-run the FluxVM installer"]),
-    hc!("RUNNER_PROBLEM", "The Mac virtualization helper (fluxvm-vz-runner) is missing, unsigned or lacks its entitlement.",
-        ["the runner was replaced by an unsigned build", "an old install is in the way"],
-        ["reinstall FluxVM (`fluxctl mac-fleet up HOST`, or the installer on this Mac)", "`fluxctl vz doctor` shows the exact reason"]),
-    hc!("LOW_DISK", "Free disk space is low.",
-        ["VM disks, images and backups fill the disk", "a macOS guest needs about 60 GiB free"],
-        ["delete VMs, images or backups you no longer need (`fluxctl mac images`, `fluxctl backup`)", "move the store to a bigger disk with FLUXVM_MAC_STORE"]),
-    hc!("LOW_MEMORY", "Free memory is low.",
+        [
+            "install the missing program with the system package manager, or re-run the FluxVM installer"
+        ]
+    ),
+    hc!(
+        "RUNNER_PROBLEM",
+        "The Mac virtualization helper (fluxvm-vz-runner) is missing, unsigned or lacks its entitlement.",
+        [
+            "the runner was replaced by an unsigned build",
+            "an old install is in the way"
+        ],
+        [
+            "reinstall FluxVM (`fluxctl mac-fleet up HOST`, or the installer on this Mac)",
+            "`fluxctl vz doctor` shows the exact reason"
+        ]
+    ),
+    hc!(
+        "LOW_DISK",
+        "Free disk space is low.",
+        [
+            "VM disks, images and backups fill the disk",
+            "a macOS guest needs about 60 GiB free"
+        ],
+        [
+            "delete VMs, images or backups you no longer need (`fluxctl mac images`, `fluxctl backup`)",
+            "move the store to a bigger disk with FLUXVM_MAC_STORE"
+        ]
+    ),
+    hc!(
+        "LOW_MEMORY",
+        "Free memory is low.",
         ["running VMs use most of the memory"],
-        ["stop a VM you are not using", "start fewer VMs at once"]),
-    hc!("NO_LOGIN_SESSION", "Nobody is logged in at the Mac, or its screen is locked, so saved VM state cannot be restored.",
-        ["the Mac restarted and sits at the login window", "FileVault blocks automatic login"],
-        ["log in once over Screen Sharing", "turn on automatic login (System Settings > Users & Groups); FluxVM never changes it for you"]),
-    hc!("SECURITY_SETTING", "A Mac security setting (FileVault, automatic login, screen lock) affects unattended use.",
+        ["stop a VM you are not using", "start fewer VMs at once"]
+    ),
+    hc!(
+        "NO_LOGIN_SESSION",
+        "Nobody is logged in at the Mac, or its screen is locked, so saved VM state cannot be restored.",
+        [
+            "the Mac restarted and sits at the login window",
+            "FileVault blocks automatic login"
+        ],
+        [
+            "log in once over Screen Sharing",
+            "turn on automatic login (System Settings > Users & Groups); FluxVM never changes it for you"
+        ]
+    ),
+    hc!(
+        "SECURITY_SETTING",
+        "A Mac security setting (FileVault, automatic login, screen lock) affects unattended use.",
         ["the Mac is set up for a person at the keyboard, not for a server"],
-        ["it is your choice; FluxVM only tells you and never changes these", "see docs/macos-host.md#headless"]),
-    hc!("AGENT_NOT_LOADED", "A FluxVM background service is installed but not running.",
-        ["the Mac restarted before anyone logged in", "it was unloaded by hand"],
-        ["`fluxctl fix` loads it; or `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.zyvor.fluxvm.plist`"]),
-    hc!("POWER_SETTINGS", "The Mac may go to sleep, which pauses its VMs.",
+        [
+            "it is your choice; FluxVM only tells you and never changes these",
+            "see docs/macos-host.md#headless"
+        ]
+    ),
+    hc!(
+        "AGENT_NOT_LOADED",
+        "A FluxVM background service is installed but not running.",
+        [
+            "the Mac restarted before anyone logged in",
+            "it was unloaded by hand"
+        ],
+        [
+            "`fluxctl fix` loads it; or `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.zyvor.fluxvm.plist`"
+        ]
+    ),
+    hc!(
+        "POWER_SETTINGS",
+        "The Mac may go to sleep, which pauses its VMs.",
         ["sleep, disk sleep or restart-after-power-loss are at their laptop defaults"],
-        ["`fluxctl mac host tune` shows the recommended settings; `--apply --only NAME` applies them (asks for sudo)", "`fluxctl mac host keepawake install` holds sleep off without sudo"]),
-    hc!("STORE_PROBLEM", "The place FluxVM keeps Mac VMs is missing or not suitable.",
-        ["the directory does not exist yet", "it is on a disk that is not APFS or that is slow or full"],
-        ["`fluxctl fix` creates a missing directory", "set FLUXVM_MAC_STORE to a folder on an internal APFS disk"]),
-    hc!("NO_SSH_KEY", "This Mac has no ssh key, so it cannot be reached or clone from private repositories.",
+        [
+            "`fluxctl mac host tune` shows the recommended settings; `--apply --only NAME` applies them (asks for sudo)",
+            "`fluxctl mac host keepawake install` holds sleep off without sudo"
+        ]
+    ),
+    hc!(
+        "STORE_PROBLEM",
+        "The place FluxVM keeps Mac VMs is missing or not suitable.",
+        [
+            "the directory does not exist yet",
+            "it is on a disk that is not APFS or that is slow or full"
+        ],
+        [
+            "`fluxctl fix` creates a missing directory",
+            "set FLUXVM_MAC_STORE to a folder on an internal APFS disk"
+        ]
+    ),
+    hc!(
+        "NO_SSH_KEY",
+        "This Mac has no ssh key, so it cannot be reached or clone from private repositories.",
         ["no key pair exists for the user"],
-        ["`ssh-keygen -t ed25519`, then add the public key to the machines or services that need it"]),
-    hc!("STALE_PATHS", "Some tools still point at an old FluxVM location.",
+        [
+            "`ssh-keygen -t ed25519`, then add the public key to the machines or services that need it"
+        ]
+    ),
+    hc!(
+        "STALE_PATHS",
+        "Some tools still point at an old FluxVM location.",
         ["FluxVM was moved or upgraded and a client config kept the old path"],
-        ["`fluxctl doctor --fix` rewrites the stale entries"]),
-    hc!("MACOS_SLOTS_FULL", "The Mac is running the most macOS VMs Apple's licence allows (2).",
+        ["`fluxctl doctor --fix` rewrites the stale entries"]
+    ),
+    hc!(
+        "MACOS_SLOTS_FULL",
+        "The Mac is running the most macOS VMs Apple's licence allows (2).",
         ["two macOS guests are running or paused"],
-        ["stop one (`fluxctl mac stop NAME`), or run the job on another Mac (`fluxctl mac-fleet run`)"]),
-    hc!("NO_BACKUP", "There is no backup of this machine's VMs.",
+        [
+            "stop one (`fluxctl mac stop NAME`), or run the job on another Mac (`fluxctl mac-fleet run`)"
+        ]
+    ),
+    hc!(
+        "NO_BACKUP",
+        "There is no backup of this machine's VMs.",
         ["no backup was ever taken"],
-        ["`fluxctl backup VM` takes one; see docs/backup-verify.md"]),
-    hc!("STALE_BACKUP", "The newest backup is more than a week old.",
+        ["`fluxctl backup VM` takes one; see docs/backup-verify.md"]
+    ),
+    hc!(
+        "STALE_BACKUP",
+        "The newest backup is more than a week old.",
         ["backups are not scheduled"],
-        ["take a fresh one with `fluxctl backup VM`, and schedule it"]),
-    hc!("K3S_NOT_READY", "The Kubernetes (k3s) part of the machine is not ready.",
-        ["the k3s VM is stopped or still starting", "a node has not joined"],
-        ["`fluxctl kube doctor` (or `fluxctl kube apple doctor NAME`) names the failing check and its fix"]),
-    hc!("MISSING_IMAGE", "An image the machine needs is not downloaded yet.",
+        ["take a fresh one with `fluxctl backup VM`, and schedule it"]
+    ),
+    hc!(
+        "K3S_NOT_READY",
+        "The Kubernetes (k3s) part of the machine is not ready.",
+        [
+            "the k3s VM is stopped or still starting",
+            "a node has not joined"
+        ],
+        [
+            "`fluxctl kube doctor` (or `fluxctl kube apple doctor NAME`) names the failing check and its fix"
+        ]
+    ),
+    hc!(
+        "MISSING_IMAGE",
+        "An image the machine needs is not downloaded yet.",
         ["it was never pulled on this machine"],
-        ["`fluxctl fix` pulls it; or `fluxctl mac pull REFERENCE`"]),
-    hc!("UNSUPPORTED_HOST", "This machine cannot run the kind of VM requested.",
-        ["macOS guests need a Mac with Apple silicon on macOS 14 or newer", "this is an Intel Mac or an old macOS"],
-        ["use a supported Mac for macOS guests; Linux VMs run on Linux hosts with KVM"]),
-    hc!("NO_MACHINES", "FluxVM does not know about any machine yet.",
+        ["`fluxctl fix` pulls it; or `fluxctl mac pull REFERENCE`"]
+    ),
+    hc!(
+        "UNSUPPORTED_HOST",
+        "This machine cannot run the kind of VM requested.",
+        [
+            "macOS guests need a Mac with Apple silicon on macOS 14 or newer",
+            "this is an Intel Mac or an old macOS"
+        ],
+        ["use a supported Mac for macOS guests; Linux VMs run on Linux hosts with KVM"]
+    ),
+    hc!(
+        "NO_MACHINES",
+        "FluxVM does not know about any machine yet.",
         ["no daemon is running here and no fleet inventory was given"],
-        ["start FluxVM here (`fluxctl service install` on a Mac), or pass `--inventory FILE` (docs/mac-fleet-quickstart.md)"]),
-    hc!("ENVOY_GATEWAY_NOT_INSTALLED", "You have Gateways or routes that use Envoy Gateway, but Envoy Gateway is not running in the cluster.",
-        ["Envoy Gateway was never installed on this cluster, or was removed", "its controller (deployment envoy-gateway in envoy-gateway-system) is not running"],
-        ["install it with `fluxctl kube cluster platform envoy-gateway NAME` (on a Mac: `fluxctl kube apple platform envoy-gateway NAME`)", "then `fluxctl cluster status` again; the Gateways become Programmed within a minute"]),
-    hc!("GATEWAY_NOT_PROGRAMMED", "A Gateway has not been set up by its controller, so it is not serving traffic.",
-        ["the controller rejected the Gateway (a bad listener, a port clash, a missing certificate Secret)", "the proxy pods behind it are not running or have no address yet"],
-        ["`kubectl describe gateway NAME -n NS` shows the controller's reason", "`fluxctl gateway inspect ROUTE -n NS` for a route on it", "fix the listener, then wait a minute; a Gateway that was just changed shows as still being set up, not as failed"]),
-    hc!("ROUTE_NOT_ACCEPTED", "A route was not accepted by the Gateway it points at, so it does nothing.",
-        ["the route names a Gateway or listener that does not exist", "the listener does not allow routes from this namespace, or the hostname or protocol does not match"],
-        ["`fluxctl gateway inspect ROUTE -n NS` shows the reason the Gateway gave", "check the route's parentRefs (Gateway name, namespace, sectionName) and the listener's allowedRoutes"]),
-    hc!("ROUTE_BACKEND_UNRESOLVED", "A route points at a Service it cannot use, so requests to it fail.",
-        ["the Service does not exist, or is in another namespace without a ReferenceGrant", "the port number is not one of the Service's ports"],
-        ["`fluxctl gateway inspect ROUTE -n NS` lists each backend and whether its port was found", "create the Service or fix the name and port in the route; re-run fluxctl gateway expose to write a correct route"]),
-    hc!("BACKEND_NO_READY_ENDPOINTS", "A route's Service has no ready pods, so the Gateway has nowhere to send requests.",
-        ["the pods are still starting, crashing, or failing their readiness check", "the Service selector matches no pods"],
-        ["`kubectl get pods -n NS` and `kubectl describe service NAME -n NS`", "`fluxctl gateway inspect ROUTE -n NS` shows the ready and not-ready endpoint counts"]),
-    hc!("CHECK_FAILED", "A host check reported a problem that has no dedicated explanation.",
+        [
+            "start FluxVM here (`fluxctl service install` on a Mac), or pass `--inventory FILE` (docs/mac-fleet-quickstart.md)"
+        ]
+    ),
+    hc!(
+        "ENVOY_GATEWAY_NOT_INSTALLED",
+        "You have Gateways or routes that use Envoy Gateway, but Envoy Gateway is not running in the cluster.",
+        [
+            "Envoy Gateway was never installed on this cluster, or was removed",
+            "its controller (deployment envoy-gateway in envoy-gateway-system) is not running"
+        ],
+        [
+            "install it with `fluxctl kube cluster platform envoy-gateway NAME` (on a Mac: `fluxctl kube apple platform envoy-gateway NAME`)",
+            "then `fluxctl cluster status` again; the Gateways become Programmed within a minute"
+        ]
+    ),
+    hc!(
+        "GATEWAY_NOT_PROGRAMMED",
+        "A Gateway has not been set up by its controller, so it is not serving traffic.",
+        [
+            "the controller rejected the Gateway (a bad listener, a port clash, a missing certificate Secret)",
+            "the proxy pods behind it are not running or have no address yet"
+        ],
+        [
+            "`kubectl describe gateway NAME -n NS` shows the controller's reason",
+            "`fluxctl gateway inspect ROUTE -n NS` for a route on it",
+            "fix the listener, then wait a minute; a Gateway that was just changed shows as still being set up, not as failed"
+        ]
+    ),
+    hc!(
+        "ROUTE_NOT_ACCEPTED",
+        "A route was not accepted by the Gateway it points at, so it does nothing.",
+        [
+            "the route names a Gateway or listener that does not exist",
+            "the listener does not allow routes from this namespace, or the hostname or protocol does not match"
+        ],
+        [
+            "`fluxctl gateway inspect ROUTE -n NS` shows the reason the Gateway gave",
+            "check the route's parentRefs (Gateway name, namespace, sectionName) and the listener's allowedRoutes"
+        ]
+    ),
+    hc!(
+        "ROUTE_BACKEND_UNRESOLVED",
+        "A route points at a Service it cannot use, so requests to it fail.",
+        [
+            "the Service does not exist, or is in another namespace without a ReferenceGrant",
+            "the port number is not one of the Service's ports"
+        ],
+        [
+            "`fluxctl gateway inspect ROUTE -n NS` lists each backend and whether its port was found",
+            "create the Service or fix the name and port in the route; re-run fluxctl gateway expose to write a correct route"
+        ]
+    ),
+    hc!(
+        "BACKEND_NO_READY_ENDPOINTS",
+        "A route's Service has no ready pods, so the Gateway has nowhere to send requests.",
+        [
+            "the pods are still starting, crashing, or failing their readiness check",
+            "the Service selector matches no pods"
+        ],
+        [
+            "`kubectl get pods -n NS` and `kubectl describe service NAME -n NS`",
+            "`fluxctl gateway inspect ROUTE -n NS` shows the ready and not-ready endpoint counts"
+        ]
+    ),
+    hc!(
+        "CHECK_FAILED",
+        "A host check reported a problem that has no dedicated explanation.",
         ["see the check's own message"],
-        ["run the command named in the fix line, or `fluxctl doctor` for details"]),
+        ["run the command named in the fix line, or `fluxctl doctor` for details"]
+    ),
 ];
 
 pub fn code(name: &str) -> Option<&'static HealthCode> {
@@ -411,43 +616,95 @@ fn rule_for(name: &str) -> Rule {
     } else if has("installed") {
         ("NOT_INSTALLED", "FluxVM is not installed on {m}")
     } else if has("kvm") {
-        ("NO_KVM", "{m} cannot start virtual machines: hardware virtualization is not usable")
+        (
+            "NO_KVM",
+            "{m} cannot start virtual machines: hardware virtualization is not usable",
+        )
     } else if has("cgroup") {
-        ("CGROUPS", "{m} is missing kernel features FluxVM needs (control groups)")
+        (
+            "CGROUPS",
+            "{m} is missing kernel features FluxVM needs (control groups)",
+        )
     } else if has("open files") {
-        ("OPEN_FILES", "{m} allows too few open files for a busy host")
+        (
+            "OPEN_FILES",
+            "{m} allows too few open files for a busy host",
+        )
     } else if has("net devices") {
-        ("NET_DEVICES", "{m} is missing network drivers (tun, vhost_net)")
+        (
+            "NET_DEVICES",
+            "{m} is missing network drivers (tun, vhost_net)",
+        )
     } else if has("ip forwarding") {
-        ("IP_FORWARD", "{m} does not forward network traffic, so VMs cannot reach the network")
+        (
+            "IP_FORWARD",
+            "{m} does not forward network traffic, so VMs cannot reach the network",
+        )
     } else if has("binaries") {
         ("MISSING_BINARIES", "{m} is missing a program FluxVM needs")
-    } else if has("entitlement") || has("signature") || has("vz runner") || has("virtualization.framework") {
-        ("RUNNER_PROBLEM", "The Mac virtualization helper on {m} is missing or not signed correctly")
+    } else if has("entitlement")
+        || has("signature")
+        || has("vz runner")
+        || has("virtualization.framework")
+    {
+        (
+            "RUNNER_PROBLEM",
+            "The Mac virtualization helper on {m} is missing or not signed correctly",
+        )
     } else if has("disk") && !has("sleep") && !has("clone") {
         ("LOW_DISK", "{m} is short on disk space")
     } else if has("memory") {
         ("LOW_MEMORY", "{m} is short on memory")
     } else if has("session") || has("console") || has("screen locked") {
-        ("NO_LOGIN_SESSION", "Nobody is logged in at {m}, so saved VMs cannot be restored")
+        (
+            "NO_LOGIN_SESSION",
+            "Nobody is logged in at {m}, so saved VMs cannot be restored",
+        )
     } else if has("filevault") || has("automatic login") || has("autologin") || has("screen lock") {
-        ("SECURITY_SETTING", "A security setting on {m} gets in the way of unattended use")
+        (
+            "SECURITY_SETTING",
+            "A security setting on {m} gets in the way of unattended use",
+        )
     } else if has("agent-binary") {
-        ("MISSING_BINARIES", "The FluxVM node agent is missing on {m}")
+        (
+            "MISSING_BINARIES",
+            "The FluxVM node agent is missing on {m}",
+        )
     } else if has("launch agent") || has("agent") && !has("keepawake") {
-        ("AGENT_NOT_LOADED", "A FluxVM background service on {m} is not running")
-    } else if has("sleep") || has("power") || has("keepawake") || has("autorestart") || has("restart after") || has("thermal") {
-        ("POWER_SETTINGS", "{m} may go to sleep or lose power state, which pauses its VMs")
+        (
+            "AGENT_NOT_LOADED",
+            "A FluxVM background service on {m} is not running",
+        )
+    } else if has("sleep")
+        || has("power")
+        || has("keepawake")
+        || has("autorestart")
+        || has("restart after")
+        || has("thermal")
+    {
+        (
+            "POWER_SETTINGS",
+            "{m} may go to sleep or lose power state, which pauses its VMs",
+        )
     } else if has("store") || has("clone volume") {
-        ("STORE_PROBLEM", "The place {m} keeps Mac VMs needs attention")
+        (
+            "STORE_PROBLEM",
+            "The place {m} keeps Mac VMs needs attention",
+        )
     } else if has("ssh key") {
         ("NO_SSH_KEY", "{m} has no ssh key")
     } else if has("stale") || has("client entries") {
-        ("STALE_PATHS", "Some tools on {m} point at an old FluxVM location")
+        (
+            "STALE_PATHS",
+            "Some tools on {m} point at an old FluxVM location",
+        )
     } else if has("k3s") || has("kube") {
         ("K3S_NOT_READY", "Kubernetes on {m} is not ready")
     } else if has("platform") || has("apple silicon") || has("macos version") || has("rosetta") {
-        ("UNSUPPORTED_HOST", "{m} cannot run everything FluxVM offers")
+        (
+            "UNSUPPORTED_HOST",
+            "{m} cannot run everything FluxVM offers",
+        )
     } else {
         ("CHECK_FAILED", "A check on {m} needs attention")
     };
@@ -523,7 +780,10 @@ fn item_from_raw(machine: &str, platform: Platform, raw: &RawCheck) -> Option<It
         source: raw.source.clone(),
         severity: raw.severity,
         // Codes that repeat with different subjects name the subject, so two lines never read the same.
-        message: if matches!(rule.code, "SECURITY_SETTING" | "POWER_SETTINGS" | "CHECK_FAILED") {
+        message: if matches!(
+            rule.code,
+            "SECURITY_SETTING" | "POWER_SETTINGS" | "CHECK_FAILED"
+        ) {
             format!("{} ({})", rule.headline.replace("{m}", machine), raw.name)
         } else {
             rule.headline.replace("{m}", machine)
@@ -575,7 +835,11 @@ fn plural(n: u64, one: &str, many: &str) -> String {
 /// GiB with no decimals for big numbers.
 fn gib(mib: u64) -> String {
     let g = mib as f64 / 1024.0;
-    if g >= 10.0 { format!("{g:.0} GiB") } else { format!("{g:.1} GiB") }
+    if g >= 10.0 {
+        format!("{g:.0} GiB")
+    } else {
+        format!("{g:.1} GiB")
+    }
 }
 
 /// How many more small VMs fit, by CPU and memory.
@@ -615,7 +879,11 @@ pub fn capacity_of(f: &NodeFacts) -> Capacity {
     if let (Some(free), Some(total)) = (c.mem_free_mib, c.mem_total_mib) {
         parts.push(format!("{} of {} memory free", gib(free), gib(total)));
     }
-    c.summary = if parts.is_empty() { "capacity unknown".to_owned() } else { parts.join(", ") };
+    c.summary = if parts.is_empty() {
+        "capacity unknown".to_owned()
+    } else {
+        parts.join(", ")
+    };
     c
 }
 
@@ -625,7 +893,10 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
     let mut passed = 0u32;
 
     if !f.reachable {
-        let why = f.unreachable_reason.clone().unwrap_or_else(|| "no answer".into());
+        let why = f
+            .unreachable_reason
+            .clone()
+            .unwrap_or_else(|| "no answer".into());
         items.push(item(
             m,
             "fleet",
@@ -633,7 +904,9 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
             "HOST_UNREACHABLE",
             format!("{m} cannot be reached"),
             Some(why),
-            Some(Fix::steps("check that the machine is on and on the network, then try `ssh` to it by hand")),
+            Some(Fix::steps(
+                "check that the machine is on and on the network, then try `ssh` to it by hand",
+            )),
         ));
         return finish(f, items, passed, now, Capacity::default());
     }
@@ -651,8 +924,14 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
     }
 
     let drop_slot = f.macos_in_use.is_some();
-    let has_disk = f.checks.iter().any(|c| c.name.to_ascii_lowercase().contains("free disk") || c.name == "disk");
-    let has_daemon = f.checks.iter().any(|c| c.name.to_ascii_lowercase().contains("daemon"));
+    let has_disk = f
+        .checks
+        .iter()
+        .any(|c| c.name.to_ascii_lowercase().contains("free disk") || c.name == "disk");
+    let has_daemon = f
+        .checks
+        .iter()
+        .any(|c| c.name.to_ascii_lowercase().contains("daemon"));
     for raw in &f.checks {
         let n = raw.name.to_ascii_lowercase();
         if drop_slot && (n.contains("slot") || n.contains("guest limit")) {
@@ -687,7 +966,9 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
                     "MACOS_SLOTS_FULL",
                     format!("{used} of {MACOS_SLOT_LIMIT} macOS slots are in use on {m}"),
                     Some("Apple's licence allows two macOS VMs per Mac at a time".into()),
-                    Some(Fix::steps("stop one macOS VM, or run the job on another Mac")),
+                    Some(Fix::steps(
+                        "stop one macOS VM, or run the job on another Mac",
+                    )),
                 ));
             } else {
                 passed += 1;
@@ -696,28 +977,54 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
     }
     if !has_disk {
         match f.disk_free_gib {
-            Some(d) if d < CRITICAL_DISK_GIB || (d < LOW_DISK_GIB && f.platform != Platform::Mac) => {
+            Some(d)
+                if d < CRITICAL_DISK_GIB || (d < LOW_DISK_GIB && f.platform != Platform::Mac) =>
+            {
                 items.push(item(
-                    m, "capacity", if d < CRITICAL_DISK_GIB { Severity::Fail } else { Severity::Warn }, "LOW_DISK",
+                    m,
+                    "capacity",
+                    if d < CRITICAL_DISK_GIB {
+                        Severity::Fail
+                    } else {
+                        Severity::Warn
+                    },
+                    "LOW_DISK",
                     format!("{m} has only {d} GiB of disk left"),
                     Some("new VMs, images and backups need room".into()),
-                    Some(Fix::steps("free space by deleting VMs, images or backups you no longer need")),
+                    Some(Fix::steps(
+                        "free space by deleting VMs, images or backups you no longer need",
+                    )),
                 ));
             }
             Some(d) if f.platform == Platform::Mac && d < MACOS_DISK_GIB => items.push(item(
-                m, "capacity", Severity::Warn, "LOW_DISK",
-                format!("{m} has {d} GiB of disk left; a new macOS VM needs about {MACOS_DISK_GIB} GiB"),
+                m,
+                "capacity",
+                Severity::Warn,
+                "LOW_DISK",
+                format!(
+                    "{m} has {d} GiB of disk left; a new macOS VM needs about {MACOS_DISK_GIB} GiB"
+                ),
                 Some("a macOS guest image and its disk are large".into()),
-                Some(Fix::steps("free space, or move the store to a bigger disk with FLUXVM_MAC_STORE")),
+                Some(Fix::steps(
+                    "free space, or move the store to a bigger disk with FLUXVM_MAC_STORE",
+                )),
             )),
             Some(_) => passed += 1,
             None => {}
         }
     }
     if let (Some(free), Some(total)) = (f.mem_free_mib, f.mem_total_mib) {
-        if total > 0 && free * 10 < total && !f.checks.iter().any(|c| c.name.to_ascii_lowercase().contains("memory") && c.severity != Severity::Ok) {
+        if total > 0
+            && free * 10 < total
+            && !f.checks.iter().any(|c| {
+                c.name.to_ascii_lowercase().contains("memory") && c.severity != Severity::Ok
+            })
+        {
             items.push(item(
-                m, "capacity", Severity::Warn, "LOW_MEMORY",
+                m,
+                "capacity",
+                Severity::Warn,
+                "LOW_MEMORY",
                 format!("{m} has only {} of {} memory free", gib(free), gib(total)),
                 Some("running VMs use most of it".into()),
                 Some(Fix::steps("stop a VM you are not using")),
@@ -730,14 +1037,23 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
     if f.backups_known && f.vms_total.unwrap_or(0) > 0 {
         match f.last_backup_epoch {
             None => items.push(item(
-                m, "backup", Severity::Warn, "NO_BACKUP",
+                m,
+                "backup",
+                Severity::Warn,
+                "NO_BACKUP",
                 format!("{m} has VMs but no backup yet"),
                 Some("nothing has been backed up".into()),
                 Some(Fix::command("fluxctl backup VM")),
             )),
             Some(t) if now.saturating_sub(t) > STALE_BACKUP_SECS => items.push(item(
-                m, "backup", Severity::Warn, "STALE_BACKUP",
-                format!("the newest backup on {m} is {} old", human_age(now.saturating_sub(t))),
+                m,
+                "backup",
+                Severity::Warn,
+                "STALE_BACKUP",
+                format!(
+                    "the newest backup on {m} is {} old",
+                    human_age(now.saturating_sub(t))
+                ),
                 Some("backups are not being taken regularly".into()),
                 Some(Fix::command("fluxctl backup VM")),
             )),
@@ -745,10 +1061,16 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
         }
     }
     if let Some(k) = f.k3s.as_deref() {
-        let bad = !matches!(k, "" | "-" | "ready" | "ok" | "up" | "none" | "off" | "running");
+        let bad = !matches!(
+            k,
+            "" | "-" | "ready" | "ok" | "up" | "none" | "off" | "running"
+        );
         if bad {
             items.push(item(
-                m, "fleet", Severity::Warn, "K3S_NOT_READY",
+                m,
+                "fleet",
+                Severity::Warn,
+                "K3S_NOT_READY",
                 format!("Kubernetes on {m} is {k}"),
                 None,
                 Some(Fix::command("fluxctl kube doctor")),
@@ -759,10 +1081,17 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
     }
     for img in &f.missing_images {
         items.push(item(
-            m, "fleet", Severity::Warn, "MISSING_IMAGE",
+            m,
+            "fleet",
+            Severity::Warn,
+            "MISSING_IMAGE",
             format!("the image {img} is not on {m} yet"),
             Some("it was never pulled there".into()),
-            Some(Fix::command(format!("fluxctl mac pull {img}")).auto(FixAction::PullImage { reference: img.clone() })),
+            Some(
+                Fix::command(format!("fluxctl mac pull {img}")).auto(FixAction::PullImage {
+                    reference: img.clone(),
+                }),
+            ),
         ));
     }
     let cap = capacity_of(f);
@@ -772,13 +1101,21 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
 /// Two doctors often report the same thing (the login session, the daemon): keep the worse one. Codes that
 /// legitimately repeat with different subjects are left alone.
 fn dedup(items: Vec<Item>) -> Vec<Item> {
-    const REPEATS: [&str; 4] = ["SECURITY_SETTING", "MISSING_IMAGE", "CHECK_FAILED", "POWER_SETTINGS"];
+    const REPEATS: [&str; 4] = [
+        "SECURITY_SETTING",
+        "MISSING_IMAGE",
+        "CHECK_FAILED",
+        "POWER_SETTINGS",
+    ];
     let mut out: Vec<Item> = vec![];
     for i in items {
         let code = i.explain.clone().unwrap_or_default();
         if REPEATS.contains(&code.as_str()) {
             out.push(i);
-        } else if let Some(prev) = out.iter_mut().find(|o| o.explain.as_deref() == Some(code.as_str())) {
+        } else if let Some(prev) = out
+            .iter_mut()
+            .find(|o| o.explain.as_deref() == Some(code.as_str()))
+        {
             if i.severity > prev.severity {
                 *prev = i;
             }
@@ -789,7 +1126,13 @@ fn dedup(items: Vec<Item>) -> Vec<Item> {
     out
 }
 
-fn finish(f: &NodeFacts, mut items: Vec<Item>, passed: u32, now: u64, capacity: Capacity) -> MachineHealth {
+fn finish(
+    f: &NodeFacts,
+    mut items: Vec<Item>,
+    passed: u32,
+    now: u64,
+    capacity: Capacity,
+) -> MachineHealth {
     let m = f.name.as_str();
     // worst first, stable
     items.sort_by_key(|i| std::cmp::Reverse(i.severity));
@@ -797,17 +1140,26 @@ fn finish(f: &NodeFacts, mut items: Vec<Item>, passed: u32, now: u64, capacity: 
         let c = i.explain.as_deref().unwrap_or("item").to_ascii_lowercase();
         i.id = format!("{m}/{c}/{}", n + 1);
     }
-    let light = items.iter().map(|i| i.severity).max().unwrap_or(Severity::Ok);
+    let light = items
+        .iter()
+        .map(|i| i.severity)
+        .max()
+        .unwrap_or(Severity::Ok);
     let headline = match (light, items.first()) {
         (Severity::Ok, _) => format!("{m} is healthy"),
         (_, Some(i)) => format!(
             "{m} needs attention: {}",
-            i.message.strip_suffix(&format!(" on {m}")).unwrap_or(&i.message)
+            i.message
+                .strip_suffix(&format!(" on {m}"))
+                .unwrap_or(&i.message)
         ),
         _ => format!("{m} needs attention"),
     };
     let update = match (&f.version, &f.wanted_version) {
-        (Some(c), Some(w)) if c != w && newer(w, c) => Some(Update { current: c.clone(), wanted: w.clone() }),
+        (Some(c), Some(w)) if c != w && newer(w, c) => Some(Update {
+            current: c.clone(),
+            wanted: w.clone(),
+        }),
         _ => None,
     };
     let age = f.last_backup_epoch.map(|t| now.saturating_sub(t));
@@ -835,7 +1187,11 @@ fn finish(f: &NodeFacts, mut items: Vec<Item>, passed: u32, now: u64, capacity: 
 /// `a` is a newer dotted version than `b` (non-numeric parts compare as 0). Equal or unparsable is not newer.
 fn newer(a: &str, b: &str) -> bool {
     let p = |s: &str| -> Vec<u64> {
-        s.trim_start_matches('v').split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse().unwrap_or(0)).collect()
+        s.trim_start_matches('v')
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|x| !x.is_empty())
+            .map(|x| x.parse().unwrap_or(0))
+            .collect()
     };
     p(a) > p(b)
 }
@@ -857,9 +1213,18 @@ pub fn assess_with(nodes: &[NodeFacts], extra: Vec<Item>, now: u64) -> ClusterHe
         ));
     }
     for (n, i) in items.iter_mut().enumerate() {
-        i.id = format!("cluster/{}/{}", i.explain.as_deref().unwrap_or("item").to_ascii_lowercase(), n + 1);
+        i.id = format!(
+            "cluster/{}/{}",
+            i.explain.as_deref().unwrap_or("item").to_ascii_lowercase(),
+            n + 1
+        );
     }
-    let light = machines.iter().map(|m| m.light).chain(items.iter().map(|i| i.severity)).max().unwrap_or(Severity::Ok);
+    let light = machines
+        .iter()
+        .map(|m| m.light)
+        .chain(items.iter().map(|i| i.severity))
+        .max()
+        .unwrap_or(Severity::Ok);
     let bad = machines.iter().filter(|m| m.light != Severity::Ok).count();
     let headline = if machines.is_empty() {
         "No machines found".to_owned()
@@ -868,7 +1233,14 @@ pub fn assess_with(nodes: &[NodeFacts], extra: Vec<Item>, now: u64) -> ClusterHe
             1 => format!("{} is healthy", machines[0].name),
             n => format!("All {n} machines are healthy"),
         };
-        format!("{base}, but {} in the cluster", plural(items.len() as u64, "problem needs attention", "problems need attention"))
+        format!(
+            "{base}, but {} in the cluster",
+            plural(
+                items.len() as u64,
+                "problem needs attention",
+                "problems need attention"
+            )
+        )
     } else if bad == 0 {
         match machines.len() {
             1 => format!("{} is healthy", machines[0].name),
@@ -882,23 +1254,42 @@ pub fn assess_with(nodes: &[NodeFacts], extra: Vec<Item>, now: u64) -> ClusterHe
             if bad == 1 { "s" } else { "" }
         )
     };
-    let up: Vec<&MachineHealth> = machines.iter().filter(|m| m.capacity.room_for_vms.is_some() || m.capacity.macos_in_use.is_some()).collect();
-    let room: Option<u32> = up.iter().filter_map(|m| m.capacity.room_for_vms).fold(None, |a, r| Some(a.unwrap_or(0) + r));
+    let up: Vec<&MachineHealth> = machines
+        .iter()
+        .filter(|m| m.capacity.room_for_vms.is_some() || m.capacity.macos_in_use.is_some())
+        .collect();
+    let room: Option<u32> = up
+        .iter()
+        .filter_map(|m| m.capacity.room_for_vms)
+        .fold(None, |a, r| Some(a.unwrap_or(0) + r));
     let mac_used: u32 = up.iter().filter_map(|m| m.capacity.macos_in_use).sum();
     let mac_max: u32 = up.iter().filter_map(|m| m.capacity.macos_limit).sum();
     let mut capacity = Capacity {
         room_for_vms: room,
         macos_in_use: (mac_max > 0).then_some(mac_used),
         macos_limit: (mac_max > 0).then_some(mac_max),
-        disk_free_gib: up.iter().filter_map(|m| m.capacity.disk_free_gib).fold(None, |a, d| Some(a.unwrap_or(0) + d)),
-        mem_free_mib: up.iter().filter_map(|m| m.capacity.mem_free_mib).fold(None, |a, d| Some(a.unwrap_or(0) + d)),
-        mem_total_mib: up.iter().filter_map(|m| m.capacity.mem_total_mib).fold(None, |a, d| Some(a.unwrap_or(0) + d)),
+        disk_free_gib: up
+            .iter()
+            .filter_map(|m| m.capacity.disk_free_gib)
+            .fold(None, |a, d| Some(a.unwrap_or(0) + d)),
+        mem_free_mib: up
+            .iter()
+            .filter_map(|m| m.capacity.mem_free_mib)
+            .fold(None, |a, d| Some(a.unwrap_or(0) + d)),
+        mem_total_mib: up
+            .iter()
+            .filter_map(|m| m.capacity.mem_total_mib)
+            .fold(None, |a, d| Some(a.unwrap_or(0) + d)),
         summary: String::new(),
     };
     capacity.summary = {
         let mut p = vec![];
         if let Some(r) = capacity.room_for_vms {
-            p.push(if r == 0 { "no room for another VM".to_owned() } else { format!("room for {} more", plural(r as u64, "VM", "VMs")) });
+            p.push(if r == 0 {
+                "no room for another VM".to_owned()
+            } else {
+                format!("room for {} more", plural(r as u64, "VM", "VMs"))
+            });
         }
         if let (Some(u), Some(l)) = (capacity.macos_in_use, capacity.macos_limit) {
             p.push(format!("{u} of {l} macOS slots in use"));
@@ -906,7 +1297,11 @@ pub fn assess_with(nodes: &[NodeFacts], extra: Vec<Item>, now: u64) -> ClusterHe
         if let Some(d) = capacity.disk_free_gib {
             p.push(format!("{d} GiB disk free"));
         }
-        if p.is_empty() { "capacity unknown".into() } else { p.join(", ") }
+        if p.is_empty() {
+            "capacity unknown".into()
+        } else {
+            p.join(", ")
+        }
     };
     let mut h = ClusterHealth {
         schema: SCHEMA,
@@ -916,7 +1311,13 @@ pub fn assess_with(nodes: &[NodeFacts], extra: Vec<Item>, now: u64) -> ClusterHe
         machines,
         items,
         capacity,
-        next_action: NextAction { item: None, machine: None, text: String::new(), command: None, safe: false },
+        next_action: NextAction {
+            item: None,
+            machine: None,
+            text: String::new(),
+            command: None,
+            safe: false,
+        },
     };
     h.next_action = next_action(&h);
     h
@@ -936,7 +1337,10 @@ pub fn next_action(h: &ClusterHealth) -> NextAction {
             item: None,
             machine: None,
             text: match h.capacity.room_for_vms {
-                Some(r) if r > 0 => format!("Nothing to do. There is room for {} more.", plural(r as u64, "VM", "VMs")),
+                Some(r) if r > 0 => format!(
+                    "Nothing to do. There is room for {} more.",
+                    plural(r as u64, "VM", "VMs")
+                ),
                 _ => "Nothing to do.".into(),
             },
             command: None,
@@ -949,11 +1353,21 @@ pub fn next_action(h: &ClusterHealth) -> NextAction {
             let how = if safe {
                 "run `fluxctl fix` to do it for you".to_owned()
             } else if let Some(c) = &command {
-                format!("run `{c}`{}", if i.machine == "cluster" { String::new() } else { format!(" on {}", i.machine) })
+                format!(
+                    "run `{c}`{}",
+                    if i.machine == "cluster" {
+                        String::new()
+                    } else {
+                        format!(" on {}", i.machine)
+                    }
+                )
             } else if let Some(s) = fix.and_then(|f| f.steps.clone()) {
                 s
             } else {
-                format!("run `fluxctl explain {}`", i.explain.as_deref().unwrap_or("CHECK_FAILED"))
+                format!(
+                    "run `fluxctl explain {}`",
+                    i.explain.as_deref().unwrap_or("CHECK_FAILED")
+                )
             };
             NextAction {
                 item: Some(i.id.clone()),
@@ -1051,8 +1465,16 @@ pub struct GatewayFacts {
 /// The plain-English problems with a cluster's Gateways, routes and backends. A cluster with no Gateways, and a healthy
 /// one, give nothing: Envoy Gateway being absent is only a problem when something needs it.
 pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
-    let flag = if f.cluster.is_empty() { String::new() } else { format!(" --cluster {}", f.cluster) };
-    let on = if f.cluster.is_empty() { String::new() } else { format!(" on {}", f.cluster) };
+    let flag = if f.cluster.is_empty() {
+        String::new()
+    } else {
+        format!(" --cluster {}", f.cluster)
+    };
+    let on = if f.cluster.is_empty() {
+        String::new()
+    } else {
+        format!(" on {}", f.cluster)
+    };
     let mut out = vec![];
     let mk = |sev: Severity, code: &str, msg: String, cause: Option<String>, fix: Fix| Item {
         id: String::new(),
@@ -1072,15 +1494,31 @@ pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
         let what = match (n, r) {
             (0, r) => plural(r as u64, "route", "routes"),
             (n, 0) => plural(n as u64, "Gateway", "Gateways"),
-            (n, r) => format!("{} and {}", plural(n as u64, "Gateway", "Gateways"), plural(r as u64, "route", "routes")),
+            (n, r) => format!(
+                "{} and {}",
+                plural(n as u64, "Gateway", "Gateways"),
+                plural(r as u64, "route", "routes")
+            ),
         };
-        let name = if f.cluster.is_empty() { "NAME" } else { &f.cluster };
+        let name = if f.cluster.is_empty() {
+            "NAME"
+        } else {
+            &f.cluster
+        };
         out.push(mk(
             Severity::Fail,
             "ENVOY_GATEWAY_NOT_INSTALLED",
-            format!("{what} {} Envoy Gateway, which is not running{on}", if n + r == 1 { "needs" } else { "need" }),
-            Some("the envoy-gateway controller is missing from the envoy-gateway-system namespace".into()),
-            Fix::command(format!("fluxctl kube cluster platform envoy-gateway {name}")),
+            format!(
+                "{what} {} Envoy Gateway, which is not running{on}",
+                if n + r == 1 { "needs" } else { "need" }
+            ),
+            Some(
+                "the envoy-gateway controller is missing from the envoy-gateway-system namespace"
+                    .into(),
+            ),
+            Fix::command(format!(
+                "fluxctl kube cluster platform envoy-gateway {name}"
+            )),
         ));
     }
     // Without the controller every Envoy Gateway looks broken for the same reason; say it once.
@@ -1092,15 +1530,24 @@ pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
             out.push(mk(
                 Severity::Fail,
                 "GATEWAY_NOT_PROGRAMMED",
-                format!("Gateway {}/{} is not set up, so it serves no traffic", g.namespace, g.name),
+                format!(
+                    "Gateway {}/{} is not set up, so it serves no traffic",
+                    g.namespace, g.name
+                ),
                 c.message.clone(),
-                Fix::command(format!("kubectl describe gateway {} -n {}", g.name, g.namespace)),
+                Fix::command(format!(
+                    "kubectl describe gateway {} -n {}",
+                    g.name, g.namespace
+                )),
             ));
         }
     }
     let mut seen_backends = std::collections::BTreeSet::new();
     for r in f.routes.iter().filter(|r| !skip(r.envoy)) {
-        let inspect = format!("fluxctl gateway inspect {} -n {}{flag}", r.name, r.namespace);
+        let inspect = format!(
+            "fluxctl gateway inspect {} -n {}{flag}",
+            r.name, r.namespace
+        );
         let id = format!("{}/{}", r.namespace, r.name);
         let mut accepted_ok = true;
         for p in &r.parents {
@@ -1111,7 +1558,10 @@ pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
                 out.push(mk(
                     Severity::Fail,
                     "ROUTE_NOT_ACCEPTED",
-                    format!("Route {id} was not accepted by Gateway {}, so it does nothing", p.gateway),
+                    format!(
+                        "Route {id} was not accepted by Gateway {}, so it does nothing",
+                        p.gateway
+                    ),
                     c.message.clone(),
                     Fix::command(inspect.clone()),
                 ));
@@ -1124,7 +1574,9 @@ pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
                 out.push(mk(
                     Severity::Fail,
                     "ROUTE_BACKEND_UNRESOLVED",
-                    format!("Route {id} points at a Service that cannot be used, so requests to it fail"),
+                    format!(
+                        "Route {id} points at a Service that cannot be used, so requests to it fail"
+                    ),
                     c.message.clone(),
                     Fix::command(inspect.clone()),
                 ));
@@ -1135,7 +1587,9 @@ pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
             continue;
         }
         for b in &r.backends {
-            if b.ready_endpoints == Some(0) && seen_backends.insert((b.namespace.clone(), b.service.clone())) {
+            if b.ready_endpoints == Some(0)
+                && seen_backends.insert((b.namespace.clone(), b.service.clone()))
+            {
                 out.push(mk(
                     Severity::Warn,
                     "BACKEND_NO_READY_ENDPOINTS",
@@ -1155,7 +1609,9 @@ pub fn gateway_items(f: &GatewayFacts) -> Vec<Item> {
 /// host memory (`GET /v1/host/memory`). `host_cpus` is the machine's CPU count. Used by the CLI (over HTTP) and by the
 /// daemon (in process) so both read VMs the same way.
 pub fn apply_vm_list(f: &mut NodeFacts, vms: &serde_json::Value, host_cpus: Option<u32>) {
-    let Some(items) = vms.get("items").and_then(|v| v.as_array()) else { return };
+    let Some(items) = vms.get("items").and_then(|v| v.as_array()) else {
+        return;
+    };
     let (mut total, mut running, mut used_cpu, mut macos) = (0u32, 0u32, 0u32, 0u32);
     for vm in items {
         total += 1;
@@ -1214,9 +1670,17 @@ pub fn hostname() -> String {
     // SAFETY: the buffer is 256 bytes and gethostname writes at most that many, NUL-terminating when it fits.
     let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) } == 0;
     let end = buf.iter().position(|b| *b == 0).unwrap_or(0);
-    let full = if ok { String::from_utf8_lossy(&buf[..end]).into_owned() } else { String::new() };
+    let full = if ok {
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    } else {
+        String::new()
+    };
     let short = full.split('.').next().unwrap_or("").to_owned();
-    if short.is_empty() { "this-machine".into() } else { short }
+    if short.is_empty() {
+        "this-machine".into()
+    } else {
+        short
+    }
 }
 
 #[cfg(test)]
@@ -1227,7 +1691,14 @@ mod tests {
     const NOW: u64 = 1_800_000_000;
 
     fn raw(name: &str, sev: Severity, detail: &str, fix: Option<&str>) -> RawCheck {
-        RawCheck { source: "doctor".into(), name: name.into(), severity: sev, detail: detail.into(), fix: fix.map(str::to_owned), path: None }
+        RawCheck {
+            source: "doctor".into(),
+            name: name.into(),
+            severity: sev,
+            detail: detail.into(),
+            fix: fix.map(str::to_owned),
+            path: None,
+        }
     }
 
     fn mac(name: &str) -> NodeFacts {
@@ -1255,7 +1726,11 @@ mod tests {
         let h = assess(&[mac("mini-01"), mac("mini-02")], NOW);
         assert_eq!(h.light, Severity::Ok);
         assert_eq!(h.headline, "All 2 machines are healthy");
-        assert!(h.next_action.text.starts_with("Nothing to do"), "{}", h.next_action.text);
+        assert!(
+            h.next_action.text.starts_with("Nothing to do"),
+            "{}",
+            h.next_action.text
+        );
         assert_eq!(h.next_action.item, None);
         assert_eq!(h.capacity.macos_limit, Some(4));
         assert_eq!(h.capacity.room_for_vms, Some(6)); // min(4 by cpu, 3 by memory) per Mac
@@ -1274,13 +1749,17 @@ mod tests {
     fn full_macos_slots_are_explained_in_plain_english() {
         let mut f = mac("mini-01");
         f.macos_in_use = Some(2);
-        f.checks.push(raw("macOS VM slots", Severity::Warn, "2/2 used", None));
+        f.checks
+            .push(raw("macOS VM slots", Severity::Warn, "2/2 used", None));
         let h = assess(&[f], NOW);
         let m = &h.machines[0];
         assert_eq!(m.light, Severity::Warn);
         // the doctor's own slot row is replaced by the model's, not shown twice
         assert_eq!(m.items.len(), 1);
-        assert_eq!(m.items[0].message, "2 of 2 macOS slots are in use on mini-01");
+        assert_eq!(
+            m.items[0].message,
+            "2 of 2 macOS slots are in use on mini-01"
+        );
         assert_eq!(m.items[0].explain.as_deref(), Some("MACOS_SLOTS_FULL"));
         assert!(m.capacity.summary.contains("2 of 2 macOS slots in use"));
         assert_eq!(h.headline, "1 of 1 machine needs attention");
@@ -1298,13 +1777,28 @@ mod tests {
         assert!(fix.safe && !fix.needs_sudo);
         assert_eq!(fix.action, Some(FixAction::StartService));
         assert!(h.next_action.safe);
-        assert!(h.next_action.text.contains("fluxctl fix"), "{}", h.next_action.text);
+        assert!(
+            h.next_action.text.contains("fluxctl fix"),
+            "{}",
+            h.next_action.text
+        );
     }
 
     #[test]
     fn a_stopped_daemon_on_linux_needs_sudo_and_is_never_automatic() {
-        let mut f = NodeFacts { name: "box".into(), platform: Platform::Linux, reachable: true, daemon_up: Some(false), ..Default::default() };
-        f.checks.push(raw("daemon", Severity::Fail, "connection refused", Some("run `fluxctl serve`")));
+        let mut f = NodeFacts {
+            name: "box".into(),
+            platform: Platform::Linux,
+            reachable: true,
+            daemon_up: Some(false),
+            ..Default::default()
+        };
+        f.checks.push(raw(
+            "daemon",
+            Severity::Fail,
+            "connection refused",
+            Some("run `fluxctl serve`"),
+        ));
         let h = assess(&[f], NOW);
         let fix = h.machines[0].items[0].fix.as_ref().unwrap();
         assert!(!fix.safe && fix.needs_sudo && fix.action.is_none());
@@ -1314,8 +1808,14 @@ mod tests {
     #[test]
     fn security_settings_are_never_automatic() {
         let mut f = mac("m");
-        f.checks.push(raw("FileVault (host)", Severity::Warn, "on", Some("System Settings > Privacy & Security")));
-        f.checks.push(raw("automatic login", Severity::Fail, "off", None));
+        f.checks.push(raw(
+            "FileVault (host)",
+            Severity::Warn,
+            "on",
+            Some("System Settings > Privacy & Security"),
+        ));
+        f.checks
+            .push(raw("automatic login", Severity::Fail, "off", None));
         let h = assess(&[f], NOW);
         for i in &h.machines[0].items {
             let fx = i.fix.as_ref().unwrap();
@@ -1330,12 +1830,26 @@ mod tests {
         let mut r = raw("store location", Severity::Fail, "does not exist", None);
         r.path = Some("/Volumes/Fast/fluxvm".into());
         f.checks.push(r);
-        f.checks.push(raw("login session", Severity::Fail, "login window", None));
+        f.checks
+            .push(raw("login session", Severity::Fail, "login window", None));
         let h = assess(&[f], NOW);
-        let safe: Vec<_> = h.machines[0].items.iter().filter(|i| i.fix.as_ref().unwrap().safe).collect();
+        let safe: Vec<_> = h.machines[0]
+            .items
+            .iter()
+            .filter(|i| i.fix.as_ref().unwrap().safe)
+            .collect();
         assert_eq!(safe.len(), 1);
-        assert_eq!(safe[0].fix.as_ref().unwrap().action, Some(FixAction::CreateDir { path: "/Volumes/Fast/fluxvm".into() }));
-        let login = h.machines[0].items.iter().find(|i| i.explain.as_deref() == Some("NO_LOGIN_SESSION")).unwrap();
+        assert_eq!(
+            safe[0].fix.as_ref().unwrap().action,
+            Some(FixAction::CreateDir {
+                path: "/Volumes/Fast/fluxvm".into()
+            })
+        );
+        let login = h.machines[0]
+            .items
+            .iter()
+            .find(|i| i.explain.as_deref() == Some("NO_LOGIN_SESSION"))
+            .unwrap();
         assert!(login.fix.as_ref().unwrap().needs_login);
     }
 
@@ -1345,18 +1859,49 @@ mod tests {
         f.missing_images = vec!["ghcr.io/acme/mac-ci:1".into()];
         let h = assess(&[f], NOW);
         let fx = h.machines[0].items[0].fix.as_ref().unwrap();
-        assert_eq!(fx.action, Some(FixAction::PullImage { reference: "ghcr.io/acme/mac-ci:1".into() }));
+        assert_eq!(
+            fx.action,
+            Some(FixAction::PullImage {
+                reference: "ghcr.io/acme/mac-ci:1".into()
+            })
+        );
     }
 
     #[test]
     fn unreachable_and_not_installed_stop_further_checks() {
-        let down = NodeFacts { name: "mini-03".into(), platform: Platform::Mac, reachable: false, unreachable_reason: Some("Connection timed out".into()), ..Default::default() };
-        let fresh = NodeFacts { name: "mini-04".into(), platform: Platform::Mac, reachable: true, installed: Some(false), ..Default::default() };
+        let down = NodeFacts {
+            name: "mini-03".into(),
+            platform: Platform::Mac,
+            reachable: false,
+            unreachable_reason: Some("Connection timed out".into()),
+            ..Default::default()
+        };
+        let fresh = NodeFacts {
+            name: "mini-04".into(),
+            platform: Platform::Mac,
+            reachable: true,
+            installed: Some(false),
+            ..Default::default()
+        };
         let h = assess(&[down, fresh], NOW);
         assert_eq!(h.light, Severity::Fail);
-        assert_eq!(h.machines[0].items[0].explain.as_deref(), Some("HOST_UNREACHABLE"));
-        assert_eq!(h.machines[0].items[0].cause.as_deref(), Some("Connection timed out"));
-        assert_eq!(h.machines[1].items[0].fix.as_ref().unwrap().command.as_deref(), Some("fluxctl mac-fleet up mini-04"));
+        assert_eq!(
+            h.machines[0].items[0].explain.as_deref(),
+            Some("HOST_UNREACHABLE")
+        );
+        assert_eq!(
+            h.machines[0].items[0].cause.as_deref(),
+            Some("Connection timed out")
+        );
+        assert_eq!(
+            h.machines[1].items[0]
+                .fix
+                .as_ref()
+                .unwrap()
+                .command
+                .as_deref(),
+            Some("fluxctl mac-fleet up mini-04")
+        );
         assert_eq!(h.headline, "2 of 2 machines need attention");
     }
 
@@ -1365,10 +1910,18 @@ mod tests {
         let mut f = mac("m");
         f.last_backup_epoch = Some(NOW - 9 * 86400);
         let h = assess(&[f.clone()], NOW);
-        assert_eq!(h.machines[0].items[0].explain.as_deref(), Some("STALE_BACKUP"));
+        assert_eq!(
+            h.machines[0].items[0].explain.as_deref(),
+            Some("STALE_BACKUP")
+        );
         assert_eq!(h.machines[0].last_backup, "9 days ago");
         f.last_backup_epoch = None;
-        assert_eq!(assess(&[f.clone()], NOW).machines[0].items[0].explain.as_deref(), Some("NO_BACKUP"));
+        assert_eq!(
+            assess(&[f.clone()], NOW).machines[0].items[0]
+                .explain
+                .as_deref(),
+            Some("NO_BACKUP")
+        );
         assert_eq!(assess(&[f.clone()], NOW).machines[0].last_backup, "never");
         f.vms_total = Some(0);
         assert!(assess(&[f], NOW).machines[0].items.is_empty());
@@ -1379,10 +1932,18 @@ mod tests {
         let mut f = mac("m");
         f.disk_free_gib = Some(30);
         let h = assess(&[f.clone()], NOW);
-        assert!(h.machines[0].items[0].message.contains("a new macOS VM needs about 60 GiB"));
+        assert!(
+            h.machines[0].items[0]
+                .message
+                .contains("a new macOS VM needs about 60 GiB")
+        );
         f.disk_free_gib = Some(3);
-        assert_eq!(assess(&[f.clone()], NOW).machines[0].items[0].severity, Severity::Fail);
-        f.checks.push(raw("free disk", Severity::Warn, "30 GiB", None));
+        assert_eq!(
+            assess(&[f.clone()], NOW).machines[0].items[0].severity,
+            Severity::Fail
+        );
+        f.checks
+            .push(raw("free disk", Severity::Warn, "30 GiB", None));
         let h = assess(&[f], NOW);
         assert_eq!(h.machines[0].items.len(), 1, "one disk item, not two");
     }
@@ -1394,9 +1955,19 @@ mod tests {
         f.wanted_version = Some("0.4.21".into());
         let h = assess(&[f.clone()], NOW);
         assert_eq!(h.light, Severity::Ok);
-        assert_eq!(h.machines[0].update, Some(Update { current: "0.4.20".into(), wanted: "0.4.21".into() }));
+        assert_eq!(
+            h.machines[0].update,
+            Some(Update {
+                current: "0.4.20".into(),
+                wanted: "0.4.21".into()
+            })
+        );
         f.wanted_version = Some("0.4.9".into());
-        assert_eq!(assess(&[f], NOW).machines[0].update, None, "0.4.9 is older than 0.4.20");
+        assert_eq!(
+            assess(&[f], NOW).machines[0].update,
+            None,
+            "0.4.9 is older than 0.4.20"
+        );
     }
 
     #[test]
@@ -1421,11 +1992,41 @@ mod tests {
     #[test]
     fn every_problem_has_an_explain_code_that_exists_and_a_consistent_fix() {
         let names = [
-            "daemon", "installed", "kvm", "cgroups", "open files", "net devices", "ip forwarding", "binaries", "vmnet entitlement",
-            "runner signature", "vz runner", "Virtualization.framework", "free disk", "memory", "login session", "console session",
-            "FileVault (host)", "automatic login", "screen lock", "launch agents", "keepawake agent", "sleep held off by", "idle sleep",
-            "power source", "store location", "clone volume", "ssh key", "client entries", "stale paths", "k3s", "platform",
-            "apple silicon", "macOS version", "Rosetta", "something nobody has heard of",
+            "daemon",
+            "installed",
+            "kvm",
+            "cgroups",
+            "open files",
+            "net devices",
+            "ip forwarding",
+            "binaries",
+            "vmnet entitlement",
+            "runner signature",
+            "vz runner",
+            "Virtualization.framework",
+            "free disk",
+            "memory",
+            "login session",
+            "console session",
+            "FileVault (host)",
+            "automatic login",
+            "screen lock",
+            "launch agents",
+            "keepawake agent",
+            "sleep held off by",
+            "idle sleep",
+            "power source",
+            "store location",
+            "clone volume",
+            "ssh key",
+            "client entries",
+            "stale paths",
+            "k3s",
+            "platform",
+            "apple silicon",
+            "macOS version",
+            "Rosetta",
+            "something nobody has heard of",
         ];
         let mut seen = std::collections::BTreeSet::new();
         for plat in [Platform::Mac, Platform::Linux, Platform::Unknown] {
@@ -1438,13 +2039,29 @@ mod tests {
                         seen.insert(code);
                         let fx = i.fix.unwrap();
                         assert!(fx.consistent(), "{n}: {fx:?}");
-                        assert!(fx.command.is_some() || fx.steps.is_some(), "{n}: a fix says nothing");
+                        assert!(
+                            fx.command.is_some() || fx.steps.is_some(),
+                            "{n}: a fix says nothing"
+                        );
                     }
                 }
             }
         }
         // every code the model can emit is explained, and every explained code can be emitted by some path
-        for extra in ["HOST_UNREACHABLE", "MACOS_SLOTS_FULL", "NO_BACKUP", "STALE_BACKUP", "MISSING_IMAGE", "NO_MACHINES", "LOW_MEMORY", "ENVOY_GATEWAY_NOT_INSTALLED", "GATEWAY_NOT_PROGRAMMED", "ROUTE_NOT_ACCEPTED", "ROUTE_BACKEND_UNRESOLVED", "BACKEND_NO_READY_ENDPOINTS"] {
+        for extra in [
+            "HOST_UNREACHABLE",
+            "MACOS_SLOTS_FULL",
+            "NO_BACKUP",
+            "STALE_BACKUP",
+            "MISSING_IMAGE",
+            "NO_MACHINES",
+            "LOW_MEMORY",
+            "ENVOY_GATEWAY_NOT_INSTALLED",
+            "GATEWAY_NOT_PROGRAMMED",
+            "ROUTE_NOT_ACCEPTED",
+            "ROUTE_BACKEND_UNRESOLVED",
+            "BACKEND_NO_READY_ENDPOINTS",
+        ] {
             seen.insert(extra.to_owned());
         }
         for c in CODES {
@@ -1456,7 +2073,8 @@ mod tests {
     #[test]
     fn the_same_problem_from_two_doctors_is_listed_once() {
         let mut f = mac("m");
-        f.checks.push(raw("session", Severity::Warn, "locked", None));
+        f.checks
+            .push(raw("session", Severity::Warn, "locked", None));
         let mut b = raw("login session", Severity::Fail, "nobody", None);
         b.source = "vz".into();
         f.checks.push(b);
@@ -1473,14 +2091,21 @@ mod tests {
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(v["schema"], 1);
         assert_eq!(v["light"], "fail");
-        assert_eq!(v["machines"][0]["items"][0]["fix"]["action"]["kind"], "start_service");
+        assert_eq!(
+            v["machines"][0]["items"][0]["fix"]["action"]["kind"],
+            "start_service"
+        );
         let back: ClusterHealth = serde_json::from_value(v).unwrap();
         assert_eq!(back, h);
     }
 
     #[test]
     fn vm_list_fills_counts_cpu_and_macos_slots() {
-        let mut f = NodeFacts { name: "m".into(), platform: Platform::Mac, ..Default::default() };
+        let mut f = NodeFacts {
+            name: "m".into(),
+            platform: Platform::Mac,
+            ..Default::default()
+        };
         let vms = json!({"items": [
             {"status": "running", "request": {"vcpus": 4, "apple": {"guest_os": "macos"}}},
             {"status": "paused", "request": {"vcpus": 2, "apple": {"guest_os": "macos"}}},
@@ -1488,9 +2113,15 @@ mod tests {
             {"status": "running", "request": {"vcpus": 2}},
         ]});
         apply_vm_list(&mut f, &vms, Some(10));
-        assert_eq!((f.vms_total, f.vms_running, f.macos_in_use), (Some(4), Some(2), Some(2)));
+        assert_eq!(
+            (f.vms_total, f.vms_running, f.macos_in_use),
+            (Some(4), Some(2), Some(2))
+        );
         assert_eq!(f.cpus_free, Some(2));
-        let mut l = NodeFacts { platform: Platform::Linux, ..Default::default() };
+        let mut l = NodeFacts {
+            platform: Platform::Linux,
+            ..Default::default()
+        };
         apply_vm_list(&mut l, &vms, None);
         assert_eq!(l.macos_in_use, None);
     }
@@ -1508,7 +2139,10 @@ mod tests {
     fn free_space_and_hostname_read_this_machine() {
         let d = tempfile::tempdir().unwrap();
         assert!(free_gib(d.path()).is_some());
-        assert!(free_gib(&d.path().join("not/yet/created")).is_some(), "falls back to the nearest parent");
+        assert!(
+            free_gib(&d.path().join("not/yet/created")).is_some(),
+            "falls back to the nearest parent"
+        );
         assert!(!hostname().is_empty() && !hostname().contains('.'));
     }
 
@@ -1524,21 +2158,43 @@ mod tests {
     // ---- Gateway API ----
 
     fn cond(status: &str, observed: Option<i64>) -> Option<GwCondition> {
-        Some(GwCondition { status: status.into(), observed_generation: observed, message: Some("because".into()) })
+        Some(GwCondition {
+            status: status.into(),
+            observed_generation: observed,
+            message: Some("because".into()),
+        })
     }
 
     fn gw(envoy: bool, programmed: Option<GwCondition>) -> GatewayFact {
-        GatewayFact { namespace: "web".into(), name: "edge".into(), envoy, generation: Some(2), programmed }
+        GatewayFact {
+            namespace: "web".into(),
+            name: "edge".into(),
+            envoy,
+            generation: Some(2),
+            programmed,
+        }
     }
 
-    fn route(accepted: Option<GwCondition>, resolved: Option<GwCondition>, ready: Option<u64>) -> RouteFact {
+    fn route(
+        accepted: Option<GwCondition>,
+        resolved: Option<GwCondition>,
+        ready: Option<u64>,
+    ) -> RouteFact {
         RouteFact {
             namespace: "web".into(),
             name: "shop".into(),
             envoy: true,
             generation: Some(2),
-            parents: vec![RouteParentFact { gateway: "edge".into(), accepted, resolved_refs: resolved }],
-            backends: vec![BackendFact { namespace: "web".into(), service: "shop".into(), ready_endpoints: ready }],
+            parents: vec![RouteParentFact {
+                gateway: "edge".into(),
+                accepted,
+                resolved_refs: resolved,
+            }],
+            backends: vec![BackendFact {
+                namespace: "web".into(),
+                service: "shop".into(),
+                ready_endpoints: ready,
+            }],
         }
     }
 
@@ -1552,7 +2208,10 @@ mod tests {
     }
 
     fn codes_of(f: &GatewayFacts) -> Vec<String> {
-        gateway_items(f).into_iter().filter_map(|i| i.explain).collect()
+        gateway_items(f)
+            .into_iter()
+            .filter_map(|i| i.explain)
+            .collect()
     }
 
     #[test]
@@ -1560,11 +2219,21 @@ mod tests {
         assert!(gateway_items(&healthy_gateway()).is_empty());
         assert!(gateway_items(&GatewayFacts::default()).is_empty());
         // Envoy Gateway absent is not a problem when nothing uses it, or when it could not be read.
-        let none_needed = GatewayFacts { controller_present: Some(false), ..Default::default() };
+        let none_needed = GatewayFacts {
+            controller_present: Some(false),
+            ..Default::default()
+        };
         assert!(gateway_items(&none_needed).is_empty());
-        let other_class = GatewayFacts { controller_present: Some(false), gateways: vec![gw(false, cond("False", Some(2)))], ..Default::default() };
+        let other_class = GatewayFacts {
+            controller_present: Some(false),
+            gateways: vec![gw(false, cond("False", Some(2)))],
+            ..Default::default()
+        };
         assert_eq!(codes_of(&other_class), ["GATEWAY_NOT_PROGRAMMED"]);
-        let unknown = GatewayFacts { controller_present: None, ..healthy_gateway() };
+        let unknown = GatewayFacts {
+            controller_present: None,
+            ..healthy_gateway()
+        };
         assert!(gateway_items(&unknown).is_empty());
     }
 
@@ -1576,10 +2245,19 @@ mod tests {
         f.routes[0].parents[0].accepted = cond("False", Some(2));
         let items = gateway_items(&f);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].explain.as_deref(), Some("ENVOY_GATEWAY_NOT_INSTALLED"));
+        assert_eq!(
+            items[0].explain.as_deref(),
+            Some("ENVOY_GATEWAY_NOT_INSTALLED")
+        );
         assert_eq!(items[0].severity, Severity::Fail);
-        assert_eq!(items[0].message, "1 Gateway and 1 route need Envoy Gateway, which is not running on dev");
-        assert_eq!(items[0].fix.as_ref().unwrap().command.as_deref(), Some("fluxctl kube cluster platform envoy-gateway dev"));
+        assert_eq!(
+            items[0].message,
+            "1 Gateway and 1 route need Envoy Gateway, which is not running on dev"
+        );
+        assert_eq!(
+            items[0].fix.as_ref().unwrap().command.as_deref(),
+            Some("fluxctl kube cluster platform envoy-gateway dev")
+        );
     }
 
     #[test]
@@ -1589,12 +2267,23 @@ mod tests {
         assert_eq!(codes_of(&f), ["GATEWAY_NOT_PROGRAMMED"]);
         let i = &gateway_items(&f)[0];
         assert_eq!(i.cause.as_deref(), Some("because"));
-        assert_eq!(i.fix.as_ref().unwrap().command.as_deref(), Some("kubectl describe gateway edge -n web"));
+        assert_eq!(
+            i.fix.as_ref().unwrap().command.as_deref(),
+            Some("kubectl describe gateway edge -n web")
+        );
 
         let mut f = healthy_gateway();
         f.routes[0].parents[0].accepted = cond("False", Some(2));
         assert_eq!(codes_of(&f), ["ROUTE_NOT_ACCEPTED"]);
-        assert_eq!(gateway_items(&f)[0].fix.as_ref().unwrap().command.as_deref(), Some("fluxctl gateway inspect shop -n web --cluster dev"));
+        assert_eq!(
+            gateway_items(&f)[0]
+                .fix
+                .as_ref()
+                .unwrap()
+                .command
+                .as_deref(),
+            Some("fluxctl gateway inspect shop -n web --cluster dev")
+        );
 
         let mut f = healthy_gateway();
         f.routes[0].parents[0].resolved_refs = cond("False", Some(2));
@@ -1646,16 +2335,31 @@ mod tests {
         for i in &items {
             assert!(super::code(i.explain.as_deref().unwrap()).is_some());
             assert!(i.fix.as_ref().unwrap().consistent());
-            assert!(!i.fix.as_ref().unwrap().safe, "a gateway fix is never applied automatically");
+            assert!(
+                !i.fix.as_ref().unwrap().safe,
+                "a gateway fix is never applied automatically"
+            );
         }
         let h = assess_with(&[mac("m")], items, NOW);
         assert_eq!(h.light, Severity::Fail);
-        assert!(h.headline.starts_with("m is healthy, but 2 problems need attention in the cluster"), "{}", h.headline);
+        assert!(
+            h.headline
+                .starts_with("m is healthy, but 2 problems need attention in the cluster"),
+            "{}",
+            h.headline
+        );
         assert_eq!(h.items.len(), 2);
         assert!(h.items.iter().all(|i| i.id.starts_with("cluster/")));
         assert_eq!(h.next_action.machine.as_deref(), Some("cluster"));
-        assert!(h.next_action.text.contains("kubectl describe gateway edge -n web"));
+        assert!(
+            h.next_action
+                .text
+                .contains("kubectl describe gateway edge -n web")
+        );
         // no gateway problems: identical to the plain assessment
-        assert_eq!(assess_with(&[mac("m")], vec![], NOW), assess(&[mac("m")], NOW));
+        assert_eq!(
+            assess_with(&[mac("m")], vec![], NOW),
+            assess(&[mac("m")], NOW)
+        );
     }
 }

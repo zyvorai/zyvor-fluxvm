@@ -36,7 +36,9 @@ pub fn stop_script() -> String {
 
 pub fn snapshot_probe_script(snap: &str) -> String {
     assert!(script::snapshot_name_ok(snap));
-    format!(": fluxvm-op restore-probe; set -eu; sudo -n test -f {SNAPSHOT_DIR}/{snap} && echo present")
+    format!(
+        ": fluxvm-op restore-probe; set -eu; sudo -n test -f {SNAPSHOT_DIR}/{snap} && echo present"
+    )
 }
 
 /// Moves the etcd data aside so the server rejoins and copies the restored state. The service stays stopped.
@@ -59,42 +61,76 @@ pub fn plan_text(cluster: &str, servers: &[String], from: &str, snap: &str) -> S
          3. on {}: move {SERVER_DIR}/db aside, start k3s, wait until it has rejoined, one at a time\n\
          Everything written to the cluster after the snapshot is lost. Agents are not touched and reconnect by themselves.",
         servers.join(", "),
-        others.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        others
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 
-pub async fn restore_all<R: Remote>(r: &R, st: &State, req: &RestoreAllReq) -> Result<RestoreAllReport> {
+pub async fn restore_all<R: Remote>(
+    r: &R,
+    st: &State,
+    req: &RestoreAllReq,
+) -> Result<RestoreAllReport> {
     if st.datastore != Datastore::Etcd {
-        bail!("snapshots need embedded etcd (create --embedded-etcd); a SQLite cluster uses `restore`");
+        bail!(
+            "snapshots need embedded etcd (create --embedded-etcd); a SQLite cluster uses `restore`"
+        );
     }
     if !script::snapshot_name_ok(&req.snapshot) {
-        bail!("{:?} is not a snapshot name (letters, digits and - _ . only)", req.snapshot);
+        bail!(
+            "{:?} is not a snapshot name (letters, digits and - _ . only)",
+            req.snapshot
+        );
     }
     let servers = r.servers();
     if servers.len() < 2 {
-        bail!("this cluster has one server; use `snapshot restore NAME SNAPSHOT --yes` without --rejoin-servers");
+        bail!(
+            "this cluster has one server; use `snapshot restore NAME SNAPSHOT --yes` without --rejoin-servers"
+        );
     }
     let from = match &req.from {
         Some(f) if servers.contains(f) => f.clone(),
-        Some(f) => bail!("{f} is not a server of this cluster ({})", servers.join(", ")),
+        Some(f) => bail!(
+            "{f} is not a server of this cluster ({})",
+            servers.join(", ")
+        ),
         None => servers[0].clone(),
     };
     // Nothing is stopped until every server answers and the snapshot is where it should be.
     for s in &servers {
         if let Err(e) = r.run(s, ": fluxvm-op restore-ping; true", None).await {
-            bail!("{s} does not answer ({e:#}); a server that is down cannot be wiped and rejoined: start it, or remove it with `kube apple remove` first. Nothing was changed");
+            bail!(
+                "{s} does not answer ({e:#}); a server that is down cannot be wiped and rejoined: start it, or remove it with `kube apple remove` first. Nothing was changed"
+            );
         }
     }
-    match r.run(&from, &snapshot_probe_script(&req.snapshot), None).await {
+    match r
+        .run(&from, &snapshot_probe_script(&req.snapshot), None)
+        .await
+    {
         Ok(o) if o.trim() == "present" => {}
-        _ => bail!("{} is not on {from} ({SNAPSHOT_DIR}); `snapshot ls` shows what each server has, `--from-node` picks the server. Nothing was changed", req.snapshot),
+        _ => bail!(
+            "{} is not on {from} ({SNAPSHOT_DIR}); `snapshot ls` shows what each server has, `--from-node` picks the server. Nothing was changed",
+            req.snapshot
+        ),
     }
     if !req.yes {
-        bail!("{}\nadd --yes to do this", plan_text(&st.name, &servers, &from, &req.snapshot));
+        bail!(
+            "{}\nadd --yes to do this",
+            plan_text(&st.name, &servers, &from, &req.snapshot)
+        );
     }
-    let recover = format!("the cluster may be stopped: `fluxctl kube apple start {}` starts it again (without the restore)", st.name);
+    let recover = format!(
+        "the cluster may be stopped: `fluxctl kube apple start {}` starts it again (without the restore)",
+        st.name
+    );
     for s in &servers {
-        r.run(s, &stop_script(), None).await.map_err(|e| anyhow::anyhow!("{s}: stopping k3s failed: {e:#}; {recover}"))?;
+        r.run(s, &stop_script(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("{s}: stopping k3s failed: {e:#}; {recover}"))?;
     }
     r.run(&from, &script::snapshot_restore_script(&req.snapshot), None)
         .await
@@ -103,7 +139,10 @@ pub async fn restore_all<R: Remote>(r: &R, st: &State, req: &RestoreAllReq) -> R
     wait_up(r, &from, Role::Server)
         .await
         .map_err(|e| anyhow::anyhow!("{from} did not come up after the restore: {e:#}; check `fluxctl kube apple logs {} --node {from}`", st.name))?;
-    let mut rep = RestoreAllReport { restored_on: from.clone(), ..Default::default() };
+    let mut rep = RestoreAllReport {
+        restored_on: from.clone(),
+        ..Default::default()
+    };
     let stamp = r.stamp();
     for s in servers.iter().filter(|s| **s != from) {
         let res = async {
@@ -115,7 +154,8 @@ pub async fn restore_all<R: Remote>(r: &R, st: &State, req: &RestoreAllReq) -> R
         match res {
             Ok(aside) => {
                 rep.wiped_and_rejoined.push(s.clone());
-                rep.kept_aside.push(format!("{s}:{SERVER_DIR}/{}", aside.trim()));
+                rep.kept_aside
+                    .push(format!("{s}:{SERVER_DIR}/{}", aside.trim()));
             }
             Err(e) => bail!(
                 "{s}: {e:#}; restored on {from}, rejoined so far: [{}]; the restore does not need repeating: fix {s} and start it (its old data is in {SERVER_DIR}/db.pre-restore-{stamp})",
@@ -142,7 +182,11 @@ mod tests {
     }
 
     fn req(yes: bool) -> RestoreAllReq {
-        RestoreAllReq { snapshot: "on-demand-c-s1-1".into(), from: None, yes }
+        RestoreAllReq {
+            snapshot: "on-demand-c-s1-1".into(),
+            from: None,
+            yes,
+        }
     }
 
     fn fake() -> FakeRemote {
@@ -160,35 +204,68 @@ mod tests {
              if sudo -n test -d /var/lib/rancher/k3s/server/db; then sudo -n mv /var/lib/rancher/k3s/server/db /var/lib/rancher/k3s/server/db.pre-restore-20261122-120000; fi; \
              echo db.pre-restore-20261122-120000"
         );
-        assert!(snapshot_probe_script("a-1").contains("test -f /var/lib/rancher/k3s/server/db/snapshots/a-1"));
+        assert!(
+            snapshot_probe_script("a-1")
+                .contains("test -f /var/lib/rancher/k3s/server/db/snapshots/a-1")
+        );
     }
 
     #[test]
     fn plan_text_golden() {
-        let t = plan_text("c", &["c-s1".into(), "c-s2".into(), "c-s3".into()], "c-s1", "snap");
-        assert!(t.starts_with("restoring snap on c (servers: c-s1, c-s2, c-s3):\n1. stop k3s on every server"));
+        let t = plan_text(
+            "c",
+            &["c-s1".into(), "c-s2".into(), "c-s3".into()],
+            "c-s1",
+            "snap",
+        );
+        assert!(t.starts_with(
+            "restoring snap on c (servers: c-s1, c-s2, c-s3):\n1. stop k3s on every server"
+        ));
         assert!(t.contains("3. on c-s2, c-s3: move /var/lib/rancher/k3s/server/db aside"));
     }
 
     #[tokio::test]
     async fn without_yes_it_prints_the_plan_and_changes_nothing() {
         let r = fake();
-        let e = restore_all(&r, &st(Datastore::Etcd), &req(false)).await.unwrap_err().to_string();
-        assert!(e.contains("add --yes") && e.contains("stop k3s on every server"), "{e}");
+        let e = restore_all(&r, &st(Datastore::Etcd), &req(false))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("add --yes") && e.contains("stop k3s on every server"),
+            "{e}"
+        );
         let ops = r.ops();
-        assert!(ops.iter().all(|o| o.ends_with("restore-ping") || o.ends_with("restore-probe")), "{ops:?}");
+        assert!(
+            ops.iter()
+                .all(|o| o.ends_with("restore-ping") || o.ends_with("restore-probe")),
+            "{ops:?}"
+        );
     }
 
     #[tokio::test]
     async fn stops_all_then_resets_one_then_rejoins_the_rest_one_at_a_time() {
         let r = fake();
-        let rep = restore_all(&r, &st(Datastore::Etcd), &req(true)).await.unwrap();
+        let rep = restore_all(&r, &st(Datastore::Etcd), &req(true))
+            .await
+            .unwrap();
         assert_eq!(rep.restored_on, "c-s1");
         assert_eq!(rep.wiped_and_rejoined, ["c-s2", "c-s3"]);
-        let ops: Vec<String> = r.ops().into_iter().filter(|o| !o.contains("restore-ping") && !o.contains("restore-probe")).collect();
-        let pos = |needle: &str| ops.iter().position(|o| o == needle).unwrap_or_else(|| panic!("{needle} in {ops:?}"));
+        let ops: Vec<String> = r
+            .ops()
+            .into_iter()
+            .filter(|o| !o.contains("restore-ping") && !o.contains("restore-probe"))
+            .collect();
+        let pos = |needle: &str| {
+            ops.iter()
+                .position(|o| o == needle)
+                .unwrap_or_else(|| panic!("{needle} in {ops:?}"))
+        };
         for s in ["c-s1", "c-s2", "c-s3"] {
-            assert!(pos(&format!("{s}:restore-stop")) < pos("c-s1:-"), "every server stops before the reset");
+            assert!(
+                pos(&format!("{s}:restore-stop")) < pos("c-s1:-"),
+                "every server stops before the reset"
+            );
         }
         // the reset script is the existing cluster-reset one
         assert!(r.log.borrow().iter().any(|(n, s, _)| n == "c-s1" && s.contains("--cluster-reset-restore-path=/var/lib/rancher/k3s/server/db/snapshots/on-demand-c-s1-1")));
@@ -197,7 +274,10 @@ mod tests {
         assert!(pos("c-s2:platform-restart") < pos("c-s3:restore-wipe"));
         // the agent is not touched
         assert!(!ops.iter().any(|o| o.starts_with("c-a1")));
-        assert_eq!(rep.kept_aside[0], "c-s2:/var/lib/rancher/k3s/server/db.pre-restore-20261122-120000");
+        assert_eq!(
+            rep.kept_aside[0],
+            "c-s2:/var/lib/rancher/k3s/server/db.pre-restore-20261122-120000"
+        );
     }
 
     #[tokio::test]
@@ -205,18 +285,37 @@ mod tests {
         // a server that does not answer
         let r = fake();
         r.fail_on("restore-ping", "no route");
-        assert!(restore_all(&r, &st(Datastore::Etcd), &req(true)).await.unwrap_err().to_string().contains("Nothing was changed"));
+        assert!(
+            restore_all(&r, &st(Datastore::Etcd), &req(true))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Nothing was changed")
+        );
         assert!(!r.ops().iter().any(|o| o.ends_with("restore-stop")));
         // snapshot missing
         let r = FakeRemote::cluster(3, 0);
-        let e = restore_all(&r, &st(Datastore::Etcd), &req(true)).await.unwrap_err().to_string();
+        let e = restore_all(&r, &st(Datastore::Etcd), &req(true))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("is not on c-s1"), "{e}");
         assert!(!r.ops().iter().any(|o| o.ends_with("restore-stop")));
         // sqlite, one server, unknown --from-node, bad name
         let r = fake();
-        assert!(restore_all(&r, &st(Datastore::Sqlite), &req(true)).await.is_err());
+        assert!(
+            restore_all(&r, &st(Datastore::Sqlite), &req(true))
+                .await
+                .is_err()
+        );
         let one = FakeRemote::cluster(1, 0);
-        assert!(restore_all(&one, &st(Datastore::Etcd), &req(true)).await.unwrap_err().to_string().contains("one server"));
+        assert!(
+            restore_all(&one, &st(Datastore::Etcd), &req(true))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("one server")
+        );
         let mut q = req(true);
         q.from = Some("c-a1".into());
         assert!(restore_all(&r, &st(Datastore::Etcd), &q).await.is_err());
@@ -229,8 +328,14 @@ mod tests {
     async fn a_failed_reset_leaves_the_other_servers_data_alone() {
         let r = fake();
         r.fail_on("--cluster-reset", "etcd says no");
-        let e = restore_all(&r, &st(Datastore::Etcd), &req(true)).await.unwrap_err().to_string();
-        assert!(e.contains("c-s1: cluster-reset failed") && e.contains("still hold their old data"), "{e}");
+        let e = restore_all(&r, &st(Datastore::Etcd), &req(true))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("c-s1: cluster-reset failed") && e.contains("still hold their old data"),
+            "{e}"
+        );
         assert!(!r.ops().iter().any(|o| o.ends_with("restore-wipe")));
     }
 }

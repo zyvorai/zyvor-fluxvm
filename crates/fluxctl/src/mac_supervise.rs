@@ -141,7 +141,9 @@ pub(crate) struct DaemonHost<'a> {
 
 impl Host for DaemonHost<'_> {
     async fn list(&mut self) -> Result<Vec<Value>> {
-        self.r.list_vms(Some(crate::mac_cmd::INSTANCE_SELECTOR)).await
+        self.r
+            .list_vms(Some(crate::mac_cmd::INSTANCE_SELECTOR))
+            .await
     }
 
     async fn start(&mut self, vm: &Value) -> Result<()> {
@@ -221,10 +223,7 @@ pub fn agent_paths(home: &std::path::Path) -> (PathBuf, PathBuf) {
 }
 
 /// The agent's command line.
-pub fn agent_args(
-    exe: &std::path::Path,
-    a: &SuperviseArgs,
-) -> Vec<String> {
+pub fn agent_args(exe: &std::path::Path, a: &SuperviseArgs) -> Vec<String> {
     let mut v = vec![exe.display().to_string()];
     if let Some(d) = &a.daemon {
         v.extend(["--server".into(), d.clone()]);
@@ -267,7 +266,11 @@ pub fn agent_command(a: &SuperviseArgs) -> Result<Option<Value>> {
         return Ok(Some(json!({"removed": removed})));
     }
     if a.status {
-        return Ok(Some(crate::launch_agent::status_of(AGENT_LABEL, &plist, &log)?));
+        return Ok(Some(crate::launch_agent::status_of(
+            AGENT_LABEL,
+            &plist,
+            &log,
+        )?));
     }
     Ok(None)
 }
@@ -342,14 +345,20 @@ mod tests {
             ..Default::default()
         };
         let mut b = Backoff::default();
-        let ev = tick(&mut h, &mut b, 100, TickOpts::default()).await.unwrap();
+        let ev = tick(&mut h, &mut b, 100, TickOpts::default())
+            .await
+            .unwrap();
         assert_eq!(ev, [Event::Started("a".into())]);
         assert_eq!(h.started, ["a"]);
         // The next pass is inside the back-off window.
-        let ev = tick(&mut h, &mut b, 102, TickOpts::default()).await.unwrap();
+        let ev = tick(&mut h, &mut b, 102, TickOpts::default())
+            .await
+            .unwrap();
         assert_eq!(ev, [Event::Backoff("a".into(), 3)]);
         assert_eq!(h.started.len(), 1);
-        let ev = tick(&mut h, &mut b, 105, TickOpts::default()).await.unwrap();
+        let ev = tick(&mut h, &mut b, 105, TickOpts::default())
+            .await
+            .unwrap();
         assert_eq!(ev, [Event::Started("a".into())]);
     }
 
@@ -444,7 +453,13 @@ mod tests {
         assert_eq!(
             v,
             [
-                "/opt/fluxctl", "--server", "http://127.0.0.1:7788", "mac", "supervise", "--interval", "20",
+                "/opt/fluxctl",
+                "--server",
+                "http://127.0.0.1:7788",
+                "mac",
+                "supervise",
+                "--interval",
+                "20",
                 "--no-reap"
             ]
         );

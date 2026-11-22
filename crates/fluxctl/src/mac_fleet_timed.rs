@@ -134,7 +134,10 @@ mod tests {
         let mut c = Command::new("/bin/sh");
         c.arg("-c").arg("echo out; echo err >&2; exit 3");
         let o = run_with_timeout(c, None, Some(Duration::from_secs(10)), "sh").unwrap();
-        assert_eq!((o.code, o.stdout.trim(), o.stderr.trim()), (3, "out", "err"));
+        assert_eq!(
+            (o.code, o.stdout.trim(), o.stderr.trim()),
+            (3, "out", "err")
+        );
     }
 
     #[test]

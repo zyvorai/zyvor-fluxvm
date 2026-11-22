@@ -88,7 +88,10 @@ pub fn free_disk_mib(df: &str) -> Option<u64> {
 /// Runs a read-only command and returns stdout when it exits 0.
 #[cfg(target_os = "macos")]
 fn read(program: &str, args: &[&str]) -> Option<String> {
-    let o = std::process::Command::new(program).args(args).output().ok()?;
+    let o = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()?;
     o.status
         .success()
         .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -235,7 +238,10 @@ mod tests {
 
     #[test]
     fn thermal_limit_only_below_100() {
-        assert_eq!(thermal_limit("CPU_Scheduler_Limit = 100\nCPU_Speed_Limit = 70\n"), Some(70));
+        assert_eq!(
+            thermal_limit("CPU_Scheduler_Limit = 100\nCPU_Speed_Limit = 70\n"),
+            Some(70)
+        );
         assert_eq!(thermal_limit("CPU_Speed_Limit \t= 100\n"), None);
         assert_eq!(
             thermal_limit("Note: No thermal warning level has been recorded\n"),
@@ -245,7 +251,9 @@ mod tests {
 
     #[test]
     fn sleep_held_and_disk() {
-        assert!(sleep_held(" sleep 0 (sleep prevented by caffeinate, powerd)\n"));
+        assert!(sleep_held(
+            " sleep 0 (sleep prevented by caffeinate, powerd)\n"
+        ));
         assert!(!sleep_held(" sleep 1\n"));
         let df = "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk3s5 482746452 416546668 34973776 93% 1 2 1% /System/Volumes/Data\n";
         assert_eq!(free_disk_mib(df), Some(34973776 / 1024));
@@ -254,7 +262,10 @@ mod tests {
 
     #[test]
     fn build_mismatch_is_flagged_only_when_both_known_and_different() {
-        assert_eq!(restore_verdict(Some("24G90"), Some("24G90")), RestoreVerdict::Allow);
+        assert_eq!(
+            restore_verdict(Some("24G90"), Some("24G90")),
+            RestoreVerdict::Allow
+        );
         assert_eq!(restore_verdict(None, Some("24G90")), RestoreVerdict::Allow);
         assert_eq!(restore_verdict(Some("24G90"), None), RestoreVerdict::Allow);
         assert_eq!(
@@ -273,7 +284,10 @@ mod tests {
         std::fs::write(d.path().join(HOST_BUILD_FILE), "24G90\n").unwrap();
         assert_eq!(read_recorded_build(d.path()).as_deref(), Some("24G90"));
         assert_eq!(on_build_mismatch_from(None), OnBuildMismatch::ColdBoot);
-        assert_eq!(on_build_mismatch_from(Some("refuse")), OnBuildMismatch::Refuse);
+        assert_eq!(
+            on_build_mismatch_from(Some("refuse")),
+            OnBuildMismatch::Refuse
+        );
         assert!(mismatch_message("a", "b").contains("macOS build a"));
         assert!(locked_message().contains("headless-check"));
     }

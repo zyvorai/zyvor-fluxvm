@@ -2801,7 +2801,9 @@ impl VmManager {
             };
             if let Some(why) = health.admission_blockers().into_iter().next() {
                 audit_event("admission.deny", &[("scope", "thermal"), ("reason", &why)]);
-                bail!("this Mac is {why}; retry when `pmset -g therm` shows no speed limit, or place the VM on another Mac");
+                bail!(
+                    "this Mac is {why}; retry when `pmset -g therm` shows no speed limit, or place the VM on another Mac"
+                );
             }
         }
         self.admit_under_pressure(req.memory_mib).await?;

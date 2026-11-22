@@ -350,7 +350,9 @@ pub fn parse(src: &str) -> Result<Macfile, ParseError> {
                                 Err(m) => {
                                     return err(
                                         n,
-                                        format!("unsupported IPSW selector '{b}' (only 'latest', or an absolute path to a .ipsw file): {m}"),
+                                        format!(
+                                            "unsupported IPSW selector '{b}' (only 'latest', or an absolute path to a .ipsw file): {m}"
+                                        ),
                                     );
                                 }
                             }

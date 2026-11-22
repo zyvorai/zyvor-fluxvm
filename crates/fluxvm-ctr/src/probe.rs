@@ -6,9 +6,9 @@
 use crate::render::Manager;
 use crate::runtime::HostSupport;
 use serde::Serialize;
-use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Whether an unprivileged process can create a user namespace (needed by a rootless container).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -60,7 +60,9 @@ impl HostFacts {
     /// Whether containers can be created: namespaces (root, or an unprivileged user namespace) and the launcher.
     pub fn container_support(&self) -> Result<(), String> {
         if !self.linux {
-            return Err("native containers are Linux only (on a Mac, every container is its own VM)".into());
+            return Err(
+                "native containers are Linux only (on a Mac, every container is its own VM)".into(),
+            );
         }
         if !self.cgroup_v2 {
             return Err("cgroup v2 is not mounted at /sys/fs/cgroup (boot with systemd.unified_cgroup_hierarchy=1)".into());
@@ -80,7 +82,10 @@ impl HostFacts {
             }
         }
         if self.launcher.is_none() {
-            return Err("the fluxvm-container-run launcher was not found next to the daemon or on PATH".into());
+            return Err(
+                "the fluxvm-container-run launcher was not found next to the daemon or on PATH"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -116,14 +121,20 @@ impl HostFacts {
     /// Lines for `fluxctl doctor`: `(level, name, detail, fix)`, level one of ok/warn/fail.
     pub fn doctor(&self) -> Vec<DoctorLine> {
         let mut v = Vec::new();
-        let line = |level: &'static str, name: &'static str, detail: String, fix: &str| DoctorLine {
-            level,
-            name,
-            detail,
-            fix: fix.to_string(),
-        };
+        let line =
+            |level: &'static str, name: &'static str, detail: String, fix: &str| DoctorLine {
+                level,
+                name,
+                detail,
+                fix: fix.to_string(),
+            };
         if !self.linux {
-            v.push(line("ok", "container runtime", "not applicable: macOS runs every container in its own VM".into(), ""));
+            v.push(line(
+                "ok",
+                "container runtime",
+                "not applicable: macOS runs every container in its own VM".into(),
+                "",
+            ));
             return v;
         }
         let m = self.manager();
@@ -157,7 +168,10 @@ impl HostFacts {
             let det = if self.delegated_controllers.is_empty() {
                 "no controllers are delegated to the daemon's cgroup".to_string()
             } else {
-                format!("controllers available to containers: {}", self.delegated_controllers.join(" "))
+                format!(
+                    "controllers available to containers: {}",
+                    self.delegated_controllers.join(" ")
+                )
             };
             let missing: Vec<&str> = ["memory", "cpu", "pids"]
                 .into_iter()
@@ -174,7 +188,12 @@ impl HostFacts {
                 ));
             }
         } else {
-            v.push(line("fail", "cgroup v2", "not mounted".into(), "boot with systemd.unified_cgroup_hierarchy=1 or mount cgroup2 at /sys/fs/cgroup"));
+            v.push(line(
+                "fail",
+                "cgroup v2",
+                "not mounted".into(),
+                "boot with systemd.unified_cgroup_hierarchy=1 or mount cgroup2 at /sys/fs/cgroup",
+            ));
         }
         match (self.root, self.userns) {
             (true, _) => v.push(line("ok", "namespaces", "running as root: no user namespace needed (rootful containers)".into(), "")),
@@ -196,8 +215,16 @@ impl HostFacts {
         v.push(line(
             if self.seccomp { "ok" } else { "fail" },
             "seccomp",
-            if self.seccomp { "available".into() } else { "not available".into() },
-            if self.seccomp { "" } else { "use a kernel built with CONFIG_SECCOMP_FILTER" },
+            if self.seccomp {
+                "available".into()
+            } else {
+                "not available".into()
+            },
+            if self.seccomp {
+                ""
+            } else {
+                "use a kernel built with CONFIG_SECCOMP_FILTER"
+            },
         ));
         v.push(line(
             if self.overlayfs { "ok" } else { "warn" },
@@ -211,10 +238,25 @@ impl HostFacts {
         }
         match self.container_support() {
             Ok(()) => v.push(line("ok", "runtime=container", "ready".into(), "")),
-            Err(why) => v.push(line("fail", "runtime=container", why, "see the failing checks above")),
+            Err(why) => v.push(line(
+                "fail",
+                "runtime=container",
+                why,
+                "see the failing checks above",
+            )),
         }
         match self.vm_plain_support() {
-            Ok(()) => v.push(line("ok", "runtime=vm (VM sandbox)", format!("/dev/kvm usable{}", self.landlock_abi.map(|a| format!("; landlock ABI {a}")).unwrap_or_default()), "")),
+            Ok(()) => v.push(line(
+                "ok",
+                "runtime=vm (VM sandbox)",
+                format!(
+                    "/dev/kvm usable{}",
+                    self.landlock_abi
+                        .map(|a| format!("; landlock ABI {a}"))
+                        .unwrap_or_default()
+                ),
+                "",
+            )),
             Err(why) => v.push(line("warn", "runtime=vm (VM sandbox)", why, "")),
         }
         v.push(line(
@@ -236,7 +278,11 @@ pub struct DoctorLine {
 }
 
 /// Decide the user-namespace state from the three kernel knobs (`None` = file missing or unreadable).
-pub fn userns_state(max_user_namespaces: Option<u64>, unprivileged_userns_clone: Option<u64>, apparmor_restrict: Option<u64>) -> Userns {
+pub fn userns_state(
+    max_user_namespaces: Option<u64>,
+    unprivileged_userns_clone: Option<u64>,
+    apparmor_restrict: Option<u64>,
+) -> Userns {
     if max_user_namespaces == Some(0) || unprivileged_userns_clone == Some(0) {
         return Userns::Disabled;
     }
@@ -256,7 +302,9 @@ pub fn parse_controllers(s: &str) -> Vec<String> {
 
 /// The cgroup path of this process from `/proc/self/cgroup` (`0::/user.slice/...`).
 pub fn parse_self_cgroup(s: &str) -> Option<String> {
-    s.lines().find_map(|l| l.strip_prefix("0::")).map(|p| p.trim().to_string())
+    s.lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .map(|p| p.trim().to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -289,7 +337,9 @@ pub fn find_launcher() -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn access(path: &str, mode: i32) -> bool {
-    std::ffi::CString::new(path).map(|c| unsafe { libc::access(c.as_ptr(), mode) } == 0).unwrap_or(false)
+    std::ffi::CString::new(path)
+        .map(|c| unsafe { libc::access(c.as_ptr(), mode) } == 0)
+        .unwrap_or(false)
 }
 
 /// Probe the host. Reads only `/proc`, `/sys` and `/run`; changes nothing.
@@ -326,7 +376,8 @@ pub fn probe() -> HostFacts {
         let delegated = std::fs::read_to_string(format!("{dir}/cgroup.controllers"))
             .map(|s| parse_controllers(&s))
             .unwrap_or_default();
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
+        let runtime_dir =
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{uid}"));
         HostFacts {
             linux: true,
             root: uid == 0,
@@ -336,13 +387,16 @@ pub fn probe() -> HostFacts {
                 || Path::new(&format!("{runtime_dir}/bus")).exists(),
             cgroup_v2,
             delegated_controllers: delegated,
-            cgroup_writable: access(&format!("{dir}/cgroup.procs"), libc::W_OK) && access(&dir, libc::W_OK),
+            cgroup_writable: access(&format!("{dir}/cgroup.procs"), libc::W_OK)
+                && access(&dir, libc::W_OK),
             userns: userns_state(
                 read_u64("/proc/sys/user/max_user_namespaces"),
                 read_u64("/proc/sys/kernel/unprivileged_userns_clone"),
                 read_u64("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"),
             ),
-            overlayfs: std::fs::read_to_string("/proc/filesystems").map(|s| s.lines().any(|l| l.trim_end().ends_with("overlay"))).unwrap_or(false),
+            overlayfs: std::fs::read_to_string("/proc/filesystems")
+                .map(|s| s.lines().any(|l| l.trim_end().ends_with("overlay")))
+                .unwrap_or(false),
             seccomp: fluxvm_procbox::seccomp::available(),
             landlock_abi: {
                 let a = fluxvm_procbox::landlock::kernel_abi();
@@ -350,7 +404,10 @@ pub fn probe() -> HostFacts {
             },
             kvm: access("/dev/kvm", libc::R_OK | libc::W_OK),
             launcher: find_launcher(),
-            kernel: std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string(),
+            kernel: std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         }
     }
 }
@@ -382,7 +439,10 @@ mod tests {
     #[test]
     fn userns_knobs() {
         assert_eq!(userns_state(Some(100), None, Some(0)), Userns::Allowed);
-        assert_eq!(userns_state(Some(100), Some(1), Some(1)), Userns::RestrictedByApparmor);
+        assert_eq!(
+            userns_state(Some(100), Some(1), Some(1)),
+            Userns::RestrictedByApparmor
+        );
         assert_eq!(userns_state(Some(0), None, None), Userns::Disabled);
         assert_eq!(userns_state(Some(10), Some(0), None), Userns::Disabled);
         assert_eq!(userns_state(None, None, None), Userns::Unknown);
@@ -390,8 +450,14 @@ mod tests {
 
     #[test]
     fn parsers() {
-        assert_eq!(parse_controllers("cpu memory pids\n"), ["cpu", "memory", "pids"]);
-        assert_eq!(parse_self_cgroup("0::/user.slice/a.service\n").unwrap(), "/user.slice/a.service");
+        assert_eq!(
+            parse_controllers("cpu memory pids\n"),
+            ["cpu", "memory", "pids"]
+        );
+        assert_eq!(
+            parse_self_cgroup("0::/user.slice/a.service\n").unwrap(),
+            "/user.slice/a.service"
+        );
         assert!(parse_self_cgroup("1:name=x:/\n").is_none());
     }
 
@@ -414,12 +480,22 @@ mod tests {
         let mut f = facts();
         f.userns = Userns::RestrictedByApparmor;
         let e = f.container_support().unwrap_err();
-        assert!(e.contains("AppArmor") && e.contains("deploy/apparmor"), "{e}");
+        assert!(
+            e.contains("AppArmor") && e.contains("deploy/apparmor"),
+            "{e}"
+        );
         f.root = true;
-        assert!(f.container_support().is_ok(), "root does not need a user namespace");
+        assert!(
+            f.container_support().is_ok(),
+            "root does not need a user namespace"
+        );
         let mut f = facts();
         f.userns = Userns::Disabled;
-        assert!(f.container_support().unwrap_err().contains("max_user_namespaces"));
+        assert!(
+            f.container_support()
+                .unwrap_err()
+                .contains("max_user_namespaces")
+        );
         let mut f = facts();
         f.launcher = None;
         assert!(f.container_support().unwrap_err().contains("launcher"));
@@ -435,7 +511,11 @@ mod tests {
     fn vm_support_reports_the_image_gap_plainly() {
         let f = facts();
         assert!(f.vm_plain_support().is_ok());
-        assert!(f.vm_image_support().unwrap_err().contains("not implemented on Linux"));
+        assert!(
+            f.vm_image_support()
+                .unwrap_err()
+                .contains("not implemented on Linux")
+        );
         let mut f = facts();
         f.kvm = false;
         assert!(f.vm_plain_support().unwrap_err().contains("/dev/kvm"));
@@ -455,8 +535,17 @@ mod tests {
         let mut f = facts();
         f.userns = Userns::RestrictedByApparmor;
         let d = f.doctor();
-        assert_eq!(d.iter().find(|l| l.name == "rootless").unwrap().level, "fail");
-        assert_eq!(d.iter().find(|l| l.name == "runtime=container").unwrap().level, "fail");
+        assert_eq!(
+            d.iter().find(|l| l.name == "rootless").unwrap().level,
+            "fail"
+        );
+        assert_eq!(
+            d.iter()
+                .find(|l| l.name == "runtime=container")
+                .unwrap()
+                .level,
+            "fail"
+        );
     }
 
     #[test]
@@ -465,7 +554,13 @@ mod tests {
         f.systemd_pid1 = false;
         f.systemd_user_manager = false;
         let d = f.doctor();
-        assert!(d.iter().any(|l| l.name == "systemd" && l.fix.contains("direct manager")));
-        assert!(d[0].detail.contains("launcher creates and fills the cgroup"));
+        assert!(
+            d.iter()
+                .any(|l| l.name == "systemd" && l.fix.contains("direct manager"))
+        );
+        assert!(
+            d[0].detail
+                .contains("launcher creates and fills the cgroup")
+        );
     }
 }

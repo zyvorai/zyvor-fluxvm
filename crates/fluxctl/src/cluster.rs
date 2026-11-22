@@ -19,7 +19,9 @@
 
 use crate::cluster_remote::{self as remote, DEFAULT_INSTALLER_URL, JoinSpec};
 use crate::fleet_client;
-use crate::mac_fleet::{Conn, HostResult, Which, blank, fail, finish, jobs, par_map, resolve, transport};
+use crate::mac_fleet::{
+    Conn, HostResult, Which, blank, fail, finish, jobs, par_map, resolve, transport,
+};
 use crate::mac_fleet_remote::{Level, Secret, remote as sh_c, scrub};
 use crate::mac_fleet_ssh::Target;
 use anyhow::{Context, Result, bail};
@@ -331,8 +333,12 @@ pub fn token_request(ttl: u64, max_uses: Option<u32>, pattern: Option<&str>, not
 }
 
 pub fn parse_new_token(v: &Value) -> Result<NewToken> {
-    let id = v["id"].as_str().context("central's answer has no token id")?;
-    let token = v["token"].as_str().context("central's answer has no token")?;
+    let id = v["id"]
+        .as_str()
+        .context("central's answer has no token id")?;
+    let token = v["token"]
+        .as_str()
+        .context("central's answer has no token")?;
     if !token.starts_with("fvjt_") {
         bail!("central returned something that is not a join token");
     }
@@ -444,7 +450,12 @@ pub fn render_nodes(list: &Value, enrolled: &Value, now: i64) -> String {
             n["vm_count"].as_u64().unwrap_or(0).to_string(),
             n["vcpus_total"].as_u64().unwrap_or(0).to_string(),
             format!("{}G", n["memory_mib_total"].as_u64().unwrap_or(0) / 1024),
-            if enrolled.contains(name) { "enrolled" } else { "fleet-token" }.into(),
+            if enrolled.contains(name) {
+                "enrolled"
+            } else {
+                "fleet-token"
+            }
+            .into(),
             seen.map(age).unwrap_or_else(|| "-".into()),
             labels.join(","),
         ]);
@@ -469,7 +480,10 @@ pub fn render_tokens(list: &Value, now: i64) -> String {
     if items.is_empty() {
         return "No join tokens. Make one: fluxctl cluster token create\n".into();
     }
-    let mut out = format!("{:<12} {:<9} {:<7} {:<10} NOTE\n", "ID", "STATE", "USES", "EXPIRES");
+    let mut out = format!(
+        "{:<12} {:<9} {:<7} {:<10} NOTE\n",
+        "ID", "STATE", "USES", "EXPIRES"
+    );
     for t in &items {
         let exp = t["expires"].as_i64();
         let state = if t["revoked"] == json!(true) {
@@ -498,14 +512,16 @@ pub fn render_tokens(list: &Value, now: i64) -> String {
 
 /// The one command that adds a machine. With `token_literal` the token is in it; otherwise it reads the token file
 /// (when the output is a log, the token is not printed: docs/cluster-quickstart.md, "Where the token is printed").
-pub fn join_command(public_url: &str, token_literal: Option<&str>, token_file_hint: &str) -> String {
+pub fn join_command(
+    public_url: &str,
+    token_literal: Option<&str>,
+    token_file_hint: &str,
+) -> String {
     let env = match token_literal {
         Some(t) => format!("FLUXVM_TOKEN={t}"),
         None => format!("FLUXVM_TOKEN=\"$(cat {token_file_hint})\""),
     };
-    format!(
-        "curl -sfL {DEFAULT_INSTALLER_URL} | {env} bash -s -- --join {public_url}"
-    )
+    format!("curl -sfL {DEFAULT_INSTALLER_URL} | {env} bash -s -- --join {public_url}")
 }
 
 /// `fluxctl cluster join` on a machine that already has fluxctl: the arguments for the package's own `install.sh`.
@@ -521,7 +537,15 @@ pub fn installer_args_init(a: &InitArgs) -> Vec<String> {
     if let Some(u) = &a.public_url {
         v.extend(["--public-url".into(), u.clone()]);
     }
-    push_common(&mut v, a.with_k3s, a.yes, a.no_deps, a.no_selftest, a.no_image, a.dry_run);
+    push_common(
+        &mut v,
+        a.with_k3s,
+        a.yes,
+        a.no_deps,
+        a.no_selftest,
+        a.no_image,
+        a.dry_run,
+    );
     v
 }
 
@@ -542,11 +566,27 @@ pub fn installer_args_join(a: &JoinArgs) -> Vec<String> {
     for l in &a.labels {
         v.extend(["--label".into(), l.clone()]);
     }
-    push_common(&mut v, a.with_k3s, a.yes, a.no_deps, a.no_selftest, a.no_image, a.dry_run);
+    push_common(
+        &mut v,
+        a.with_k3s,
+        a.yes,
+        a.no_deps,
+        a.no_selftest,
+        a.no_image,
+        a.dry_run,
+    );
     v
 }
 
-fn push_common(v: &mut Vec<String>, k3s: bool, yes: bool, no_deps: bool, no_selftest: bool, no_image: bool, dry: bool) {
+fn push_common(
+    v: &mut Vec<String>,
+    k3s: bool,
+    yes: bool,
+    no_deps: bool,
+    no_selftest: bool,
+    no_image: bool,
+    dry: bool,
+) {
     for (on, flag) in [
         (k3s, "--with-k3s"),
         (yes, "--yes"),
@@ -594,7 +634,8 @@ fn run_installer(args: Vec<String>) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn central_paths(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
     (
-        home.join("Library/LaunchAgents").join(format!("{CENTRAL_LABEL}.plist")),
+        home.join("Library/LaunchAgents")
+            .join(format!("{CENTRAL_LABEL}.plist")),
         home.join("Library/Logs/fluxvm-central.log"),
         home.join("Library/Application Support/FluxVM/central"),
     )
@@ -620,7 +661,11 @@ fn mac_init(a: &InitArgs) -> Result<()> {
     let agent = crate::node_agent::agent_binary()?;
     let args = central_args(&agent, a.port, &state);
     if a.dry_run {
-        println!("would write {} and load it: {}", plist.display(), args.join(" "));
+        println!(
+            "would write {} and load it: {}",
+            plist.display(),
+            args.join(" ")
+        );
         return Ok(());
     }
     std::fs::create_dir_all(&state)?;
@@ -641,7 +686,14 @@ fn mac_join(a: &JoinArgs, token: &str) -> Result<()> {
     write_secret_file(&tokf, token)?;
     // the daemon first (idempotent: only when it is not loaded)
     let loaded = std::process::Command::new("launchctl")
-        .args(["print", &format!("gui/{}/{}", unsafe { libc::getuid() }, crate::launch_agent::LABEL)])
+        .args([
+            "print",
+            &format!(
+                "gui/{}/{}",
+                unsafe { libc::getuid() },
+                crate::launch_agent::LABEL
+            ),
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -688,7 +740,11 @@ pub fn default_node_name() -> String {
 
 /// `--token-file`, `$FLUXVM_TOKEN`, then stdin (only with `--token-stdin`). Always `fvjt_...`; a fleet or operator token
 /// is refused here.
-pub fn read_join_token(file: Option<&Path>, env: Option<&str>, stdin: Option<&mut dyn std::io::Read>) -> Result<String> {
+pub fn read_join_token(
+    file: Option<&Path>,
+    env: Option<&str>,
+    stdin: Option<&mut dyn std::io::Read>,
+) -> Result<String> {
     let raw = if let Some(f) = file {
         std::fs::read_to_string(f).with_context(|| format!("token file {}", f.display()))?
     } else if let Some(e) = env.filter(|e| !e.trim().is_empty()) {
@@ -704,9 +760,14 @@ pub fn read_join_token(file: Option<&Path>, env: Option<&str>, stdin: Option<&mu
     };
     let t = raw.trim();
     if !t.starts_with("fvjt_") {
-        bail!("that is not a join token (they start with fvjt_); an operator or fleet token is not accepted here");
+        bail!(
+            "that is not a join token (they start with fvjt_); an operator or fleet token is not accepted here"
+        );
     }
-    if !t.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)) {
+    if !t
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+    {
         bail!("the join token has characters a token never has");
     }
     Ok(t.to_owned())
@@ -754,9 +815,10 @@ impl JoinSpecBase {
         let name = name_override.unwrap_or(&t.name).to_owned();
         JoinSpec {
             central: self.central.clone(),
-            advertise_url: self.advertise_url.as_ref().map(|u| {
-                u.replace("{host}", &t.host).replace("{name}", &name)
-            }),
+            advertise_url: self
+                .advertise_url
+                .as_ref()
+                .map(|u| u.replace("{host}", &t.host).replace("{name}", &name)),
             name,
             labels: self.labels.clone(),
             installer_url: self.installer_url.clone(),
@@ -778,17 +840,30 @@ pub fn add_host(
     let out = match t.run(target, &sh_c(&remote::linux_probe_script()), None) {
         Err(e) => return fail(r, format!("{e:#}")),
         Ok(o) if o.ssh_failed() => {
-            return fail(r, crate::mac_fleet_ssh::explain_ssh_failure(target, &o.stderr));
+            return fail(
+                r,
+                crate::mac_fleet_ssh::explain_ssh_failure(target, &o.stderr),
+            );
         }
         Ok(o) if !o.ok() => {
-            return fail(r, format!("the probe failed: {}", crate::mac_fleet::last_lines(&o.stderr, 3)));
+            return fail(
+                r,
+                format!(
+                    "the probe failed: {}",
+                    crate::mac_fleet::last_lines(&o.stderr, 3)
+                ),
+            );
         }
         Ok(o) => o.stdout,
     };
     let facts = remote::parse_linux_facts(&out);
     let findings = remote::check_linux(&facts);
     let mut r = r;
-    r.findings = findings.iter().filter(|f| f.level != Level::Ok).cloned().collect();
+    r.findings = findings
+        .iter()
+        .filter(|f| f.level != Level::Ok)
+        .cloned()
+        .collect();
     if remote::has_errors(&findings) {
         let msgs: Vec<String> = findings
             .iter()
@@ -802,7 +877,12 @@ pub fn add_host(
         return fail(r, e);
     }
     let steps = remote::plan_add(&facts, &spec);
-    if steps.iter().any(|st| st.stdin == crate::mac_fleet_remote::StepIn::Token) && s.token.is_none() && facts.known {
+    if steps
+        .iter()
+        .any(|st| st.stdin == crate::mac_fleet_remote::StepIn::Token)
+        && s.token.is_none()
+        && facts.known
+    {
         return fail(r, "no join token for a host that is not enrolled yet");
     }
     crate::mac_fleet::run_steps(t, target, &steps, s.token.as_ref(), r)
@@ -822,7 +902,9 @@ fn now() -> i64 {
 pub async fn run(cmd: ClusterCommand) -> Result<()> {
     match cmd {
         // Handled in main, which has the loaded config `cluster status` reads.
-        ClusterCommand::Status(_) => unreachable!("cluster status is dispatched before cluster::run"),
+        ClusterCommand::Status(_) => {
+            unreachable!("cluster status is dispatched before cluster::run")
+        }
         ClusterCommand::Pairing(c) => crate::cluster_pair::run(c).await,
         ClusterCommand::Init(a) => {
             #[cfg(target_os = "linux")]
@@ -851,7 +933,11 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
             #[cfg(target_os = "macos")]
             {
                 if a.dry_run {
-                    println!("would join {} as {}", a.url, a.name.clone().unwrap_or_else(default_node_name));
+                    println!(
+                        "would join {} as {}",
+                        a.url,
+                        a.name.clone().unwrap_or_else(default_node_name)
+                    );
                     return Ok(());
                 }
                 let env = std::env::var("FLUXVM_TOKEN").ok();
@@ -859,10 +945,14 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
                 let token = read_join_token(
                     a.token_file.as_deref(),
                     env.as_deref(),
-                    a.token_stdin.then_some(&mut stdin as &mut dyn std::io::Read),
+                    a.token_stdin
+                        .then_some(&mut stdin as &mut dyn std::io::Read),
                 )?;
                 mac_join(&a, &token)?;
-                println!("==> node agent installed; waiting for {} to accept it", a.url);
+                println!(
+                    "==> node agent installed; waiting for {} to accept it",
+                    a.url
+                );
                 return mac_join_wait(&a).await;
             }
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -877,9 +967,15 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
             if c.json {
                 return print_json(&list);
             }
-            let enrolled = fleet_client::call(&c.central, Some(&op), reqwest::Method::GET, "/fleet/enroll/nodes", None)
-                .await
-                .unwrap_or(Value::Null);
+            let enrolled = fleet_client::call(
+                &c.central,
+                Some(&op),
+                reqwest::Method::GET,
+                "/fleet/enroll/nodes",
+                None,
+            )
+            .await
+            .unwrap_or(Value::Null);
             print!("{}", render_nodes(&list, &enrolled, now()));
             Ok(())
         }
@@ -896,12 +992,19 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
             .await
             .or_else(|e| {
                 // a node that never enrolled (it used the fleet token) has no credential to revoke
-                if format!("{e:#}").contains("404") { Ok(Value::Null) } else { Err(e) }
+                if format!("{e:#}").contains("404") {
+                    Ok(Value::Null)
+                } else {
+                    Err(e)
+                }
             })?;
             match fleet_client::deregister(&a.c.central, Some(&op), &a.node).await {
                 Ok(()) => println!("{} removed from the cluster", a.node),
                 Err(e) if format!("{e:#}").contains("404") => {
-                    println!("{} is not registered with this central (already removed?)", a.node)
+                    println!(
+                        "{} is not registered with this central (already removed?)",
+                        a.node
+                    )
                 }
                 Err(e) => println!(
                     "{}'s credential is revoked, but central still counts it as healthy ({e:#}). Re-run in about 30 seconds, after it has stopped.",
@@ -911,16 +1014,33 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
             Ok(())
         }
         ClusterCommand::Add(a) => run_add(a).await,
-        ClusterCommand::Addon { command: AddonCommand::K3s(k) } => run_k3s(k),
+        ClusterCommand::Addon {
+            command: AddonCommand::K3s(k),
+        } => run_k3s(k),
         ClusterCommand::Selftest(a) => run_selftest(a),
     }
 }
 
 async fn run_token(cmd: TokenCommand) -> Result<()> {
     match cmd {
-        TokenCommand::Create { c, ttl, max_uses, name_pattern, note, write_to } => {
+        TokenCommand::Create {
+            c,
+            ttl,
+            max_uses,
+            name_pattern,
+            note,
+            write_to,
+        } => {
             let op = operator_token(c.operator_token_file.as_deref())?;
-            let t = create_token(&c.central, &op, ttl, max_uses, name_pattern.as_deref(), &note).await?;
+            let t = create_token(
+                &c.central,
+                &op,
+                ttl,
+                max_uses,
+                name_pattern.as_deref(),
+                &note,
+            )
+            .await?;
             if let Some(p) = &write_to {
                 write_secret_file(p, &t.token)?;
             }
@@ -930,17 +1050,36 @@ async fn run_token(cmd: TokenCommand) -> Result<()> {
             // The token is printed once, and only to a terminal; a log gets the id and the file.
             if std::io::stdout().is_terminal() {
                 println!("{}", t.token);
-                eprintln!("join token {} (shown once, valid {}): FLUXVM_TOKEN=<it> ... --join {}", t.id, age(ttl as i64), c.central);
+                eprintln!(
+                    "join token {} (shown once, valid {}): FLUXVM_TOKEN=<it> ... --join {}",
+                    t.id,
+                    age(ttl as i64),
+                    c.central
+                );
             } else if write_to.is_some() {
-                println!("join token {} written to {} (mode 0600)", t.id, write_to.unwrap().display());
+                println!(
+                    "join token {} written to {} (mode 0600)",
+                    t.id,
+                    write_to.unwrap().display()
+                );
             } else {
-                bail!("stdout is not a terminal, so the token was not printed (and is now lost: revoke {} and use --write-to FILE or --json)", t.id);
+                bail!(
+                    "stdout is not a terminal, so the token was not printed (and is now lost: revoke {} and use --write-to FILE or --json)",
+                    t.id
+                );
             }
             Ok(())
         }
         TokenCommand::List(c) => {
             let op = operator_token(c.operator_token_file.as_deref())?;
-            let v = fleet_client::call(&c.central, Some(&op), reqwest::Method::GET, "/fleet/enroll/tokens", None).await?;
+            let v = fleet_client::call(
+                &c.central,
+                Some(&op),
+                reqwest::Method::GET,
+                "/fleet/enroll/tokens",
+                None,
+            )
+            .await?;
             if c.json {
                 return print_json(&v);
             }
@@ -949,7 +1088,14 @@ async fn run_token(cmd: TokenCommand) -> Result<()> {
         }
         TokenCommand::Revoke { c, id } => {
             let op = operator_token(c.operator_token_file.as_deref())?;
-            fleet_client::call(&c.central, Some(&op), reqwest::Method::DELETE, &format!("/fleet/enroll/tokens/{id}"), None).await?;
+            fleet_client::call(
+                &c.central,
+                Some(&op),
+                reqwest::Method::DELETE,
+                &format!("/fleet/enroll/tokens/{id}"),
+                None,
+            )
+            .await?;
             println!("token {id} revoked (nodes already enrolled keep their credentials)");
             Ok(())
         }
@@ -963,7 +1109,9 @@ async fn run_add(a: AddArgs) -> Result<()> {
     }
     let central = match &a.join {
         Some(u) => u.trim_end_matches('/').to_owned(),
-        None => bail!("--join URL is required: the central these hosts should join (e.g. --join http://this-machine:7799)"),
+        None => bail!(
+            "--join URL is required: the central these hosts should join (e.g. --join http://this-machine:7799)"
+        ),
     };
     let central_ctl = std::env::var("CENTRAL_URL").unwrap_or_else(|_| central.clone());
     // token: the one given, or a fresh short-lived one minted here with the operator token
@@ -975,14 +1123,23 @@ async fn run_add(a: AddArgs) -> Result<()> {
         Some(read_join_token(
             a.token_file.as_deref(),
             env,
-            a.token_stdin.then_some(&mut stdin as &mut dyn std::io::Read),
+            a.token_stdin
+                .then_some(&mut stdin as &mut dyn std::io::Read),
         )?)
     } else if a.conn.dry_run {
         // a placeholder: the dry run shows that a token would travel on stdin, never a real one
         Some("fvjt_dry-run-placeholder".to_owned())
     } else {
         let o = operator_token(a.operator.operator_token_file.as_deref())?;
-        let t = create_token(&central_ctl, &o, a.token_ttl, Some(targets.len() as u32), None, "cluster add").await?;
+        let t = create_token(
+            &central_ctl,
+            &o,
+            a.token_ttl,
+            Some(targets.len() as u32),
+            None,
+            "cluster add",
+        )
+        .await?;
         let s = t.token.clone();
         minted = Some(t);
         op = Some(o);
@@ -1004,7 +1161,9 @@ async fn run_add(a: AddArgs) -> Result<()> {
     let tr = transport(&a.conn, inv.as_ref());
     let name = a.name.clone();
     let rs: Vec<HostResult> = tokio::task::block_in_place(|| {
-        par_map(&targets, jobs(&a.conn), |t| add_host(tr.as_ref(), t, &s, name.as_deref()))
+        par_map(&targets, jobs(&a.conn), |t| {
+            add_host(tr.as_ref(), t, &s, name.as_deref())
+        })
     });
     if a.conn.dry_run {
         eprintln!("# dry run: nothing was sent to any host. Each command below is what would run.");
@@ -1017,16 +1176,29 @@ async fn run_add(a: AddArgs) -> Result<()> {
     }
     // a minted token is only good for these hosts: revoke it now, whatever happened
     if let (Some(t), Some(o)) = (&minted, &op) {
-        let _ = fleet_client::call(&central_ctl, Some(o), reqwest::Method::DELETE, &format!("/fleet/enroll/tokens/{}", t.id), None).await;
+        let _ = fleet_client::call(
+            &central_ctl,
+            Some(o),
+            reqwest::Method::DELETE,
+            &format!("/fleet/enroll/tokens/{}", t.id),
+            None,
+        )
+        .await;
     }
     let mut rs = rs;
     if a.wait > 0
         && let Some(o) = &op
     {
         for (r, t) in rs.iter_mut().zip(&targets) {
-            if r.ok && !wait_node_ready(&central_ctl, o, name.as_deref().unwrap_or(&t.name), a.wait).await? {
+            if r.ok
+                && !wait_node_ready(&central_ctl, o, name.as_deref().unwrap_or(&t.name), a.wait)
+                    .await?
+            {
                 r.ok = false;
-                r.error = Some(format!("joined, but not healthy in central within {}s: fluxctl cluster nodes", a.wait));
+                r.error = Some(format!(
+                    "joined, but not healthy in central within {}s: fluxctl cluster nodes",
+                    a.wait
+                ));
             }
         }
     }
@@ -1034,7 +1206,14 @@ async fn run_add(a: AddArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rs)?);
     } else {
         for r in &rs {
-            let state = if r.ok { "Ready".to_owned() } else { format!("FAILED: {}", scrub(r.error.as_deref().unwrap_or(""), s.token.as_ref())) };
+            let state = if r.ok {
+                "Ready".to_owned()
+            } else {
+                format!(
+                    "FAILED: {}",
+                    scrub(r.error.as_deref().unwrap_or(""), s.token.as_ref())
+                )
+            };
             println!("{:<28} {}", r.host, state);
         }
     }
@@ -1043,13 +1222,19 @@ async fn run_add(a: AddArgs) -> Result<()> {
 
 fn run_k3s(k: K3sArgs) -> Result<()> {
     if k.hosts.is_empty() {
-        let st = std::process::Command::new(std::env::current_exe()?).args(["kube", "up"]).status()?;
+        let st = std::process::Command::new(std::env::current_exe()?)
+            .args(["kube", "up"])
+            .status()?;
         if !st.success() {
             bail!("fluxctl kube up failed; the cluster itself is unaffected");
         }
         return Ok(());
     }
-    let which = Which { hosts: k.hosts.clone(), inventory: None, all: false };
+    let which = Which {
+        hosts: k.hosts.clone(),
+        inventory: None,
+        all: false,
+    };
     let (targets, inv) = resolve(&which, &k.conn)?;
     let tr = transport(&k.conn, inv.as_ref());
     let script = sh_c(&remote::k3s_script());
@@ -1057,14 +1242,26 @@ fn run_k3s(k: K3sArgs) -> Result<()> {
         let r = blank(t);
         match tr.run(t, &script, None) {
             Ok(o) if o.ok() => HostResult { ok: true, ..r },
-            Ok(o) => fail(r, crate::mac_fleet::last_lines(&format!("{}\n{}", o.stdout, o.stderr), 3)),
+            Ok(o) => fail(
+                r,
+                crate::mac_fleet::last_lines(&format!("{}\n{}", o.stdout, o.stderr), 3),
+            ),
             Err(e) => fail(r, format!("{e:#}")),
         }
     });
     for r in &rs {
-        println!("{:<28} {}", r.host, if r.ok { "k3s add-on started".into() } else { format!("FAILED: {}", r.error.clone().unwrap_or_default()) });
+        println!(
+            "{:<28} {}",
+            r.host,
+            if r.ok {
+                "k3s add-on started".into()
+            } else {
+                format!("FAILED: {}", r.error.clone().unwrap_or_default())
+            }
+        );
     }
-    finish(&rs, "k3s add-on").map_err(|e| anyhow::anyhow!("{}", e.to_string().replace("Macs", "hosts")))
+    finish(&rs, "k3s add-on")
+        .map_err(|e| anyhow::anyhow!("{}", e.to_string().replace("Macs", "hosts")))
 }
 
 // ---- self-test --------------------------------------------------------------------------------------------------------
@@ -1092,16 +1289,29 @@ pub fn selftest_hint(output: &str) -> &'static str {
 }
 
 pub fn default_image(cache: &Path, arch: &str) -> PathBuf {
-    let a = if arch == "aarch64" || arch == "arm64" { "arm64" } else { "amd64" };
+    let a = if arch == "aarch64" || arch == "arm64" {
+        "arm64"
+    } else {
+        "amd64"
+    };
     cache.join(format!("fluxvm/images/debian-13-genericcloud-{a}.qcow2"))
 }
 
 fn run_selftest(a: SelftestArgs) -> Result<()> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".cache"));
-    let image = a.image.unwrap_or_else(|| default_image(&cache, std::env::consts::ARCH));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"));
+    let image = a
+        .image
+        .unwrap_or_else(|| default_image(&cache, std::env::consts::ARCH));
     if !image.is_file() {
-        println!("SELF-TEST FAIL\nFix: {} is missing: run the installer again (it downloads and verifies Debian 13) or pass --image.", image.display());
+        println!(
+            "SELF-TEST FAIL\nFix: {} is missing: run the installer again (it downloads and verifies Debian 13) or pass --image.",
+            image.display()
+        );
         bail!("self-test failed");
     }
     let cfg = a
@@ -1115,15 +1325,41 @@ fn run_selftest(a: SelftestArgs) -> Result<()> {
     if let Some(c) = &cfg {
         cmd.arg("--config").arg(c);
     }
-    cmd.args(["run"]).arg(&image).args(["--cpus", "1", "--memory-mib", "512", "--", "sh", "-c", "echo fluxvm-selftest-$((6*7))"]);
-    let out = crate::mac_fleet_timed::run_with_timeout(cmd, None, Some(std::time::Duration::from_secs(a.timeout)), "fluxctl run")?;
+    cmd.args(["run"]).arg(&image).args([
+        "--cpus",
+        "1",
+        "--memory-mib",
+        "512",
+        "--",
+        "sh",
+        "-c",
+        "echo fluxvm-selftest-$((6*7))",
+    ]);
+    let out = crate::mac_fleet_timed::run_with_timeout(
+        cmd,
+        None,
+        Some(std::time::Duration::from_secs(a.timeout)),
+        "fluxctl run",
+    )?;
     let text = format!("{}\n{}", out.stdout, out.stderr);
     if text.contains("fluxvm-selftest-42") {
         println!("SELF-TEST PASS: a VM booted, ran a command and was deleted.");
         Ok(())
     } else {
-        let tail: Vec<&str> = text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
-        println!("SELF-TEST FAIL (exit {})\n{}\nFix: {}", out.code, tail.join("\n"), selftest_hint(&text));
+        let tail: Vec<&str> = text
+            .lines()
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        println!(
+            "SELF-TEST FAIL (exit {})\n{}\nFix: {}",
+            out.code,
+            tail.join("\n"),
+            selftest_hint(&text)
+        );
         bail!("self-test failed")
     }
 }
@@ -1131,47 +1367,78 @@ fn run_selftest(a: SelftestArgs) -> Result<()> {
 #[cfg(target_os = "macos")]
 async fn mac_init_finish(a: &InitArgs) -> Result<()> {
     let central = format!("http://127.0.0.1:{}", a.port);
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     let tokf = home.join("Library/Application Support/FluxVM/central/operator-token");
     let mut op = None;
     for _ in 0..30 {
-        if let Ok(s) = std::fs::read_to_string(&tokf) && !s.trim().is_empty() {
+        if let Ok(s) = std::fs::read_to_string(&tokf)
+            && !s.trim().is_empty()
+        {
             op = Some(s.trim().to_owned());
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    let op = op.context("central did not make its operator token within 30s: see ~/Library/Logs/fluxvm-central.log")?;
+    let op = op.context(
+        "central did not make its operator token within 30s: see ~/Library/Logs/fluxvm-central.log",
+    )?;
     let t = create_token(&central, &op, a.token_ttl, None, None, "cluster init").await?;
     let out = home.join(".config/fluxvm/join.token");
     write_secret_file(&out, &t.token)?;
-    let public = a.public_url.clone().unwrap_or_else(|| format!("http://{}:{}", local_host(), a.port));
+    let public = a
+        .public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}:{}", local_host(), a.port));
     let literal = std::io::stdout().is_terminal().then_some(t.token.as_str());
-    println!("\n==> FluxVM server is Ready.\n    Central:   {public}\n    Dashboard: http://127.0.0.1:{}/console/  (over ssh: ssh -L {0}:127.0.0.1:{0} you@this-mac)\n", a.port);
-    println!("    Add a machine:\n\n      {}\n\n    The token is also in {} (mode 0600).", join_command(&public, literal, &out.display().to_string()), out.display());
+    println!(
+        "\n==> FluxVM server is Ready.\n    Central:   {public}\n    Dashboard: http://127.0.0.1:{}/console/  (over ssh: ssh -L {0}:127.0.0.1:{0} you@this-mac)\n",
+        a.port
+    );
+    println!(
+        "    Add a machine:\n\n      {}\n\n    The token is also in {} (mode 0600).",
+        join_command(&public, literal, &out.display().to_string()),
+        out.display()
+    );
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn local_host() -> String {
-    let n = std::process::Command::new("hostname").output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+    let n = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
     let n = n.trim();
-    if n.is_empty() { "127.0.0.1".into() } else { n.to_owned() }
+    if n.is_empty() {
+        "127.0.0.1".into()
+    } else {
+        n.to_owned()
+    }
 }
 
 #[cfg(target_os = "macos")]
 async fn mac_join_wait(a: &JoinArgs) -> Result<()> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     let cred = home.join("Library/Application Support/FluxVM/agent/node-credential");
     for _ in 0..60 {
         if cred.is_file() {
             let _ = std::fs::remove_file(home.join(".config/fluxvm/agent.token"));
-            println!("==> {} is enrolled; the join token was removed from this Mac. On the server: fluxctl cluster nodes", a.name.clone().unwrap_or_else(default_node_name));
+            println!(
+                "==> {} is enrolled; the join token was removed from this Mac. On the server: fluxctl cluster nodes",
+                a.name.clone().unwrap_or_else(default_node_name)
+            );
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
-    bail!("the node did not enroll within 2 minutes: see ~/Library/Logs/fluxvm-agent.log (the token may have expired: make a new one with fluxctl cluster token create)")
+    bail!(
+        "the node did not enroll within 2 minutes: see ~/Library/Logs/fluxvm-agent.log (the token may have expired: make a new one with fluxctl cluster token create)"
+    )
 }
 
 #[cfg(test)]
@@ -1196,7 +1463,11 @@ mod tests {
 
     #[test]
     fn the_join_command_has_the_url_and_never_both_token_forms() {
-        let lit = join_command("http://s:7799", Some("fvjt_a.b"), "~/.config/fluxvm/join.token");
+        let lit = join_command(
+            "http://s:7799",
+            Some("fvjt_a.b"),
+            "~/.config/fluxvm/join.token",
+        );
         assert!(lit.ends_with("bash -s -- --join http://s:7799"));
         assert!(lit.contains("FLUXVM_TOKEN=fvjt_a.b bash"));
         let f = join_command("http://s:7799", None, "~/.config/fluxvm/join.token");
@@ -1222,19 +1493,46 @@ mod tests {
         let v = installer_args_join(&a);
         assert_eq!(v[..3], ["--skip-download", "--join", "http://s:7799"]);
         assert!(v.windows(2).any(|w| w == ["--token-file", "/t/tok"]));
-        assert!(v.contains(&"--with-k3s".to_owned()) && v.contains(&"--yes".to_owned()) && v.contains(&"--no-selftest".to_owned()));
+        assert!(
+            v.contains(&"--with-k3s".to_owned())
+                && v.contains(&"--yes".to_owned())
+                && v.contains(&"--no-selftest".to_owned())
+        );
         assert!(!v.iter().any(|x| x.starts_with("fvjt_")));
-        let i = InitArgs { port: 7800, public_url: Some("http://x:7800".into()), token_ttl: 600, with_k3s: false, yes: true, no_deps: false, no_selftest: false, no_image: false, dry_run: false };
+        let i = InitArgs {
+            port: 7800,
+            public_url: Some("http://x:7800".into()),
+            token_ttl: 600,
+            with_k3s: false,
+            yes: true,
+            no_deps: false,
+            no_selftest: false,
+            no_image: false,
+            dry_run: false,
+        };
         let v = installer_args_init(&i);
         assert_eq!(v[1], "--server");
-        assert!(v.windows(2).any(|w| w == ["--port", "7800"]) && v.windows(2).any(|w| w == ["--token-ttl", "600"]));
+        assert!(
+            v.windows(2).any(|w| w == ["--port", "7800"])
+                && v.windows(2).any(|w| w == ["--token-ttl", "600"])
+        );
         assert!(v.windows(2).any(|w| w == ["--public-url", "http://x:7800"]));
     }
 
     #[test]
     fn the_central_service_has_no_token_in_its_command_line() {
         let v = central_args(Path::new("/opt/fluxvm-agent"), 7799, Path::new("/s"));
-        assert_eq!(v, ["/opt/fluxvm-agent", "central", "--listen", "0.0.0.0:7799", "--state-dir", "/s"]);
+        assert_eq!(
+            v,
+            [
+                "/opt/fluxvm-agent",
+                "central",
+                "--listen",
+                "0.0.0.0:7799",
+                "--state-dir",
+                "/s"
+            ]
+        );
         assert!(!v.iter().any(|a| a.contains("token")));
     }
 
@@ -1246,9 +1544,24 @@ mod tests {
         let c = d.path().join("c");
         std::fs::write(&c, "from-central\n").unwrap();
         let cands = vec![d.path().join("missing"), c];
-        assert_eq!(resolve_operator_token(Some(&f), Some("env"), &cands).unwrap().as_deref(), Some("from-file"));
-        assert_eq!(resolve_operator_token(None, Some(" env "), &cands).unwrap().as_deref(), Some("env"));
-        assert_eq!(resolve_operator_token(None, None, &cands).unwrap().as_deref(), Some("from-central"));
+        assert_eq!(
+            resolve_operator_token(Some(&f), Some("env"), &cands)
+                .unwrap()
+                .as_deref(),
+            Some("from-file")
+        );
+        assert_eq!(
+            resolve_operator_token(None, Some(" env "), &cands)
+                .unwrap()
+                .as_deref(),
+            Some("env")
+        );
+        assert_eq!(
+            resolve_operator_token(None, None, &cands)
+                .unwrap()
+                .as_deref(),
+            Some("from-central")
+        );
         assert_eq!(resolve_operator_token(None, Some("  "), &[]).unwrap(), None);
         assert!(resolve_operator_token(Some(&d.path().join("nope")), None, &[]).is_err());
         let e = d.path().join("empty");
@@ -1258,16 +1571,35 @@ mod tests {
 
     #[test]
     fn a_join_token_is_checked_and_an_operator_token_is_refused() {
-        assert_eq!(read_join_token(None, Some(" fvjt_ab.cd\n"), None).unwrap(), "fvjt_ab.cd");
+        assert_eq!(
+            read_join_token(None, Some(" fvjt_ab.cd\n"), None).unwrap(),
+            "fvjt_ab.cd"
+        );
         let mut s: &[u8] = b"fvjt_x.y\n";
-        assert_eq!(read_join_token(None, None, Some(&mut s)).unwrap(), "fvjt_x.y");
-        assert!(read_join_token(None, Some("operatorsecret"), None).unwrap_err().to_string().contains("not a join token"));
-        assert!(read_join_token(None, None, None).unwrap_err().to_string().contains("never an argument"));
+        assert_eq!(
+            read_join_token(None, None, Some(&mut s)).unwrap(),
+            "fvjt_x.y"
+        );
+        assert!(
+            read_join_token(None, Some("operatorsecret"), None)
+                .unwrap_err()
+                .to_string()
+                .contains("not a join token")
+        );
+        assert!(
+            read_join_token(None, None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("never an argument")
+        );
         assert!(read_join_token(None, Some("fvjt_a b"), None).is_err());
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("tok");
         std::fs::write(&f, "fvjt_file.tok\n").unwrap();
-        assert_eq!(read_join_token(Some(&f), Some("fvjt_env"), None).unwrap(), "fvjt_file.tok");
+        assert_eq!(
+            read_join_token(Some(&f), Some("fvjt_env"), None).unwrap(),
+            "fvjt_file.tok"
+        );
     }
 
     #[test]
@@ -1276,7 +1608,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("sub/join.token");
         write_secret_file(&p, "fvjt_x").unwrap();
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "fvjt_x\n");
         assert!(!p.with_extension("new").exists());
     }
@@ -1287,11 +1622,20 @@ mod tests {
             {"name": "a", "healthy": true, "cordoned": false, "vm_count": 2, "vcpus_total": 8, "memory_mib_total": 16384, "labels": {"zone": "lab"}, "last_seen": "2026-01-01T00:00:10Z"},
             {"name": "b", "healthy": false, "cordoned": true, "vm_count": 0, "vcpus_total": 4, "memory_mib_total": 8192, "labels": {}, "last_seen": "2026-01-01T00:00:00Z"}
         ]});
-        let enrolled = json!({"items": [{"name": "a", "revoked": false}, {"name": "b", "revoked": true}]});
-        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:40Z").unwrap().timestamp();
+        let enrolled =
+            json!({"items": [{"name": "a", "revoked": false}, {"name": "b", "revoked": true}]});
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:40Z")
+            .unwrap()
+            .timestamp();
         let t = render_nodes(&list, &enrolled, now);
         let a = t.lines().find(|l| l.starts_with('a')).unwrap();
-        assert!(a.contains("Ready") && a.contains("enrolled") && a.contains("zone=lab") && a.contains("30s"), "{a}");
+        assert!(
+            a.contains("Ready")
+                && a.contains("enrolled")
+                && a.contains("zone=lab")
+                && a.contains("30s"),
+            "{a}"
+        );
         let b = t.lines().find(|l| l.starts_with('b')).unwrap();
         assert!(b.contains("NotReady") && b.contains("fleet-token"), "{b}");
         assert!(render_nodes(&json!({"items": []}), &Value::Null, 0).contains("No nodes yet"));
@@ -1307,8 +1651,14 @@ mod tests {
 
     #[test]
     fn the_hint_names_the_kvm_fix() {
-        assert!(selftest_hint("qemu: Could not access KVM kernel module: Permission denied /dev/kvm").contains("usermod -aG kvm"));
-        assert!(selftest_hint("still waiting for the guest's address (60s)…").contains("user-mode network"));
+        assert!(
+            selftest_hint("qemu: Could not access KVM kernel module: Permission denied /dev/kvm")
+                .contains("usermod -aG kvm")
+        );
+        assert!(
+            selftest_hint("still waiting for the guest's address (60s)…")
+                .contains("user-mode network")
+        );
         assert!(selftest_hint("cloud-localds: not found").contains("cloud-image-utils"));
         assert!(selftest_hint("mkdir /run/fluxvm: Permission denied").contains("FLUXVM_CONFIG"));
         assert!(selftest_hint("weird").contains("fluxctl doctor"));
@@ -1316,7 +1666,11 @@ mod tests {
             default_image(Path::new("/c"), "x86_64"),
             PathBuf::from("/c/fluxvm/images/debian-13-genericcloud-amd64.qcow2")
         );
-        assert!(default_image(Path::new("/c"), "aarch64").to_string_lossy().ends_with("arm64.qcow2"));
+        assert!(
+            default_image(Path::new("/c"), "aarch64")
+                .to_string_lossy()
+                .ends_with("arm64.qcow2")
+        );
     }
 
     // ---- the API, against a real central (the same one the fleet tests use) ------------------------------------------
@@ -1325,20 +1679,42 @@ mod tests {
     async fn tokens_nodes_and_remove_work_against_a_real_central() {
         let (url, _d) = spawn_central("op-secret").await;
         // create, list, revoke
-        let t = create_token(&url, "op-secret", 600, Some(2), Some("w-*"), "test").await.unwrap();
+        let t = create_token(&url, "op-secret", 600, Some(2), Some("w-*"), "test")
+            .await
+            .unwrap();
         assert!(t.token.starts_with("fvjt_"));
-        let list = fleet_client::call(&url, Some("op-secret"), reqwest::Method::GET, "/fleet/enroll/tokens", None).await.unwrap();
+        let list = fleet_client::call(
+            &url,
+            Some("op-secret"),
+            reqwest::Method::GET,
+            "/fleet/enroll/tokens",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(list["items"][0]["id"], json!(t.id));
-        assert!(!list.to_string().contains(&t.token), "the list never has the secret");
+        assert!(
+            !list.to_string().contains(&t.token),
+            "the list never has the secret"
+        );
         // a wrong operator token is refused
-        assert!(create_token(&url, "nope", 600, None, None, "").await.is_err());
+        assert!(
+            create_token(&url, "nope", 600, None, None, "")
+                .await
+                .is_err()
+        );
         // a node enrolls with the token, then registers with its credential
         let http = reqwest::Client::new();
         let r: Value = http
             .post(format!("{url}/fleet/enroll"))
             .bearer_auth(&t.token)
             .json(&json!({"name": "w-1", "node_id": "a".repeat(32)}))
-            .send().await.unwrap().json().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let cred = r["credential"].as_str().unwrap().to_owned();
         let reg = http
             .post(format!("{url}/fleet/register"))
@@ -1347,26 +1723,79 @@ mod tests {
             .send().await.unwrap();
         assert!(reg.status().is_success());
         // the node's own credential check (what install.sh waits on) is accepted
-        let ov = http.get(format!("{url}/fleet/nodes/w-1/overlays")).bearer_auth(&cred).send().await.unwrap();
+        let ov = http
+            .get(format!("{url}/fleet/nodes/w-1/overlays"))
+            .bearer_auth(&cred)
+            .send()
+            .await
+            .unwrap();
         assert!(ov.status().is_success(), "{}", ov.status());
         // the operator sees it as a Ready, enrolled node
-        let nodes = fleet_client::list_nodes(&url, Some("op-secret")).await.unwrap();
-        let enrolled = fleet_client::call(&url, Some("op-secret"), reqwest::Method::GET, "/fleet/enroll/nodes", None).await.unwrap();
+        let nodes = fleet_client::list_nodes(&url, Some("op-secret"))
+            .await
+            .unwrap();
+        let enrolled = fleet_client::call(
+            &url,
+            Some("op-secret"),
+            reqwest::Method::GET,
+            "/fleet/enroll/nodes",
+            None,
+        )
+        .await
+        .unwrap();
         let table = render_nodes(&nodes, &enrolled, now());
-        assert!(table.contains("w-1") && table.contains("enrolled") && table.contains("zone=lab"), "{table}");
+        assert!(
+            table.contains("w-1") && table.contains("enrolled") && table.contains("zone=lab"),
+            "{table}"
+        );
         assert!(wait_node_ready(&url, "op-secret", "w-1", 5).await.unwrap());
-        assert!(!wait_node_ready(&url, "op-secret", "nobody", 0).await.unwrap());
+        assert!(
+            !wait_node_ready(&url, "op-secret", "nobody", 0)
+                .await
+                .unwrap()
+        );
         // the name pattern holds
-        let bad = http.post(format!("{url}/fleet/enroll")).bearer_auth(&t.token).json(&json!({"name": "other", "node_id": "b".repeat(32)})).send().await.unwrap();
+        let bad = http
+            .post(format!("{url}/fleet/enroll"))
+            .bearer_auth(&t.token)
+            .json(&json!({"name": "other", "node_id": "b".repeat(32)}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(bad.status(), 403);
         // revoke the token: no new nodes
-        fleet_client::call(&url, Some("op-secret"), reqwest::Method::DELETE, &format!("/fleet/enroll/tokens/{}", t.id), None).await.unwrap();
-        let after = http.post(format!("{url}/fleet/enroll")).bearer_auth(&t.token).json(&json!({"name": "w-2", "node_id": "c".repeat(32)})).send().await.unwrap();
+        fleet_client::call(
+            &url,
+            Some("op-secret"),
+            reqwest::Method::DELETE,
+            &format!("/fleet/enroll/tokens/{}", t.id),
+            None,
+        )
+        .await
+        .unwrap();
+        let after = http
+            .post(format!("{url}/fleet/enroll"))
+            .bearer_auth(&t.token)
+            .json(&json!({"name": "w-2", "node_id": "c".repeat(32)}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(after.status(), 401);
         // remove: revoke the credential, then deregister (a healthy node is refused until it has stopped)
-        fleet_client::call(&url, Some("op-secret"), reqwest::Method::POST, "/fleet/nodes/w-1/revoke", None).await.unwrap();
+        fleet_client::call(
+            &url,
+            Some("op-secret"),
+            reqwest::Method::POST,
+            "/fleet/nodes/w-1/revoke",
+            None,
+        )
+        .await
+        .unwrap();
         let denied = http.post(format!("{url}/fleet/register")).bearer_auth(&cred).json(&json!({"name": "w-1", "fluxvm_url": "http://10.0.0.5:7788", "vcpus_total": 8, "memory_mib_total": 1, "vm_count": 0})).send().await.unwrap();
-        assert!(denied.status().is_client_error(), "a revoked credential stops registering");
+        assert!(
+            denied.status().is_client_error(),
+            "a revoked credential stops registering"
+        );
     }
 
     // ---- add over ssh, against the fake transport ---------------------------------------------------------------------
@@ -1393,35 +1822,72 @@ mod tests {
     fn a_fresh_host_gets_the_installer_with_the_token_on_stdin_only() {
         let tr = FakeTransport::new(|_, cmd| if is_probe(cmd) { ok(FRESH) } else { ok("done") });
         let t = Target::parse("sus@10.0.0.9").unwrap();
-        let s = AddSettings { join: base(), token: Some(Secret::new(b"fvjt_SECRET.tok".to_vec())) };
+        let s = AddSettings {
+            join: base(),
+            token: Some(Secret::new(b"fvjt_SECRET.tok".to_vec())),
+        };
         let r = add_host(&tr, &t, &s, None);
         assert!(r.ok, "{:?}", r.error);
         let calls = tr.calls_for("10.0.0.9");
         assert_eq!(calls.len(), 2);
         assert!(calls[0].stdin.is_none());
         assert_eq!(calls[1].stdin.as_deref(), Some(&b"fvjt_SECRET.tok"[..]));
-        assert!(calls.iter().all(|c| !c.command.contains("fvjt_SECRET")), "the token is not in any command");
+        assert!(
+            calls.iter().all(|c| !c.command.contains("fvjt_SECRET")),
+            "the token is not in any command"
+        );
         assert!(calls[1].command.contains("--node-name") && calls[1].command.contains("10-0-0-9"));
-        assert!(calls[1].command.contains("http://10.0.0.9:7788"), "{{host}} is replaced");
+        assert!(
+            calls[1].command.contains("http://10.0.0.9:7788"),
+            "{{host}} is replaced"
+        );
         assert!(calls[1].command.contains("zone=lab"));
     }
 
     #[test]
     fn a_node_that_is_already_in_is_left_alone_and_needs_no_token() {
         let tr = FakeTransport::new(|_, cmd| {
-            if is_probe(cmd) { ok(&FRESH.replace("agent_active=no", "agent_active=yes").replace("enrolled=no", "enrolled=yes")) } else { ok("") }
+            if is_probe(cmd) {
+                ok(&FRESH
+                    .replace("agent_active=no", "agent_active=yes")
+                    .replace("enrolled=no", "enrolled=yes"))
+            } else {
+                ok("")
+            }
         });
         let t = Target::parse("sus@10.0.0.9").unwrap();
-        let r = add_host(&tr, &t, &AddSettings { join: base(), token: None }, None);
+        let r = add_host(
+            &tr,
+            &t,
+            &AddSettings {
+                join: base(),
+                token: None,
+            },
+            None,
+        );
         assert!(r.ok, "{:?}", r.error);
         assert_eq!(tr.calls_for("10.0.0.9").len(), 1, "only the probe ran");
     }
 
     #[test]
     fn preflight_stops_before_anything_is_installed() {
-        let tr = FakeTransport::new(|_, cmd| if is_probe(cmd) { ok(&FRESH.replace("passwordless", "password")) } else { ok("") });
+        let tr = FakeTransport::new(|_, cmd| {
+            if is_probe(cmd) {
+                ok(&FRESH.replace("passwordless", "password"))
+            } else {
+                ok("")
+            }
+        });
         let t = Target::parse("sus@10.0.0.9").unwrap();
-        let r = add_host(&tr, &t, &AddSettings { join: base(), token: Some(Secret::new(b"fvjt_x.y".to_vec())) }, None);
+        let r = add_host(
+            &tr,
+            &t,
+            &AddSettings {
+                join: base(),
+                token: Some(Secret::new(b"fvjt_x.y".to_vec())),
+            },
+            None,
+        );
         assert!(!r.ok);
         assert!(r.error.as_deref().unwrap().contains("NOPASSWD"));
         assert_eq!(tr.calls_for("10.0.0.9").len(), 1);
@@ -1430,11 +1896,19 @@ mod tests {
     #[test]
     fn an_unreachable_or_unverified_host_says_why_and_others_go_on() {
         let tr = FakeTransport::new(|t, cmd| {
-            if t.host == "10.0.0.8" { return failed(255, "Host key verification failed."); }
+            if t.host == "10.0.0.8" {
+                return failed(255, "Host key verification failed.");
+            }
             if is_probe(cmd) { ok(FRESH) } else { ok("done") }
         });
-        let s = AddSettings { join: base(), token: Some(Secret::new(b"fvjt_x.y".to_vec())) };
-        let targets = vec![Target::parse("a@10.0.0.8").unwrap(), Target::parse("a@10.0.0.9").unwrap()];
+        let s = AddSettings {
+            join: base(),
+            token: Some(Secret::new(b"fvjt_x.y".to_vec())),
+        };
+        let targets = vec![
+            Target::parse("a@10.0.0.8").unwrap(),
+            Target::parse("a@10.0.0.9").unwrap(),
+        ];
         let rs = par_map(&targets, 2, |t| add_host(&tr, t, &s, None));
         assert!(!rs[0].ok && rs[0].error.as_deref().unwrap().contains("known_hosts"));
         assert!(rs[1].ok);
@@ -1442,9 +1916,23 @@ mod tests {
 
     #[test]
     fn a_failing_install_step_never_shows_the_token() {
-        let tr = FakeTransport::new(|_, cmd| if is_probe(cmd) { ok(FRESH) } else { failed(1, "install.sh: bad token fvjt_SECRET.tok") });
+        let tr = FakeTransport::new(|_, cmd| {
+            if is_probe(cmd) {
+                ok(FRESH)
+            } else {
+                failed(1, "install.sh: bad token fvjt_SECRET.tok")
+            }
+        });
         let t = Target::parse("sus@10.0.0.9").unwrap();
-        let r = add_host(&tr, &t, &AddSettings { join: base(), token: Some(Secret::new(b"fvjt_SECRET.tok".to_vec())) }, None);
+        let r = add_host(
+            &tr,
+            &t,
+            &AddSettings {
+                join: base(),
+                token: Some(Secret::new(b"fvjt_SECRET.tok".to_vec())),
+            },
+            None,
+        );
         assert!(!r.ok);
         assert!(!format!("{r:?}").contains("SECRET"));
     }
@@ -1453,11 +1941,21 @@ mod tests {
     fn a_dry_run_prints_the_ssh_lines_and_sends_nothing() {
         let dry = crate::mac_fleet_ssh::DryTransport::new(Default::default());
         let t = Target::parse("sus@10.0.0.9").unwrap();
-        let r = add_host(&dry, &t, &AddSettings { join: base(), token: Some(Secret::new(b"fvjt_x.y".to_vec())) }, None);
+        let r = add_host(
+            &dry,
+            &t,
+            &AddSettings {
+                join: base(),
+                token: Some(Secret::new(b"fvjt_x.y".to_vec())),
+            },
+            None,
+        );
         assert!(r.ok);
         let lines = dry.lines.lock().unwrap();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("StrictHostKeyChecking=yes") && lines[0].contains("BatchMode=yes"));
+        assert!(
+            lines[0].contains("StrictHostKeyChecking=yes") && lines[0].contains("BatchMode=yes")
+        );
         assert!(lines[1].contains("stdin: the join token"));
     }
 
@@ -1465,9 +1963,25 @@ mod tests {
     fn the_k3s_addon_is_a_step_only_for_a_node_that_is_already_in() {
         let mut b = base();
         b.with_k3s = true;
-        let tr = FakeTransport::new(|_, cmd| if is_probe(cmd) { ok(&FRESH.replace("agent_active=no", "agent_active=yes").replace("enrolled=no", "enrolled=yes")) } else { ok("") });
+        let tr = FakeTransport::new(|_, cmd| {
+            if is_probe(cmd) {
+                ok(&FRESH
+                    .replace("agent_active=no", "agent_active=yes")
+                    .replace("enrolled=no", "enrolled=yes"))
+            } else {
+                ok("")
+            }
+        });
         let t = Target::parse("sus@10.0.0.9").unwrap();
-        let r = add_host(&tr, &t, &AddSettings { join: b, token: None }, None);
+        let r = add_host(
+            &tr,
+            &t,
+            &AddSettings {
+                join: b,
+                token: None,
+            },
+            None,
+        );
         assert!(r.ok);
         let calls = tr.calls_for("10.0.0.9");
         assert_eq!(calls.len(), 2);

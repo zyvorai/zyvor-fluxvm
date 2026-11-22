@@ -27,7 +27,11 @@ pub struct RollOpts {
 
 impl Default for RollOpts {
     fn default() -> Self {
-        Self { drain_timeout: 3600, health_timeout: 300, poll: 10 }
+        Self {
+            drain_timeout: 3600,
+            health_timeout: 300,
+            poll: 10,
+        }
     }
 }
 
@@ -64,7 +68,12 @@ pub fn health_problem(r: &StatusRow, want: &str) -> Option<String> {
     None
 }
 
-fn wait_until(clock: &dyn Clock, timeout: u64, poll: u64, mut ready: impl FnMut() -> Option<String>) -> Result<(), String> {
+fn wait_until(
+    clock: &dyn Clock,
+    timeout: u64,
+    poll: u64,
+    mut ready: impl FnMut() -> Option<String>,
+) -> Result<(), String> {
     let start = clock.now();
     loop {
         let why = ready();
@@ -91,15 +100,27 @@ pub fn roll(
     for t in targets {
         let host = t.label();
         if stopped {
-            steps.push(RollStep { host, outcome: "skipped".into(), detail: "an earlier Mac failed".into(), drained: false });
+            steps.push(RollStep {
+                host,
+                outcome: "skipped".into(),
+                detail: "an earlier Mac failed".into(),
+                drained: false,
+            });
             continue;
         }
         let was_drained = FleetState::load(state_path)?.is_drained(&t.name);
         log(&format!("{host}: draining"));
         set_drain(state_path, std::slice::from_ref(&t.name), true, clock.now())?;
         let fail = |why: String, steps: &mut Vec<RollStep>| {
-            log(&format!("{host}: {why}; the roll stops here and this Mac stays drained"));
-            steps.push(RollStep { host: host.clone(), outcome: "failed".into(), detail: why, drained: true });
+            log(&format!(
+                "{host}: {why}; the roll stops here and this Mac stays drained"
+            ));
+            steps.push(RollStep {
+                host: host.clone(),
+                outcome: "failed".into(),
+                detail: why,
+                drained: true,
+            });
         };
         // 1. its VMs end
         let drained = wait_until(clock, opts.drain_timeout, opts.poll, || {
@@ -119,12 +140,20 @@ pub fn roll(
         log(&format!("{host}: upgrading to {}", install.version));
         let r: HostResult = upgrade_host(tr, t, install, false);
         if !r.ok {
-            fail(format!("upgrade failed: {}", r.error.unwrap_or_else(|| "see steps".into())), &mut steps);
+            fail(
+                format!(
+                    "upgrade failed: {}",
+                    r.error.unwrap_or_else(|| "see steps".into())
+                ),
+                &mut steps,
+            );
             stopped = true;
             continue;
         }
         // 3. health gate
-        let healthy = wait_until(clock, opts.health_timeout, opts.poll, || health_problem(&status_host(tr, t), &install.version));
+        let healthy = wait_until(clock, opts.health_timeout, opts.poll, || {
+            health_problem(&status_host(tr, t), &install.version)
+        });
         if let Err(e) = healthy {
             fail(format!("failed the health check: {e}"), &mut steps);
             stopped = true;
@@ -132,10 +161,27 @@ pub fn roll(
         }
         // 4. back into rotation
         if !was_drained {
-            set_drain(state_path, std::slice::from_ref(&t.name), false, clock.now())?;
+            set_drain(
+                state_path,
+                std::slice::from_ref(&t.name),
+                false,
+                clock.now(),
+            )?;
         }
-        log(&format!("{host}: upgraded and healthy{}", if was_drained { " (left drained, as it was before)" } else { ", resumed" }));
-        steps.push(RollStep { host, outcome: "upgraded".into(), detail: format!("now {}", install.version), drained: was_drained });
+        log(&format!(
+            "{host}: upgraded and healthy{}",
+            if was_drained {
+                " (left drained, as it was before)"
+            } else {
+                ", resumed"
+            }
+        ));
+        steps.push(RollStep {
+            host,
+            outcome: "upgraded".into(),
+            detail: format!("now {}", install.version),
+            drained: was_drained,
+        });
     }
     Ok(steps)
 }
@@ -145,7 +191,14 @@ pub fn render(steps: &[RollStep]) -> String {
         &["HOST", "RESULT", "DRAINED", "DETAIL"],
         &steps
             .iter()
-            .map(|s| vec![s.host.clone(), s.outcome.clone(), if s.drained { "yes" } else { "no" }.into(), s.detail.clone()])
+            .map(|s| {
+                vec![
+                    s.host.clone(),
+                    s.outcome.clone(),
+                    if s.drained { "yes" } else { "no" }.into(),
+                    s.detail.clone(),
+                ]
+            })
             .collect::<Vec<_>>(),
     )
 }
@@ -167,7 +220,15 @@ pub fn roll_cmd(
         return Ok(());
     }
     let state = crate::mac_fleet_sched::state_path()?;
-    let steps = roll(tr, targets, install, &state, &opts, &crate::mac_fleet_run::SystemClock, &|m| eprintln!("{m}"))?;
+    let steps = roll(
+        tr,
+        targets,
+        install,
+        &state,
+        &opts,
+        &crate::mac_fleet_run::SystemClock,
+        &|m| eprintln!("{m}"),
+    )?;
     if conn.json {
         println!("{}", serde_json::to_string_pretty(&steps)?);
     } else {
@@ -203,7 +264,12 @@ mod tests {
     }
 
     fn install() -> InstallSpec {
-        InstallSpec { version: "0.5.0".into(), sha256: None, release_base: "https://example.invalid".into(), via: Via::Release }
+        InstallSpec {
+            version: "0.5.0".into(),
+            sha256: None,
+            release_base: "https://example.invalid".into(),
+            via: Via::Release,
+        }
     }
 
     fn row(vms: &str, daemon: &str, version: &str) -> StatusRow {
@@ -224,15 +290,26 @@ mod tests {
     #[test]
     fn the_health_gate_names_what_is_wrong() {
         assert_eq!(health_problem(&row("0", "up", "0.5.0"), "v0.5.0"), None);
-        assert!(health_problem(&row("0", "down", "0.5.0"), "0.5.0").unwrap().contains("daemon is down"));
-        assert!(health_problem(&row("0", "up", "0.4.9"), "0.5.0").unwrap().contains("runs 0.4.9"));
+        assert!(
+            health_problem(&row("0", "down", "0.5.0"), "0.5.0")
+                .unwrap()
+                .contains("daemon is down")
+        );
+        assert!(
+            health_problem(&row("0", "up", "0.4.9"), "0.5.0")
+                .unwrap()
+                .contains("runs 0.4.9")
+        );
         let mut r = row("-", "-", "-");
         r.state = "unreachable".into();
         assert!(health_problem(&r, "0.5.0").is_some());
     }
 
     /// A Mac that reports `version` for status probes once it has been "upgraded" (a command mentioning `install`).
-    fn mac(version_after: &'static str, vms_before: u32) -> impl Fn(&Target, &str) -> crate::mac_fleet_ssh::ExecOut + Send + Sync {
+    fn mac(
+        version_after: &'static str,
+        vms_before: u32,
+    ) -> impl Fn(&Target, &str) -> crate::mac_fleet_ssh::ExecOut + Send + Sync {
         let upgraded = Mutex::new(false);
         let polls = Mutex::new(0u32);
         move |_, c| {
@@ -242,7 +319,9 @@ mod tests {
                 *p += 1;
                 let vms = if !up && *p <= vms_before { 1 } else { 0 };
                 let v = if up { version_after } else { "0.4.9" };
-                let items: Vec<String> = (0..vms).map(|_| r#"{"status":"running","request":{}}"#.to_owned()).collect();
+                let items: Vec<String> = (0..vms)
+                    .map(|_| r#"{"status":"running","request":{}}"#.to_owned())
+                    .collect();
                 ok(&format!(
                     "os=Darwin\narch=arm64\nmacos=15.1\nuser=admin\nconsole_user=admin\ndisk_free_gib=300\nfilevault=FileVault is Off.\nautologin=admin\nbrew=yes\nfluxctl_version={v}\nagent_binary=yes\ndaemon_loaded=yes\nagent_loaded=no\nkube_loaded=no\ndaemon_healthy=yes\nenrolled=no\nvms_json={{\"items\":[{}]}}\n",
                     items.join(",")
@@ -260,12 +339,31 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let state = d.path().join("s.json");
         let tr = FakeTransport::new(mac("0.5.0", 2));
-        let targets = vec![Target::parse("admin@a.local").unwrap(), Target::parse("admin@b.local").unwrap()];
+        let targets = vec![
+            Target::parse("admin@a.local").unwrap(),
+            Target::parse("admin@b.local").unwrap(),
+        ];
         let clock = FakeClock(AtomicU64::new(0));
         let logs = Mutex::new(vec![]);
         let log = |m: &str| logs.lock().unwrap().push(m.to_owned());
-        let steps = roll(&tr, &targets, &install(), &state, &RollOpts { drain_timeout: 100, health_timeout: 100, poll: 5 }, &clock, &log).unwrap();
-        assert_eq!(steps.iter().map(|s| s.outcome.as_str()).collect::<Vec<_>>(), ["upgraded", "upgraded"]);
+        let steps = roll(
+            &tr,
+            &targets,
+            &install(),
+            &state,
+            &RollOpts {
+                drain_timeout: 100,
+                health_timeout: 100,
+                poll: 5,
+            },
+            &clock,
+            &log,
+        )
+        .unwrap();
+        assert_eq!(
+            steps.iter().map(|s| s.outcome.as_str()).collect::<Vec<_>>(),
+            ["upgraded", "upgraded"]
+        );
         assert!(clock.now() > 0, "it waited for the VMs to end");
         // nothing is left drained
         assert!(FleetState::load(&state).unwrap().drained.is_empty());
@@ -282,13 +380,36 @@ mod tests {
         let state = d.path().join("s.json");
         // After the upgrade the daemon still reports the old version.
         let tr = FakeTransport::new(mac("0.4.9", 0));
-        let targets = vec![Target::parse("admin@a.local").unwrap(), Target::parse("admin@b.local").unwrap()];
+        let targets = vec![
+            Target::parse("admin@a.local").unwrap(),
+            Target::parse("admin@b.local").unwrap(),
+        ];
         let clock = FakeClock(AtomicU64::new(0));
-        let steps = roll(&tr, &targets, &install(), &state, &RollOpts { drain_timeout: 20, health_timeout: 20, poll: 5 }, &clock, &|_| {}).unwrap();
+        let steps = roll(
+            &tr,
+            &targets,
+            &install(),
+            &state,
+            &RollOpts {
+                drain_timeout: 20,
+                health_timeout: 20,
+                poll: 5,
+            },
+            &clock,
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(steps[0].outcome, "failed");
-        assert!(steps[0].detail.contains("health check"), "{}", steps[0].detail);
+        assert!(
+            steps[0].detail.contains("health check"),
+            "{}",
+            steps[0].detail
+        );
         assert_eq!(steps[1].outcome, "skipped");
-        assert!(tr.calls_for("b.local").is_empty(), "the second Mac is never touched");
+        assert!(
+            tr.calls_for("b.local").is_empty(),
+            "the second Mac is never touched"
+        );
         let st = FleetState::load(&state).unwrap();
         assert!(st.is_drained("a") && !st.is_drained("b"));
     }
@@ -300,9 +421,31 @@ mod tests {
         let tr = FakeTransport::new(mac("0.5.0", 1000));
         let targets = vec![Target::parse("admin@a.local").unwrap()];
         let clock = FakeClock(AtomicU64::new(0));
-        let steps = roll(&tr, &targets, &install(), &state, &RollOpts { drain_timeout: 30, health_timeout: 30, poll: 10 }, &clock, &|_| {}).unwrap();
-        assert!(steps[0].detail.contains("did not drain"), "{}", steps[0].detail);
-        assert!(!tr.calls_for("a.local").iter().any(|c| c.command.contains("install")), "no install ran");
+        let steps = roll(
+            &tr,
+            &targets,
+            &install(),
+            &state,
+            &RollOpts {
+                drain_timeout: 30,
+                health_timeout: 30,
+                poll: 10,
+            },
+            &clock,
+            &|_| {},
+        )
+        .unwrap();
+        assert!(
+            steps[0].detail.contains("did not drain"),
+            "{}",
+            steps[0].detail
+        );
+        assert!(
+            !tr.calls_for("a.local")
+                .iter()
+                .any(|c| c.command.contains("install")),
+            "no install ran"
+        );
     }
 
     #[test]
@@ -313,7 +456,16 @@ mod tests {
         let tr = FakeTransport::new(mac("0.5.0", 0));
         let targets = vec![Target::parse("admin@a.local").unwrap()];
         let clock = FakeClock(AtomicU64::new(0));
-        let steps = roll(&tr, &targets, &install(), &state, &RollOpts::default(), &clock, &|_| {}).unwrap();
+        let steps = roll(
+            &tr,
+            &targets,
+            &install(),
+            &state,
+            &RollOpts::default(),
+            &clock,
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(steps[0].outcome, "upgraded");
         assert!(FleetState::load(&state).unwrap().is_drained("a"));
     }

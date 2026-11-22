@@ -33,7 +33,14 @@ pub const CODES: &[MacCode] = &[
             "on a fleet, let the scheduler pick a free Mac: `fluxctl mac-fleet run -f hosts.yaml --template NAME:TAG -- CMD` (add `--queue-timeout 600` to wait for a slot)",
         ],
         aliases: &["slot-limit", "slots", "409"],
-        signatures: &["slot limit", "2 macos", "two macos", "already running 2", "macos guests at once", "409 conflict"],
+        signatures: &[
+            "slot limit",
+            "2 macos",
+            "two macos",
+            "already running 2",
+            "macos guests at once",
+            "409 conflict",
+        ],
     },
     MacCode {
         code: "MAC_SESSION_LOCKED",
@@ -49,7 +56,13 @@ pub const CODES: &[MacCode] = &[
             "check the state: `fluxctl mac doctor` (the login session row) or `fluxctl mac host headless-check`",
         ],
         aliases: &["session-locked", "locked", "503"],
-        signatures: &["screen is locked", "session is locked", "no unlocked", "cgssessionscreenislocked", "503 service unavailable"],
+        signatures: &[
+            "screen is locked",
+            "session is locked",
+            "no unlocked",
+            "cgssessionscreenislocked",
+            "503 service unavailable",
+        ],
     },
     MacCode {
         code: "SSH_HOSTKEY_MISMATCH",
@@ -66,7 +79,12 @@ pub const CODES: &[MacCode] = &[
             "key legitimately changed: remove the old entry with `ssh-keygen -R HOST`, then connect again (a changed key is never accepted automatically)",
         ],
         aliases: &["hostkey", "host-key", "host-key-mismatch", "known-hosts"],
-        signatures: &["host key verification failed", "remote host identification has changed", "host key mismatch", "no matching host key"],
+        signatures: &[
+            "host key verification failed",
+            "remote host identification has changed",
+            "host key mismatch",
+            "no matching host key",
+        ],
     },
     MacCode {
         code: "MAC_TEMPLATE_MISSING",
@@ -83,8 +101,20 @@ pub const CODES: &[MacCode] = &[
             "fleet: put it on every Mac, digest-verified: `fluxctl mac-fleet templates distribute -f hosts.yaml --template REG/REPO:TAG@sha256:HEX`",
             "the guided flow does this for you: `fluxctl mac quickstart`",
         ],
-        aliases: &["template-missing", "no-image", "missing-template", "image-not-found"],
-        signatures: &["no such image", "image not found", "not in the local store", "unknown image", "template not found", "is not in the store"],
+        aliases: &[
+            "template-missing",
+            "no-image",
+            "missing-template",
+            "image-not-found",
+        ],
+        signatures: &[
+            "no such image",
+            "image not found",
+            "not in the local store",
+            "unknown image",
+            "template not found",
+            "is not in the store",
+        ],
     },
     MacCode {
         code: "MAC_DISK_FULL",
@@ -102,7 +132,13 @@ pub const CODES: &[MacCode] = &[
             "k3s guest: give back freed space with `fluxctl kube trim`, or create it smaller with `kube up --disk-gib`",
         ],
         aliases: &["disk-full", "no-space", "enospc"],
-        signatures: &["no space left on device", "not enough free", "disk full", "enospc", "out of disk"],
+        signatures: &[
+            "no space left on device",
+            "not enough free",
+            "disk full",
+            "enospc",
+            "out of disk",
+        ],
     },
 ];
 
@@ -124,7 +160,10 @@ pub fn find(query: &str) -> Vec<&'static MacCode> {
         return exact;
     }
     if q.len() >= 4 {
-        return CODES.iter().filter(|c| c.code.contains(q.as_str())).collect();
+        return CODES
+            .iter()
+            .filter(|c| c.code.contains(q.as_str()))
+            .collect();
     }
     vec![]
 }
@@ -132,7 +171,9 @@ pub fn find(query: &str) -> Vec<&'static MacCode> {
 /// The code that explains an error message, matched on the text ssh, the daemon and fluxctl print.
 pub fn hint_for(message: &str) -> Option<&'static MacCode> {
     let m = message.to_ascii_lowercase();
-    CODES.iter().find(|c| c.signatures.iter().any(|s| m.contains(s)))
+    CODES
+        .iter()
+        .find(|c| c.signatures.iter().any(|s| m.contains(s)))
 }
 
 /// `explain MAC_SLOT_LIMIT` card text.
@@ -175,7 +216,11 @@ mod tests {
     #[test]
     fn every_code_has_cause_and_fix_and_is_found_by_name_and_aliases() {
         for c in CODES {
-            assert!(!c.causes.is_empty() && !c.fixes.is_empty() && !c.summary.is_empty(), "{}", c.code);
+            assert!(
+                !c.causes.is_empty() && !c.fixes.is_empty() && !c.summary.is_empty(),
+                "{}",
+                c.code
+            );
             assert_eq!(find(c.code)[0].code, c.code);
             for a in c.aliases.iter().filter(|a| a.parse::<u16>().is_err()) {
                 assert_eq!(find(a)[0].code, c.code, "{a}");
@@ -195,10 +240,16 @@ mod tests {
     fn messages_map_to_codes() {
         let cases = [
             ("Host key verification failed.", "SSH_HOSTKEY_MISMATCH"),
-            ("@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @", "SSH_HOSTKEY_MISMATCH"),
+            (
+                "@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @",
+                "SSH_HOSTKEY_MISMATCH",
+            ),
             ("write: No space left on device", "MAC_DISK_FULL"),
             ("Error: no such image macos-x:1", "MAC_TEMPLATE_MISSING"),
-            ("the Mac's screen is locked, so snapshot restores fail", "MAC_SESSION_LOCKED"),
+            (
+                "the Mac's screen is locked, so snapshot restores fail",
+                "MAC_SESSION_LOCKED",
+            ),
             ("both macOS slots: slot limit reached", "MAC_SLOT_LIMIT"),
         ];
         for (m, want) in cases {

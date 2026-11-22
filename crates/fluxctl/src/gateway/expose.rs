@@ -50,8 +50,14 @@ extern "C" fn on_term(_sig: libc::c_int) {
 fn install_term_flag() {
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
     unsafe {
-        libc::signal(libc::SIGTERM, on_term as extern "C" fn(libc::c_int) as libc::sighandler_t);
-        libc::signal(libc::SIGHUP, on_term as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            on_term as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            on_term as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
     }
 }
 
@@ -60,7 +66,10 @@ fn install_term_flag() {
 pub enum ForwardEnd {
     /// Ctrl-C or SIGTERM: the user stopped it.
     Interrupted,
-    Exited { code: i32, ran: Duration },
+    Exited {
+        code: i32,
+        ran: Duration,
+    },
 }
 
 /// What touches the terminal and long-running processes.
@@ -462,22 +471,29 @@ fn ensure_envoy(
     env: &dyn ExposeEnv,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let present =
-        |c: &Cluster| read(c, Some(PROXY_NS), false, "deployment/envoy-gateway", None);
+    let present = |c: &Cluster| read(c, Some(PROXY_NS), false, "deployment/envoy-gateway", None);
     if present(c)?.is_some() {
         return Ok(());
     }
     let how = if sel.cluster.is_some() {
-        format!("Run it again with --yes to install it first: {}", o.rerun_with_yes(sel))
+        format!(
+            "Run it again with --yes to install it first: {}",
+            o.rerun_with_yes(sel)
+        )
     } else {
         format!(
             "Install it with `helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 -n {PROXY_NS} --create-namespace`, or run this on a FluxVM cluster (`{}`) and it is installed for you",
-            o.rerun_with_yes(&Selection { cluster: Some("NAME".into()), ..sel.clone() })
+            o.rerun_with_yes(&Selection {
+                cluster: Some("NAME".into()),
+                ..sel.clone()
+            })
         )
     };
     if !o.yes {
         if !env.interactive() {
-            bail!("Envoy Gateway is not installed on this cluster, and there is no terminal to ask you. {how}");
+            bail!(
+                "Envoy Gateway is not installed on this cluster, and there is no terminal to ask you. {how}"
+            );
         }
         if !env.confirm(
             "Envoy Gateway (the Gateway API controller) is not installed on this cluster. Install it now?",
@@ -497,7 +513,14 @@ fn ensure_envoy(
 
 /// The first GatewayClass on the cluster that Envoy Gateway serves, if any.
 fn find_class(c: &Cluster) -> Result<Option<String>> {
-    let Some(list) = read(c, None, false, "gatewayclass.gateway.networking.k8s.io", None)? else {
+    let Some(list) = read(
+        c,
+        None,
+        false,
+        "gatewayclass.gateway.networking.k8s.io",
+        None,
+    )?
+    else {
         return Ok(None);
     };
     Ok(list["items"]
@@ -517,7 +540,11 @@ fn service_port(svc: &Value, requested: Option<i64>, o: &ExposeOpts) -> Result<i
         .iter()
         .filter_map(|p| p["port"].as_i64())
         .collect();
-    let list = ports.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+    let list = ports
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     match (requested, ports.as_slice()) {
         (Some(p), _) if ports.contains(&p) => Ok(p),
         (Some(p), _) => bail!(
@@ -546,14 +573,19 @@ pub fn expose(
     let name = object_name(&o.service)?;
     let host = o.host();
     if !valid_host(&host) {
-        bail!("--host {host:?} is not a host name (lowercase letters, digits, - and dots; for example web.localhost)");
+        bail!(
+            "--host {host:?} is not a host name (lowercase letters, digits, - and dots; for example web.localhost)"
+        );
     }
     let local = choose_port(o.local_port)?;
     let ns = o.namespace.as_str();
 
     if o.dry_run {
         let port = o.port.unwrap_or(80);
-        writeln!(out, "# dry run: nothing is read or changed. The GatewayClass is made only if the cluster has none for Envoy Gateway; the Service port is read from the Service when --port is left out.")?;
+        writeln!(
+            out,
+            "# dry run: nothing is read or changed. The GatewayClass is made only if the cluster has none for Envoy Gateway; the Service port is read from the Service when --port is left out."
+        )?;
         writeln!(out, "{}", yaml_docs(&[class_manifest()]).trim_end())?;
         let docs = manifests(ns, &name, &o.service, port, &host, OUR_CLASS);
         writeln!(out, "---\n{}", yaml_docs(&docs).trim_end())?;
@@ -563,12 +595,22 @@ pub fn expose(
         let gw_ref = format!("gateway/{name}");
         let mut w = c.cmd.clone();
         w.extend(
-            ["-n", ns, "wait", gw_ref.as_str(), "--for=condition=Programmed", "--timeout=120s"]
-                .iter()
-                .map(|s| (*s).to_owned()),
+            [
+                "-n",
+                ns,
+                "wait",
+                gw_ref.as_str(),
+                "--for=condition=Programmed",
+                "--timeout=120s",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned()),
         );
         writeln!(out, "# then: {}", shell_join(&w))?;
-        writeln!(out, "# then: kubectl -n {PROXY_NS} port-forward --address 127.0.0.1 service/<the Envoy Service> {local}:80")?;
+        writeln!(
+            out,
+            "# then: kubectl -n {PROXY_NS} port-forward --address 127.0.0.1 service/<the Envoy Service> {local}:80"
+        )?;
         writeln!(out, "# URL: http://{host}:{local}/")?;
         return Ok(0);
     }
@@ -576,7 +618,11 @@ pub fn expose(
     ensure_envoy(o, sel, c, env, out)?;
 
     let flags = selection_flags(sel);
-    let ns_flag = if ns == "default" { String::new() } else { format!(" -n {ns}") };
+    let ns_flag = if ns == "default" {
+        String::new()
+    } else {
+        format!(" -n {ns}")
+    };
     let Some(svc) = read(c, Some(ns), false, &format!("service/{}", o.service), None)? else {
         bail!(
             "Service {} was not found in namespace {ns}. See what is there with `kubectl -n {ns} get services`, or pass -n NAMESPACE",
@@ -590,7 +636,11 @@ pub fn expose(
         None => (OUR_CLASS.to_owned(), true),
     };
 
-    for (kind, label_name) in [(ROUTE_KIND, "HTTPRoute"), (GATEWAY_KIND, "Gateway"), (PROXY_KIND, "EnvoyProxy")] {
+    for (kind, label_name) in [
+        (ROUTE_KIND, "HTTPRoute"),
+        (GATEWAY_KIND, "Gateway"),
+        (PROXY_KIND, "EnvoyProxy"),
+    ] {
         if let Some(existing) = read(c, Some(ns), false, &format!("{kind}/{name}"), None)?
             && !has_our_label(&existing)
         {
@@ -606,16 +656,35 @@ pub fn expose(
     }
     items.extend(manifests(ns, &name, &o.service, port, &host, &class));
     let list = json!({"apiVersion": "v1", "kind": "List", "items": items});
-    writeln!(out, "Creating the Gateway and HTTPRoute for {} ...", o.service)?;
-    let applied = run(c, &["apply", "-f", "-"], Some(list.to_string().as_bytes()), 60)?;
+    writeln!(
+        out,
+        "Creating the Gateway and HTTPRoute for {} ...",
+        o.service
+    )?;
+    let applied = run(
+        c,
+        &["apply", "-f", "-"],
+        Some(list.to_string().as_bytes()),
+        60,
+    )?;
     if applied.code != 0 {
         return Err(stderr_err("kubectl apply", &applied.stderr));
     }
-    writeln!(out, "Waiting for the Gateway to be ready (this starts an Envoy proxy; up to two minutes) ...")?;
+    writeln!(
+        out,
+        "Waiting for the Gateway to be ready (this starts an Envoy proxy; up to two minutes) ..."
+    )?;
     let gw_ref = format!("gateway/{name}");
     let waited = run(
         c,
-        &["-n", ns, "wait", gw_ref.as_str(), "--for=condition=Programmed", "--timeout=120s"],
+        &[
+            "-n",
+            ns,
+            "wait",
+            gw_ref.as_str(),
+            "--for=condition=Programmed",
+            "--timeout=120s",
+        ],
         None,
         140,
     )?;
@@ -631,9 +700,19 @@ pub fn expose(
     let first = find(local)?;
     writeln!(out, "{} is exposed.", o.service)?;
     writeln!(out, "  URL:   http://{host}:{local}/")?;
-    writeln!(out, "  If your browser does not open {host}, use: curl --resolve {host}:{local}:127.0.0.1 http://{host}:{local}/")?;
-    writeln!(out, "  (*.localhost names resolve to this machine in most browsers; fluxctl has not checked yours.)")?;
-    writeln!(out, "Forwarding until you press Ctrl-C. Stop sharing it with: fluxctl gateway unexpose {}{ns_flag}{flags}", o.service)?;
+    writeln!(
+        out,
+        "  If your browser does not open {host}, use: curl --resolve {host}:{local}:127.0.0.1 http://{host}:{local}/"
+    )?;
+    writeln!(
+        out,
+        "  (*.localhost names resolve to this machine in most browsers; fluxctl has not checked yours.)"
+    )?;
+    writeln!(
+        out,
+        "Forwarding until you press Ctrl-C. Stop sharing it with: fluxctl gateway unexpose {}{ns_flag}{flags}",
+        o.service
+    )?;
     out.flush()?;
     forward_loop(first, &mut || find(local), env, err)
 }
@@ -654,7 +733,11 @@ pub fn unexpose(
     let name = object_name(service)?;
     let mut deleted = 0;
     let mut foreign = vec![];
-    for (kind, what) in [(ROUTE_KIND, "HTTPRoute"), (GATEWAY_KIND, "Gateway"), (PROXY_KIND, "EnvoyProxy")] {
+    for (kind, what) in [
+        (ROUTE_KIND, "HTTPRoute"),
+        (GATEWAY_KIND, "Gateway"),
+        (PROXY_KIND, "EnvoyProxy"),
+    ] {
         let target = format!("{kind}/{name}");
         let Some(obj) = read(c, Some(ns), false, &target, None)? else {
             continue;
@@ -663,7 +746,19 @@ pub fn unexpose(
             foreign.push(what);
             continue;
         }
-        let r = run(c, &["-n", ns, "delete", &target, "--ignore-not-found", "--timeout=60s"], None, 90)?;
+        let r = run(
+            c,
+            &[
+                "-n",
+                ns,
+                "delete",
+                &target,
+                "--ignore-not-found",
+                "--timeout=60s",
+            ],
+            None,
+            90,
+        )?;
         if r.code != 0 {
             return Err(stderr_err(&format!("kubectl delete {target}"), &r.stderr));
         }
@@ -671,7 +766,10 @@ pub fn unexpose(
         deleted += 1;
     }
     for what in &foreign {
-        writeln!(out, "Left the {what} {name} alone: fluxctl gateway did not make it.")?;
+        writeln!(
+            out,
+            "Left the {what} {name} alone: fluxctl gateway did not make it."
+        )?;
     }
     if deleted == 0 {
         writeln!(
@@ -699,7 +797,11 @@ fn condition(obj: &Value, ty: &str) -> Vec<(bool, String)> {
         }
     };
     scan(&obj["status"]["conditions"]);
-    for p in obj["status"]["parents"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+    for p in obj["status"]["parents"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+    {
         scan(&p["conditions"]);
     }
     found
@@ -750,8 +852,12 @@ pub fn list(sel: &Selection, c: &Cluster, out: &mut dyn Write) -> Result<i32> {
             row.host = h.to_owned();
         }
         match i["kind"].as_str() {
-            Some("Gateway") => row.gateway = words(condition(i, "Programmed"), "ready", "not ready"),
-            Some("HTTPRoute") => row.route = words(condition(i, "Accepted"), "accepted", "rejected"),
+            Some("Gateway") => {
+                row.gateway = words(condition(i, "Programmed"), "ready", "not ready")
+            }
+            Some("HTTPRoute") => {
+                row.route = words(condition(i, "Accepted"), "accepted", "rejected")
+            }
             _ => {}
         }
     }
@@ -763,13 +869,27 @@ pub fn list(sel: &Selection, c: &Cluster, out: &mut dyn Write) -> Result<i32> {
         )?;
         return Ok(0);
     }
-    writeln!(out, "{:<24} {:<16} {:<28} {:<26} {}", "SERVICE", "NAMESPACE", "HOST", "ROUTE", "GATEWAY")?;
+    writeln!(
+        out,
+        "{:<24} {:<16} {:<28} {:<26} {}",
+        "SERVICE", "NAMESPACE", "HOST", "ROUTE", "GATEWAY"
+    )?;
     for ((ns, svc), r) in &rows {
-        let dash = |s: &str| if s.is_empty() { "-".to_owned() } else { s.to_owned() };
+        let dash = |s: &str| {
+            if s.is_empty() {
+                "-".to_owned()
+            } else {
+                s.to_owned()
+            }
+        };
         writeln!(
             out,
             "{:<24} {:<16} {:<28} {:<26} {}",
-            svc, ns, dash(&r.host), dash(&r.route), dash(&r.gateway)
+            svc,
+            ns,
+            dash(&r.host),
+            dash(&r.route),
+            dash(&r.gateway)
         )?;
     }
     writeln!(
@@ -826,7 +946,11 @@ mod tests {
         }
         fn forward(&self, argv: &[String]) -> Result<ForwardEnd> {
             self.forwarded.borrow_mut().push(argv.join(" "));
-            Ok(self.forwards.borrow_mut().pop_front().unwrap_or(ForwardEnd::Interrupted))
+            Ok(self
+                .forwards
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(ForwardEnd::Interrupted))
         }
         fn pause(&self, d: Duration) {
             self.pauses.borrow_mut().push(d);
@@ -846,7 +970,10 @@ mod tests {
     }
 
     fn sel() -> Selection {
-        Selection { kube_context: Some("lab".into()), cluster: None }
+        Selection {
+            kube_context: Some("lab".into()),
+            cluster: None,
+        }
     }
 
     fn cluster<'a>(f: &'a FakeKubectl) -> Cluster<'a> {
@@ -871,7 +998,10 @@ mod tests {
         assert!(got > taken);
         TcpListener::bind(("127.0.0.1", got)).expect("the chosen port can be bound");
         let e = choose_port(Some(taken)).unwrap_err().to_string();
-        assert!(e.contains("already in use") && e.contains("--local-port"), "{e}");
+        assert!(
+            e.contains("already in use") && e.contains("--local-port"),
+            "{e}"
+        );
         drop(l);
         assert_eq!(choose_port(Some(taken)).unwrap(), taken);
         assert!(!port_is_free(0));
@@ -893,7 +1023,15 @@ mod tests {
         let code = expose(&o, &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        for want in ["kind: Gateway", "kind: HTTPRoute", "kind: EnvoyProxy", "kind: GatewayClass", "web.localhost", "app.kubernetes.io/managed-by: fluxctl-gateway", "name: fx-web"] {
+        for want in [
+            "kind: Gateway",
+            "kind: HTTPRoute",
+            "kind: EnvoyProxy",
+            "kind: GatewayClass",
+            "web.localhost",
+            "app.kubernetes.io/managed-by: fluxctl-gateway",
+            "name: fx-web",
+        ] {
             assert!(text.contains(want), "{want} in {text}");
         }
         assert!(f.calls.borrow().is_empty(), "dry run never calls kubectl");
@@ -905,12 +1043,20 @@ mod tests {
         let f = empty(FakeKubectl::default());
         let env = FakeEnv::new(false, true);
         let mut o = opts();
-        let s = Selection { cluster: Some("dev".into()), ..Default::default() };
+        let s = Selection {
+            cluster: Some("dev".into()),
+            ..Default::default()
+        };
         let c = Cluster::new(s.prefix(Some(std::path::Path::new("/h"))).unwrap(), &f);
         o.port = Some(80);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let e = expose(&o, &s, &c, &env, &mut out, &mut err).unwrap_err().to_string();
-        assert!(e.contains("fluxctl gateway expose web -n shop --port 80 --cluster dev --yes"), "{e}");
+        let e = expose(&o, &s, &c, &env, &mut out, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("fluxctl gateway expose web -n shop --port 80 --cluster dev --yes"),
+            "{e}"
+        );
         assert_eq!(*env.installs.borrow(), 0);
         assert_eq!(f.calls.borrow().len(), 1, "only the install check ran");
     }
@@ -920,8 +1066,13 @@ mod tests {
         let f = empty(FakeKubectl::default());
         let env = FakeEnv::new(true, false);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap_err().to_string();
-        assert!(e.contains("not installed") && e.contains("helm install"), "{e}");
+        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("not installed") && e.contains("helm install"),
+            "{e}"
+        );
         assert_eq!(*env.installs.borrow(), 0);
     }
 
@@ -930,20 +1081,38 @@ mod tests {
         let f = FakeKubectl::default().fail("could not run kubectl: No such file or directory");
         let env = FakeEnv::new(false, false);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap_err().to_string();
-        assert!(e.contains("kubectl was not found") && e.contains("brew install kubectl"), "{e}");
+        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("kubectl was not found") && e.contains("brew install kubectl"),
+            "{e}"
+        );
         let f = FakeKubectl::default().text(1, "", "The connection to the server localhost:8080 was refused - did you specify the right host or port? connection refused\n");
-        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap_err().to_string();
-        assert!(e.contains("cannot reach a Kubernetes cluster") && e.contains("--cluster NAME"), "{e}");
+        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("cannot reach a Kubernetes cluster") && e.contains("--cluster NAME"),
+            "{e}"
+        );
     }
 
     #[test]
     fn a_missing_service_names_the_next_command() {
-        let f = FakeKubectl::default().json(json!({"metadata": {"name": "envoy-gateway"}})).text(0, "", "");
+        let f = FakeKubectl::default()
+            .json(json!({"metadata": {"name": "envoy-gateway"}}))
+            .text(0, "", "");
         let env = FakeEnv::new(false, false);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap_err().to_string();
-        assert!(e.contains("Service web was not found in namespace shop") && e.contains("kubectl -n shop get services"), "{e}");
+        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("Service web was not found in namespace shop")
+                && e.contains("kubectl -n shop get services"),
+            "{e}"
+        );
     }
 
     fn happy_fake() -> FakeKubectl {
@@ -968,17 +1137,34 @@ mod tests {
         let code = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("URL:   http://web.localhost:") && text.contains("curl --resolve web.localhost:"), "{text}");
+        assert!(
+            text.contains("URL:   http://web.localhost:")
+                && text.contains("curl --resolve web.localhost:"),
+            "{text}"
+        );
         let calls = f.calls.borrow();
-        let apply = calls.iter().find(|(a, _)| a.contains(&"apply".to_owned())).expect("an apply");
+        let apply = calls
+            .iter()
+            .find(|(a, _)| a.contains(&"apply".to_owned()))
+            .expect("an apply");
         let body = apply.1.as_ref().unwrap();
-        for want in ["fx-web", "fluxctl-gateway", "fluxvm-envoy", "\"port\":8000", "GatewayClass"] {
+        for want in [
+            "fx-web",
+            "fluxctl-gateway",
+            "fluxvm-envoy",
+            "\"port\":8000",
+            "GatewayClass",
+        ] {
             assert!(body.contains(want), "{want} in {body}");
         }
         assert!(calls.iter().all(|(a, _)| !a.contains(&"delete".to_owned())));
         let fwd = env.forwarded.borrow();
         assert_eq!(fwd.len(), 1);
-        assert!(fwd[0].contains("port-forward --address 127.0.0.1 service/envoy-shop-fx-web-1 "), "{}", fwd[0]);
+        assert!(
+            fwd[0].contains("port-forward --address 127.0.0.1 service/envoy-shop-fx-web-1 "),
+            "{}",
+            fwd[0]
+        );
         assert!(fwd[0].ends_with(":80"));
     }
 
@@ -992,8 +1178,13 @@ mod tests {
             .json(json!({"metadata": {"name": "fx-web", "labels": {}}}));
         let env = FakeEnv::new(false, false);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err).unwrap_err().to_string();
-        assert!(e.contains("fluxctl did not make it") && e.contains("fx-web"), "{e}");
+        let e = expose(&opts(), &sel(), &cluster(&f), &env, &mut out, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("fluxctl did not make it") && e.contains("fx-web"),
+            "{e}"
+        );
         assert!(f.argvs().iter().all(|a| !a.contains(" apply ")));
     }
 
@@ -1007,8 +1198,16 @@ mod tests {
         let mut out = Vec::new();
         unexpose("web", "shop", &sel(), &cluster(&f), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("Deleted HTTPRoute fx-web") && text.contains("Left the Gateway fx-web alone"), "{text}");
-        let deletes: Vec<String> = f.argvs().into_iter().filter(|a| a.contains(" delete ")).collect();
+        assert!(
+            text.contains("Deleted HTTPRoute fx-web")
+                && text.contains("Left the Gateway fx-web alone"),
+            "{text}"
+        );
+        let deletes: Vec<String> = f
+            .argvs()
+            .into_iter()
+            .filter(|a| a.contains(" delete "))
+            .collect();
         assert_eq!(deletes.len(), 1, "{deletes:?}");
         assert!(deletes[0].contains("httproute.gateway.networking.k8s.io/fx-web"));
     }
@@ -1017,8 +1216,15 @@ mod tests {
     fn unexpose_with_nothing_there_says_so_and_deletes_nothing() {
         let f = empty(empty(empty(FakeKubectl::default())));
         let mut out = Vec::new();
-        assert_eq!(unexpose("web", "shop", &sel(), &cluster(&f), &mut out).unwrap(), 0);
-        assert!(String::from_utf8(out).unwrap().contains("fluxctl gateway list"));
+        assert_eq!(
+            unexpose("web", "shop", &sel(), &cluster(&f), &mut out).unwrap(),
+            0
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("fluxctl gateway list")
+        );
         assert!(f.argvs().iter().all(|a| !a.contains(" delete ")));
     }
 
@@ -1033,31 +1239,56 @@ mod tests {
         let mut out = Vec::new();
         list(&sel(), &cluster(&f), &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(f.argvs()[0].contains("-l app.kubernetes.io/managed-by=fluxctl-gateway") && f.argvs()[0].contains(" -A"));
-        assert!(text.contains("web.localhost") && text.contains("ready") && text.contains("rejected (NoMatchingListenerHostname)"), "{text}");
+        assert!(
+            f.argvs()[0].contains("-l app.kubernetes.io/managed-by=fluxctl-gateway")
+                && f.argvs()[0].contains(" -A")
+        );
+        assert!(
+            text.contains("web.localhost")
+                && text.contains("ready")
+                && text.contains("rejected (NoMatchingListenerHostname)"),
+            "{text}"
+        );
         assert!(!text.contains("other"));
     }
 
     #[test]
     fn the_forward_loop_finds_the_service_again_and_reconnects() {
         let env = FakeEnv::new(false, false)
-            .then(ForwardEnd::Exited { code: 1, ran: Duration::from_secs(1) })
-            .then(ForwardEnd::Exited { code: 1, ran: Duration::from_secs(1) })
+            .then(ForwardEnd::Exited {
+                code: 1,
+                ran: Duration::from_secs(1),
+            })
+            .then(ForwardEnd::Exited {
+                code: 1,
+                ran: Duration::from_secs(1),
+            })
             .then(ForwardEnd::Interrupted);
         let mut calls = 0;
         let mut find = || {
             calls += 1;
             if calls == 1 {
-                Err(anyhow!("expected one Envoy Service for this listener, found 0"))
+                Err(anyhow!(
+                    "expected one Envoy Service for this listener, found 0"
+                ))
             } else {
                 Ok(vec!["kubectl".to_owned(), format!("try-{calls}")])
             }
         };
         let mut err = Vec::new();
-        let code = forward_loop(vec!["kubectl".into(), "first".into()], &mut find, &env, &mut err).unwrap();
+        let code = forward_loop(
+            vec!["kubectl".into(), "first".into()],
+            &mut find,
+            &env,
+            &mut err,
+        )
+        .unwrap();
         assert_eq!(code, 0);
         let text = String::from_utf8(err).unwrap();
-        assert!(text.contains("reconnecting") && text.contains("not there yet"), "{text}");
+        assert!(
+            text.contains("reconnecting") && text.contains("not there yet"),
+            "{text}"
+        );
         assert_eq!(env.forwarded.borrow().len(), 3);
         assert_eq!(env.forwarded.borrow()[0], "kubectl first");
         assert!(env.forwarded.borrow()[1].contains("try-2"));
@@ -1068,12 +1299,20 @@ mod tests {
     fn the_forward_loop_gives_up_when_nothing_ever_works() {
         let mut env = FakeEnv::new(false, false);
         for _ in 0..40 {
-            env = env.then(ForwardEnd::Exited { code: 1, ran: Duration::ZERO });
+            env = env.then(ForwardEnd::Exited {
+                code: 1,
+                ran: Duration::ZERO,
+            });
         }
         let mut find = || Ok(vec!["kubectl".to_owned()]);
         let mut err = Vec::new();
-        let e = forward_loop(vec!["kubectl".into()], &mut find, &env, &mut err).unwrap_err().to_string();
-        assert!(e.contains("keeps ending") && e.contains("kubectl get pods"), "{e}");
+        let e = forward_loop(vec!["kubectl".into()], &mut find, &env, &mut err)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("keeps ending") && e.contains("kubectl get pods"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1081,9 +1320,19 @@ mod tests {
         assert_eq!(object_name("web").unwrap(), "fx-web");
         assert!(object_name("Web").is_err());
         assert!(object_name(&"a".repeat(61)).is_err());
-        assert!(valid_host("web.localhost") && !valid_host("Web") && !valid_host("a..b") && !valid_host(""));
+        assert!(
+            valid_host("web.localhost")
+                && !valid_host("Web")
+                && !valid_host("a..b")
+                && !valid_host("")
+        );
         let svc = json!({"spec": {"ports": [{"port": 80}, {"port": 81}]}});
-        assert!(service_port(&svc, None, &opts()).unwrap_err().to_string().contains("--port"));
+        assert!(
+            service_port(&svc, None, &opts())
+                .unwrap_err()
+                .to_string()
+                .contains("--port")
+        );
         assert_eq!(service_port(&svc, Some(81), &opts()).unwrap(), 81);
         assert!(service_port(&svc, Some(9), &opts()).is_err());
     }

@@ -142,8 +142,16 @@ pub fn flags_drift(expected: &SharedFlags, node: &str, got: &SharedFlags) -> Vec
         }
     };
     let o = |v: &Option<String>| v.clone().unwrap_or_default();
-    cmp("--cluster-cidr", o(&want.cluster_cidr), o(&got.cluster_cidr));
-    cmp("--service-cidr", o(&want.service_cidr), o(&got.service_cidr));
+    cmp(
+        "--cluster-cidr",
+        o(&want.cluster_cidr),
+        o(&got.cluster_cidr),
+    );
+    cmp(
+        "--service-cidr",
+        o(&want.service_cidr),
+        o(&got.service_cidr),
+    );
     cmp("--cluster-dns", o(&want.cluster_dns), o(&got.cluster_dns));
     cmp(
         "--cluster-domain",
@@ -199,7 +207,10 @@ pub fn server_dir_secret_script() -> String {
 
 pub fn cordon_script(node: &str) -> String {
     assert!(name_ok(node));
-    op("cordon", &format!("sudo -n {K3S_BIN} kubectl cordon {node}"))
+    op(
+        "cordon",
+        &format!("sudo -n {K3S_BIN} kubectl cordon {node}"),
+    )
 }
 
 /// Server nodes that hold an etcd member, as `node/NAME` lines.
@@ -231,7 +242,10 @@ pub fn etcd_member_log_script() -> String {
 pub fn disable_unit_script(role: Role) -> String {
     op(
         "disable-unit",
-        &format!("sync; sudo -n systemctl disable --now {}.service", role.unit()),
+        &format!(
+            "sync; sudo -n systemctl disable --now {}.service",
+            role.unit()
+        ),
     )
 }
 
@@ -280,7 +294,8 @@ spec:
     hostPath:
       path: /etc/rancher/k3s/k3s.yaml
 "#;
-    T.replace("__IMAGE__", KUBE_VIP_IMAGE).replace("__VIP__", vip)
+    T.replace("__IMAGE__", KUBE_VIP_IMAGE)
+        .replace("__VIP__", vip)
 }
 
 /// A kube-vip address: on the cluster's private switch (10.89.x.y), like the nodes.
@@ -418,7 +433,10 @@ mod tests {
             parse_etcd_members("node/dev\nnode/dev-s2\n\nsomething\n"),
             vec!["dev", "dev-s2"]
         );
-        assert_eq!((majority(1), majority(2), majority(3), majority(5)), (1, 2, 2, 3));
+        assert_eq!(
+            (majority(1), majority(2), majority(3), majority(5)),
+            (1, 2, 2, 3)
+        );
     }
 
     #[test]
@@ -437,7 +455,11 @@ mod tests {
         let sec = S3Secret::new("AK", "SK").unwrap();
         let text = p.dropin(Some(&sec)).unwrap();
         // What the probe prints: the drop-in without its key lines.
-        let shown: String = text.lines().filter(|l| !l.contains("-key")).map(|l| format!("{l}\n")).collect();
+        let shown: String = text
+            .lines()
+            .filter(|l| !l.contains("-key"))
+            .map(|l| format!("{l}\n"))
+            .collect();
         assert_eq!(parse_snapshot_config(&shown), Some(p));
         assert_eq!(parse_snapshot_config(""), None);
         assert_eq!(parse_kube_vip_probe("absent\n"), None);

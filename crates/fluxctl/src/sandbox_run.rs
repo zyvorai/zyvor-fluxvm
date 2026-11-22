@@ -171,10 +171,18 @@ impl RunArgs {
         });
         let rt = &self.rt;
         if let Some(r) = &rt.runtime {
-            req["runtime"] = json!(r.parse::<fluxvm_ctr::runtime::Runtime>().map_err(anyhow::Error::msg)?.as_str());
+            req["runtime"] = json!(
+                r.parse::<fluxvm_ctr::runtime::Runtime>()
+                    .map_err(anyhow::Error::msg)?
+                    .as_str()
+            );
         }
         if let Some(t) = &rt.trust {
-            req["trust"] = json!(t.parse::<fluxvm_ctr::runtime::Trust>().map_err(anyhow::Error::msg)?.as_str());
+            req["trust"] = json!(
+                t.parse::<fluxvm_ctr::runtime::Trust>()
+                    .map_err(anyhow::Error::msg)?
+                    .as_str()
+            );
         }
         if rt.allow_container_untrusted {
             req["allow_container_untrusted"] = json!(true);
@@ -326,7 +334,10 @@ fn runtime_note(labels: &Value) -> Vec<String> {
 }
 
 fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-:=@%+,".contains(c)) {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-:=@%+,".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -342,7 +353,9 @@ pub fn print_unit(args: &RunArgs) -> Result<String> {
     if let Some(r) = &args.rt.runtime
         && r != "container"
     {
-        bail!("--print-unit renders the native container runtime: use --runtime container (not {r})");
+        bail!(
+            "--print-unit renders the native container runtime: use --runtime container (not {r})"
+        );
     }
     if args.rt.runtime.is_none() {
         bail!("--print-unit needs --runtime container: it prints what that runtime would start");
@@ -350,11 +363,19 @@ pub fn print_unit(args: &RunArgs) -> Result<String> {
     let req: SandboxCreateRequest = serde_json::from_value(args.request()?)?;
     let oci = req.oci.clone().context("no image")?;
     fluxvm_scheduler::container_sandbox::refuse_unsupported(&req, &oci)?;
-    let trust: Trust = args.rt.trust.as_deref().unwrap_or("untrusted").parse().map_err(anyhow::Error::msg)?;
+    let trust: Trust = args
+        .rt
+        .trust
+        .as_deref()
+        .unwrap_or("untrusted")
+        .parse()
+        .map_err(anyhow::Error::msg)?;
     let facts = fluxvm_ctr::probe::probe();
     let id = Uuid::new_v4();
     let argv: Vec<String> = match (&oci.entrypoint, &oci.command) {
-        (None, None) => vec!["<the image's Entrypoint and Cmd, read when the image is pulled>".into()],
+        (None, None) => {
+            vec!["<the image's Entrypoint and Cmd, read when the image is pulled>".into()]
+        }
         (e, c) => e.iter().chain(c.iter()).flatten().cloned().collect(),
     };
     let process = fluxvm_oci_init::config::ProcessSpec {
@@ -363,7 +384,10 @@ pub fn print_unit(args: &RunArgs) -> Result<String> {
         cwd: oci.workdir.clone().unwrap_or_else(|| "/".into()),
         user: oci.user.clone().unwrap_or_else(|| "0:0".into()),
     };
-    let launcher = facts.launcher.clone().unwrap_or_else(|| "/usr/bin/fluxvm-container-run".into());
+    let launcher = facts
+        .launcher
+        .clone()
+        .unwrap_or_else(|| "/usr/bin/fluxvm-container-run".into());
     let manager = facts.manager();
     let options: ContainerOptions = req.container.clone().unwrap_or_default();
     let state = std::path::PathBuf::from(format!("/var/lib/fluxvm/instances/{id}"));
@@ -391,10 +415,18 @@ pub fn print_unit(args: &RunArgs) -> Result<String> {
         manager.as_str()
     );
     out.push_str(&render::unit_file(&spec, !facts.root));
-    out.push_str("
+    out.push_str(
+        "
 # The same thing as a command:
-");
-    out.push_str(&render::systemd_run_argv(&spec, manager).iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" \\\n  "));
+",
+    );
+    out.push_str(
+        &render::systemd_run_argv(&spec, manager)
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" \\\n  "),
+    );
     out.push('\n');
     Ok(out)
 }
@@ -499,14 +531,17 @@ mod tests {
     }
 
     impl RunArgs {
-        fn try_parse_from<I: IntoIterator<Item = &'static str>>(it: I) -> Result<RunArgs, clap::Error> {
+        fn try_parse_from<I: IntoIterator<Item = &'static str>>(
+            it: I,
+        ) -> Result<RunArgs, clap::Error> {
             Wrap::try_parse_from(it).map(|w| w.args)
         }
     }
 
     #[test]
     fn the_runtime_choice_is_always_explained() {
-        let labels = json!({"fluxvm.runtime": "container", "fluxvm.runtime.reason": "auto: trust=dev"});
+        let labels =
+            json!({"fluxvm.runtime": "container", "fluxvm.runtime.reason": "auto: trust=dev"});
         let n = runtime_note(&labels);
         assert_eq!(n[0], "runtime: container (auto: trust=dev)");
         assert!(n[1].contains("shares the host kernel"));
@@ -519,33 +554,86 @@ mod tests {
     fn bad_runtime_trust_and_net_are_rejected_before_anything_is_sent() {
         let mut a = RunArgs::try_parse_from(["run", "alpine"]).unwrap();
         a.rt.runtime = Some("docker".into());
-        assert!(a.request().unwrap_err().to_string().contains("unknown runtime"));
+        assert!(
+            a.request()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown runtime")
+        );
         a.rt.runtime = Some("vm".into());
         a.rt.trust = Some("hostile".into());
-        assert!(a.request().unwrap_err().to_string().contains("unknown trust"));
+        assert!(
+            a.request()
+                .unwrap_err()
+                .to_string()
+                .contains("unknown trust")
+        );
         a.rt.trust = None;
         a.rt.net = Some("bridge".into());
-        assert!(a.request().unwrap_err().to_string().contains("none or host"));
+        assert!(
+            a.request()
+                .unwrap_err()
+                .to_string()
+                .contains("none or host")
+        );
     }
 
     #[test]
     fn print_unit_needs_the_container_runtime_and_runs_nothing() {
         let mut a = RunArgs::try_parse_from(["run", "alpine:3.22", "--print-unit"]).unwrap();
-        assert!(print_unit(&a).unwrap_err().to_string().contains("--runtime container"));
+        assert!(
+            print_unit(&a)
+                .unwrap_err()
+                .to_string()
+                .contains("--runtime container")
+        );
         a.rt.runtime = Some("vm".into());
         assert!(print_unit(&a).unwrap_err().to_string().contains("not vm"));
         let a = RunArgs::try_parse_from([
-            "run", "alpine:3.22", "--runtime", "container", "--trust", "dev", "--memory-mib", "128", "--pids", "32", "--print-unit", "--", "echo", "hi",
+            "run",
+            "alpine:3.22",
+            "--runtime",
+            "container",
+            "--trust",
+            "dev",
+            "--memory-mib",
+            "128",
+            "--pids",
+            "32",
+            "--print-unit",
+            "--",
+            "echo",
+            "hi",
         ])
         .unwrap();
         let u = print_unit(&a).unwrap();
         assert!(u.contains("Nothing was run"), "{u}");
-        assert!(u.contains("MemoryMax=128M") && u.contains("TasksMax=32"), "{u}");
-        assert!(u.contains("[X-FluxVM-Container]") && u.contains("PrivateNetwork=yes"), "{u}");
+        assert!(
+            u.contains("MemoryMax=128M") && u.contains("TasksMax=32"),
+            "{u}"
+        );
+        assert!(
+            u.contains("[X-FluxVM-Container]") && u.contains("PrivateNetwork=yes"),
+            "{u}"
+        );
         assert!(u.contains("systemd-run"), "{u}");
         assert!(u.contains("'--description=FluxVM container"), "{u}");
-        let ports = RunArgs::try_parse_from(["run", "nginx", "--runtime", "container", "-p", "8080:80", "--print-unit"]).unwrap();
-        assert!(print_unit(&ports).unwrap_err().to_string().contains("does not support ports"));
+        let ports = RunArgs::try_parse_from([
+            "run",
+            "nginx",
+            "--runtime",
+            "container",
+            "-p",
+            "8080:80",
+            "--print-unit",
+        ])
+        .unwrap();
+        assert!(
+            print_unit(&ports)
+                .unwrap_err()
+                .to_string()
+                .contains("does not support ports")
+        );
     }
 
     #[test]

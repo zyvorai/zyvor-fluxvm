@@ -64,7 +64,13 @@ pub fn owner_of(vm: &Value) -> Option<&str> {
 
 /// The instances `mac reap` removes: expired ones, narrowed by `--owner`. `--all` removes every expired one regardless of owner;
 /// otherwise only the current user's (an instance with no owner label counts as nobody's, so only `--all` reaps it).
-pub fn victims<'a>(items: &'a [Value], now: u64, me: &str, all: bool, owner: Option<&str>) -> Vec<&'a Value> {
+pub fn victims<'a>(
+    items: &'a [Value],
+    now: u64,
+    me: &str,
+    all: bool,
+    owner: Option<&str>,
+) -> Vec<&'a Value> {
     items
         .iter()
         .filter(|v| expired(v, now))
@@ -143,7 +149,10 @@ pub async fn set_ttl(r: &crate::remote::Remote, name: &str, ttl: &str) -> Result
         Some(json!({"labels": {EXPIRES_LABEL: val}})),
     )
     .await?;
-    println!("{name}: ttl {}", if ttl == "none" { "cleared" } else { ttl });
+    println!(
+        "{name}: ttl {}",
+        if ttl == "none" { "cleared" } else { ttl }
+    );
     Ok(())
 }
 
@@ -192,7 +201,10 @@ mod tests {
         assert!(!expired(&vm("b", None, None), u64::MAX));
         assert_eq!(remaining(&v, 100).as_deref(), Some("expired"));
         assert_eq!(remaining(&v, 40).as_deref(), Some("1m"));
-        assert_eq!(remaining(&vm("c", None, Some(7300)), 0).as_deref(), Some("2h1m"));
+        assert_eq!(
+            remaining(&vm("c", None, Some(7300)), 0).as_deref(),
+            Some("2h1m")
+        );
         assert_eq!(remaining(&vm("d", None, None), 0), None);
     }
 
@@ -205,13 +217,18 @@ mod tests {
             vm("ownerless-old", None, Some(10)),
         ];
         let names = |v: Vec<&Value>| -> Vec<String> {
-            v.iter().map(|x| x["name"].as_str().unwrap().to_string()).collect()
+            v.iter()
+                .map(|x| x["name"].as_str().unwrap().to_string())
+                .collect()
         };
         assert_eq!(names(victims(&items, 100, "me", false, None)), ["mine-old"]);
         assert_eq!(
             names(victims(&items, 100, "me", true, None)),
             ["mine-old", "theirs-old", "ownerless-old"]
         );
-        assert_eq!(names(victims(&items, 100, "me", false, Some("you"))), ["theirs-old"]);
+        assert_eq!(
+            names(victims(&items, 100, "me", false, Some("you"))),
+            ["theirs-old"]
+        );
     }
 }

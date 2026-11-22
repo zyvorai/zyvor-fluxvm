@@ -375,13 +375,14 @@ impl<A: VmApi> Host for RealHost<'_, A> {
         }
         if st.uses_proxy() {
             // The forwarder is its own process: this very program, in the foreground, detached from the terminal.
-            let child = std::process::Command::new(std::env::current_exe().context("locating fluxctl")?)
-                .args(["kube", "apple", "tunnel", &st.name, "--foreground"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("starting the forwarder")?;
+            let child =
+                std::process::Command::new(std::env::current_exe().context("locating fluxctl")?)
+                    .args(["kube", "apple", "tunnel", &st.name, "--foreground"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .context("starting the forwarder")?;
             write_private(&pidfile, &format!("{}\n", child.id()))?;
             for _ in 0..60 {
                 if crate::kube_host::api_answers(st.api_port) {
@@ -485,7 +486,9 @@ impl<A: VmApi> Host for RealHost<'_, A> {
                 .context("starting an ssh tunnel")
         };
         if !st.uses_proxy() {
-            let server = st.server().context("this record has no server to tunnel to")?;
+            let server = st
+                .server()
+                .context("this record has no server to tunnel to")?;
             let ep = self.endpoint(st, &server.name).await?;
             let mut child = spawn(st, &server.name, &ep, st.api_port)?;
             // The tunnel ends when the guest does; exiting lets launchd start a fresh one with the guest's new address.
@@ -560,11 +563,21 @@ impl<A: VmApi> Host for RealHost<'_, A> {
         let home = crate::docker_host::home()?;
         let exe = crate::stable_exe::stable_exe().context("locating fluxctl")?;
         let root = std::env::var_os("FLUXVM_APPLE_K3S_HOME").map(PathBuf::from);
-        super::agent::install(&home, &exe, &st.name, root.as_deref(), &super::agent::real_launchctl)
+        super::agent::install(
+            &home,
+            &exe,
+            &st.name,
+            root.as_deref(),
+            &super::agent::real_launchctl,
+        )
     }
 
     fn remove_tunnel_agent(&self, st: &State) -> Result<bool> {
-        super::agent::uninstall(&crate::docker_host::home()?, &st.name, &super::agent::real_launchctl)
+        super::agent::uninstall(
+            &crate::docker_host::home()?,
+            &st.name,
+            &super::agent::real_launchctl,
+        )
     }
 
     fn tunnel_agent_status(&self, st: &State) -> Result<Value> {

@@ -70,14 +70,20 @@ pub fn is_container(vm: &VmRecord) -> bool {
 
 pub fn load(vm: &VmRecord) -> Result<Option<ContainerMarker>> {
     match std::fs::read(vm.workspace.join(MARKER_FILE)) {
-        Ok(raw) => Ok(Some(serde_json::from_slice(&raw).context("container marker file is corrupt")?)),
+        Ok(raw) => Ok(Some(
+            serde_json::from_slice(&raw).context("container marker file is corrupt")?,
+        )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).context("reading container marker"),
     }
 }
 
 pub fn host_arch() -> Arch {
-    if cfg!(target_arch = "aarch64") { Arch::Arm64 } else { Arch::Amd64 }
+    if cfg!(target_arch = "aarch64") {
+        Arch::Arm64
+    } else {
+        Arch::Amd64
+    }
 }
 
 /// Everything [`build_spec`] needs, resolved by the caller (so the function is pure and testable).
@@ -106,20 +112,71 @@ pub fn unit_name_for(id: Uuid) -> String {
 }
 
 /// What the native runtime cannot do, refused up front with the reason (never accepted and ignored).
-pub fn refuse_unsupported(req: &SandboxCreateRequest, oci: &crate::oci_sandbox::OciSandboxSpec) -> Result<()> {
+pub fn refuse_unsupported(
+    req: &SandboxCreateRequest,
+    oci: &crate::oci_sandbox::OciSandboxSpec,
+) -> Result<()> {
     let nope: [(bool, &str, &str); 12] = [
-        (!oci.ports.is_empty(), "ports", "published ports need a veth and bridge or a user-mode network, which the native runtime does not have yet (use --runtime vm on a Mac, or reach the container through its host network with container.net = host for trusted code)"),
-        (!oci.expose.is_empty(), "expose", "stacks over a private network are not implemented for native containers yet"),
-        (!oci.gateway_hosts.is_empty(), "gateway_hosts", "there is no NAT gateway for native containers"),
-        (!oci.networks.is_empty(), "networks", "private VM networks are a vz feature"),
-        (!oci.hosts.is_empty(), "hosts", "extra /etc/hosts entries are not implemented for native containers yet"),
-        (!oci.secret_env.is_empty(), "secret_env", "write-only secrets need the VM meta share; pass env explicitly"),
-        (oci.healthcheck.is_some(), "healthcheck", "health checks are not implemented for native containers yet; use restart policy"),
-        (oci.max_restarts.is_some(), "max_restarts", "use restart = on-failure|always; a restart cap is not implemented"),
-        (!req.volumes.is_empty(), "volumes", "named volumes are not implemented for native containers yet"),
-        (!req.allow_hosts.is_empty(), "allow_hosts", "the egress allow-list needs the vz gateway or an egress proxy; a native container has no network (offline) or the host network"),
-        (req.http_proxy_port.is_some() || !req.http_proxy_ports.is_empty(), "http_proxy_port", "the HTTP proxy needs a guest network"),
-        (req.host_gpu || req.gpus.unwrap_or(0) > 0, "gpu", "GPU passthrough is a VM feature"),
+        (
+            !oci.ports.is_empty(),
+            "ports",
+            "published ports need a veth and bridge or a user-mode network, which the native runtime does not have yet (use --runtime vm on a Mac, or reach the container through its host network with container.net = host for trusted code)",
+        ),
+        (
+            !oci.expose.is_empty(),
+            "expose",
+            "stacks over a private network are not implemented for native containers yet",
+        ),
+        (
+            !oci.gateway_hosts.is_empty(),
+            "gateway_hosts",
+            "there is no NAT gateway for native containers",
+        ),
+        (
+            !oci.networks.is_empty(),
+            "networks",
+            "private VM networks are a vz feature",
+        ),
+        (
+            !oci.hosts.is_empty(),
+            "hosts",
+            "extra /etc/hosts entries are not implemented for native containers yet",
+        ),
+        (
+            !oci.secret_env.is_empty(),
+            "secret_env",
+            "write-only secrets need the VM meta share; pass env explicitly",
+        ),
+        (
+            oci.healthcheck.is_some(),
+            "healthcheck",
+            "health checks are not implemented for native containers yet; use restart policy",
+        ),
+        (
+            oci.max_restarts.is_some(),
+            "max_restarts",
+            "use restart = on-failure|always; a restart cap is not implemented",
+        ),
+        (
+            !req.volumes.is_empty(),
+            "volumes",
+            "named volumes are not implemented for native containers yet",
+        ),
+        (
+            !req.allow_hosts.is_empty(),
+            "allow_hosts",
+            "the egress allow-list needs the vz gateway or an egress proxy; a native container has no network (offline) or the host network",
+        ),
+        (
+            req.http_proxy_port.is_some() || !req.http_proxy_ports.is_empty(),
+            "http_proxy_port",
+            "the HTTP proxy needs a guest network",
+        ),
+        (
+            req.host_gpu || req.gpus.unwrap_or(0) > 0,
+            "gpu",
+            "GPU passthrough is a VM feature",
+        ),
     ];
     if let Some((_, what, why)) = nope.iter().find(|(set, _, _)| *set) {
         bail!("runtime=container does not support {what}: {why}");
@@ -136,29 +193,51 @@ pub fn build_spec(i: &SpecInputs<'_>) -> Result<ContainerSpec> {
         .or_else(|| i.req.profile.map(|p| p.memory_mib()))
         .unwrap_or(c.default_memory_mib);
     if memory_mib > c.max_memory_mib {
-        bail!("memory_mib {memory_mib} is above sandbox.container.max_memory_mib ({})", c.max_memory_mib);
+        bail!(
+            "memory_mib {memory_mib} is above sandbox.container.max_memory_mib ({})",
+            c.max_memory_mib
+        );
     }
     let pids = i.options.pids.unwrap_or(c.default_pids);
     if pids > c.max_pids {
-        bail!("pids {pids} is above sandbox.container.max_pids ({})", c.max_pids);
+        bail!(
+            "pids {pids} is above sandbox.container.max_pids ({})",
+            c.max_pids
+        );
     }
-    let cpu_percent = i.options.cpu_percent.or_else(|| i.req.vcpus.map(|v| u32::from(v) * 100));
-    let net = if i.req.offline { Net::None } else { i.options.net.unwrap_or(Net::None) };
+    let cpu_percent = i
+        .options
+        .cpu_percent
+        .or_else(|| i.req.vcpus.map(|v| u32::from(v) * 100));
+    let net = if i.req.offline {
+        Net::None
+    } else {
+        i.options.net.unwrap_or(Net::None)
+    };
     if net == Net::Host && i.trust.is_untrusted() {
-        bail!("container.net = host shares the host's network with {} code; use a VM, or trust dev/trusted", i.trust.as_str());
+        bail!(
+            "container.net = host shares the host's network with {} code; use a VM, or trust dev/trusted",
+            i.trust.as_str()
+        );
     }
     let seccomp = i.options.seccomp.unwrap_or_default();
     if seccomp == Seccomp::Unconfined && i.trust.is_untrusted() {
         bail!("container.seccomp = unconfined is for dev/trusted code only");
     }
-    let mut hardening = Hardening { read_only_root: i.oci.read_only_root, seccomp, ..Hardening::default() };
+    let mut hardening = Hardening {
+        read_only_root: i.oci.read_only_root,
+        seccomp,
+        ..Hardening::default()
+    };
     if let Some(caps) = &i.options.capabilities {
         hardening.capabilities = caps.clone();
     }
     // Rootless: your uid is mapped to root in the container and nothing else exists there.
     let user = match (i.rootless, i.oci.user.as_deref()) {
         (true, None) | (true, Some("0" | "0:0" | "root")) => String::new(),
-        (true, Some(u)) => bail!("a rootless container runs as root in its own user namespace; user {u:?} needs a root daemon"),
+        (true, Some(u)) => bail!(
+            "a rootless container runs as root in its own user namespace; user {u:?} needs a root daemon"
+        ),
         (false, _) => i.process.user.clone(),
     };
     let ttl = match (i.req.ttl_seconds, c.max_ttl_seconds) {
@@ -178,7 +257,12 @@ pub fn build_spec(i: &SpecInputs<'_>) -> Result<ContainerSpec> {
         env,
         workdir: i.process.cwd.clone(),
         user,
-        limits: Limits { memory_mib: Some(memory_mib), cpu_percent, pids: Some(pids), io_weight: i.options.io_weight },
+        limits: Limits {
+            memory_mib: Some(memory_mib),
+            cpu_percent,
+            pids: Some(pids),
+            io_weight: i.options.io_weight,
+        },
         hardening,
         net,
         restart: match i.oci.restart {
@@ -205,7 +289,10 @@ fn direct_cgroup(name: &str) -> PathBuf {
         .ok()
         .and_then(|s| fluxvm_ctr::probe::parse_self_cgroup(&s))
         .unwrap_or_else(|| "/".into());
-    PathBuf::from(format!("/sys/fs/cgroup{}/{name}", own.trim_end_matches('/')))
+    PathBuf::from(format!(
+        "/sys/fs/cgroup{}/{name}",
+        own.trim_end_matches('/')
+    ))
 }
 
 /// `uid`, `uid:gid`, `name` or `name:group` to numeric `uid:gid`, using the image's `/etc/passwd` and `/etc/group`.
@@ -226,13 +313,16 @@ pub fn resolve_user_str(user: &str, passwd: &str, group: &str) -> Result<String>
     };
     let (uid, pgid) = match u.parse::<u32>() {
         Ok(n) => (n, find(passwd, u).map_or(n, |(_, g)| g)),
-        Err(_) => find(passwd, u).with_context(|| format!("user {u:?} is not in the image's /etc/passwd"))?,
+        Err(_) => find(passwd, u)
+            .with_context(|| format!("user {u:?} is not in the image's /etc/passwd"))?,
     };
     let gid = match g {
         None => pgid,
         Some(g) => match g.parse::<u32>() {
             Ok(n) => n,
-            Err(_) => find(group, g).map(|(id, _)| id).with_context(|| format!("group {g:?} is not in the image's /etc/group"))?,
+            Err(_) => find(group, g)
+                .map(|(id, _)| id)
+                .with_context(|| format!("group {g:?} is not in the image's /etc/group"))?,
         },
     };
     Ok(format!("{uid}:{gid}"))
@@ -246,7 +336,10 @@ fn read_in_root(root: &Path, rel: &str) -> String {
 }
 
 fn hex_of(digest: &str) -> Result<&str> {
-    digest.strip_prefix("sha256:").filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).with_context(|| format!("{digest:?} is not a sha256 digest"))
+    digest
+        .strip_prefix("sha256:")
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .with_context(|| format!("{digest:?} is not a sha256 digest"))
 }
 
 fn convert(c: RegCompression) -> init::Compression {
@@ -276,7 +369,10 @@ static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub fn ensure_cache(cfg: &Config, image: &PulledImage, privileged: bool) -> Result<PathBuf> {
     let hex = hex_of(&image.manifest_digest)?;
     let base = cfg.state_dir.join("ctr");
-    let dest = base.join("rootfs").join(format!("{hex}-{}", if privileged { "root" } else { "user" }));
+    let dest = base.join("rootfs").join(format!(
+        "{hex}-{}",
+        if privileged { "root" } else { "user" }
+    ));
     let done = dest.join(".fluxvm-unpacked");
     if done.exists() {
         return Ok(dest);
@@ -286,20 +382,40 @@ pub fn ensure_cache(cfg: &Config, image: &PulledImage, privileged: bool) -> Resu
         return Ok(dest);
     }
     let store = BlobStore::for_state_dir(&cfg.state_dir);
-    let tmp = base.join("build").join(format!("{}-{}", &hex[..12], Uuid::new_v4().simple()));
+    let tmp = base
+        .join("build")
+        .join(format!("{}-{}", &hex[..12], Uuid::new_v4().simple()));
     std::fs::create_dir_all(&tmp)?;
-    let opts = fluxvm_oci_init::unpack::Options { preserve_owner: privileged, special_files: privileged, xattrs: false };
+    let opts = fluxvm_oci_init::unpack::Options {
+        preserve_owner: privileged,
+        special_files: privileged,
+        xattrs: false,
+    };
     let built = (|| -> Result<()> {
         for l in &image.layers {
-            let blob = std::fs::File::open(store.path(&l.digest)?).with_context(|| format!("layer {} is not in the blob store; pull again", l.digest))?;
-            let got = fluxvm_oci_init::unpack::apply_layer(&tmp, std::io::BufReader::new(blob), convert(l.compression), &opts)
-                .with_context(|| format!("unpacking layer {}", l.digest))?;
+            let blob = std::fs::File::open(store.path(&l.digest)?).with_context(|| {
+                format!("layer {} is not in the blob store; pull again", l.digest)
+            })?;
+            let got = fluxvm_oci_init::unpack::apply_layer(
+                &tmp,
+                std::io::BufReader::new(blob),
+                convert(l.compression),
+                &opts,
+            )
+            .with_context(|| format!("unpacking layer {}", l.digest))?;
             if got != l.diff_id {
-                bail!("layer {} unpacks to {got}, not the diff_id {} its image config names", l.digest, l.diff_id);
+                bail!(
+                    "layer {} unpacks to {got}, not the diff_id {} its image config names",
+                    l.digest,
+                    l.diff_id
+                );
             }
         }
         ensure_mountpoints(&tmp)?;
-        std::fs::write(tmp.join(".fluxvm-unpacked"), image.manifest_digest.as_bytes())?;
+        std::fs::write(
+            tmp.join(".fluxvm-unpacked"),
+            image.manifest_digest.as_bytes(),
+        )?;
         Ok(())
     })();
     if let Err(e) = built {
@@ -311,7 +427,10 @@ pub fn ensure_cache(cfg: &Config, image: &PulledImage, privileged: bool) -> Resu
         // Lost a race with another daemon process; theirs is as good as ours.
         let _ = std::fs::remove_dir_all(&tmp);
         if !done.exists() {
-            bail!("could not install the unpacked rootfs at {}", dest.display());
+            bail!(
+                "could not install the unpacked rootfs at {}",
+                dest.display()
+            );
         }
     }
     Ok(dest)
@@ -327,7 +446,10 @@ fn copy_rootfs(from: &Path, to: &Path) -> Result<()> {
         .output()
         .context("running cp")?;
     if !out.status.success() {
-        bail!("copying the rootfs: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "copying the rootfs: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -340,10 +462,18 @@ pub struct ContainerState {
 }
 
 pub fn state_of(state_dir: &Path) -> ContainerState {
-    let pid: Option<i32> = std::fs::read_to_string(state_dir.join("pid")).ok().and_then(|s| s.trim().parse().ok());
-    let exit_code: Option<i32> = std::fs::read_to_string(state_dir.join("exit")).ok().and_then(|s| s.trim().parse().ok());
+    let pid: Option<i32> = std::fs::read_to_string(state_dir.join("pid"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    let exit_code: Option<i32> = std::fs::read_to_string(state_dir.join("exit"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
     let alive = pid.is_some_and(|p| Path::new(&format!("/proc/{p}")).exists());
-    ContainerState { running: alive && exit_code.is_none(), pid, exit_code }
+    ContainerState {
+        running: alive && exit_code.is_none(),
+        pid,
+        exit_code,
+    }
 }
 
 fn clip(b: &[u8]) -> String {
@@ -401,7 +531,13 @@ impl VmManager {
     fn container_manager(&self, f: &HostFacts) -> Manager {
         match self.cfg.sandbox.container.manager.as_str() {
             "direct" => Manager::Direct,
-            "systemd" => if f.root { Manager::SystemdSystem } else { Manager::SystemdUser },
+            "systemd" => {
+                if f.root {
+                    Manager::SystemdSystem
+                } else {
+                    Manager::SystemdUser
+                }
+            }
             _ => f.manager(),
         }
     }
@@ -409,7 +545,10 @@ impl VmManager {
     pub fn runtime_support(&self) -> HostSupport {
         if cfg!(target_os = "macos") {
             return HostSupport {
-                container: Err("native containers are Linux only; on a Mac every container is its own VM (vz)".into()),
+                container: Err(
+                    "native containers are Linux only; on a Mac every container is its own VM (vz)"
+                        .into(),
+                ),
                 vm_image: Ok(()),
                 vm_plain: Ok(()),
             };
@@ -429,11 +568,19 @@ impl VmManager {
         let c = &self.cfg.sandbox.container;
         let runtime = match req.runtime {
             Some(r) => r,
-            None => c.default_runtime.parse::<Runtime>().map_err(anyhow::Error::msg).context("sandbox.container.default_runtime")?,
+            None => c
+                .default_runtime
+                .parse::<Runtime>()
+                .map_err(anyhow::Error::msg)
+                .context("sandbox.container.default_runtime")?,
         };
         let trust = match req.trust {
             Some(t) => t,
-            None => c.default_trust.parse::<Trust>().map_err(anyhow::Error::msg).context("sandbox.container.default_trust")?,
+            None => c
+                .default_trust
+                .parse::<Trust>()
+                .map_err(anyhow::Error::msg)
+                .context("sandbox.container.default_trust")?,
         };
         let d = resolve(
             &Request {
@@ -456,23 +603,38 @@ impl VmManager {
         created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
         crate::oci_sandbox::validate(&req)?;
-        let oci = req.oci.clone().context("runtime=container needs oci.image")?;
+        let oci = req
+            .oci
+            .clone()
+            .context("runtime=container needs oci.image")?;
         refuse_unsupported(&req, &oci)?;
         let options = req.container.clone().unwrap_or_default();
         let trust = match req.trust {
             Some(t) => t,
-            None => self.cfg.sandbox.container.default_trust.parse::<Trust>().map_err(anyhow::Error::msg)?,
+            None => self
+                .cfg
+                .sandbox
+                .container
+                .default_trust
+                .parse::<Trust>()
+                .map_err(anyhow::Error::msg)?,
         };
         let facts = self.runtime_facts();
         let manager = self.container_manager(&facts);
-        let launcher = facts.launcher.clone().context("the fluxvm-container-run launcher was not found")?;
+        let launcher = facts
+            .launcher
+            .clone()
+            .context("the fluxvm-container-run launcher was not found")?;
         let rootless = !facts.root;
         let arch = match oci.platform.as_deref() {
             Some(p) => Arch::parse(p)?,
             None => host_arch(),
         };
         if arch != host_arch() {
-            bail!("a native container runs images for this host's architecture ({}) only; there is no emulation", host_arch().platform());
+            bail!(
+                "a native container runs images for this host's architecture ({}) only; there is no emulation",
+                host_arch().platform()
+            );
         }
 
         let id = Uuid::new_v4();
@@ -480,7 +642,9 @@ impl VmManager {
             req.name.clone(),
             &crate::procbox_sandbox::ProcboxSpec {
                 net_ports: vec![],
-                max_memory_mib: req.memory_mib.unwrap_or(self.cfg.sandbox.container.default_memory_mib),
+                max_memory_mib: req
+                    .memory_mib
+                    .unwrap_or(self.cfg.sandbox.container.default_memory_mib),
                 max_processes: 0,
                 timeout_seconds: 0,
                 cpu_seconds: None,
@@ -533,7 +697,11 @@ impl VmManager {
             };
             let mut process = init::resolve_process(&image_proc, &overrides)?;
             if !rootless {
-                process.user = resolve_user_str(&process.user, &read_in_root(&rootfs, "etc/passwd"), &read_in_root(&rootfs, "etc/group"))?;
+                process.user = resolve_user_str(
+                    &process.user,
+                    &read_in_root(&rootfs, "etc/passwd"),
+                    &read_in_root(&rootfs, "etc/group"),
+                )?;
             }
             let spec = build_spec(&SpecInputs {
                 id,
@@ -550,7 +718,10 @@ impl VmManager {
                 launcher: &launcher,
                 manager,
             })?;
-            std::fs::write(workspace.join("spec.json"), serde_json::to_vec_pretty(&spec)?)?;
+            std::fs::write(
+                workspace.join("spec.json"),
+                serde_json::to_vec_pretty(&spec)?,
+            )?;
             let marker = ContainerMarker {
                 spec: spec.clone(),
                 decision: decision.clone(),
@@ -559,7 +730,10 @@ impl VmManager {
                 image: oci.image.clone(),
                 manifest_digest: image.manifest_digest.clone(),
             };
-            std::fs::write(workspace.join(MARKER_FILE), serde_json::to_vec_pretty(&marker)?)?;
+            std::fs::write(
+                workspace.join(MARKER_FILE),
+                serde_json::to_vec_pretty(&marker)?,
+            )?;
             Ok((spec, rootfs))
         })();
         let (spec, _rootfs) = match staged {
@@ -585,27 +759,53 @@ impl VmManager {
                 let log = std::fs::read_to_string(&spec.log_path).unwrap_or_default();
                 teardown(&spec, manager).await;
                 let _ = std::fs::remove_dir_all(&workspace);
-                bail!("the container did not start within 20s: {}", log.lines().last().unwrap_or("no output"));
+                bail!(
+                    "the container did not start within 20s: {}",
+                    log.lines().last().unwrap_or("no output")
+                );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let log = std::fs::read_to_string(&spec.log_path).unwrap_or_default();
-        if state_of(&workspace).pid.is_none() || (state_of(&workspace).exit_code == Some(125) && log.contains("fluxvm-container-run:")) {
+        if state_of(&workspace).pid.is_none()
+            || (state_of(&workspace).exit_code == Some(125)
+                && log.contains("fluxvm-container-run:"))
+        {
             // The launcher itself failed (userns refused, limit not enforceable...): not the workload.
-            if let Some(line) = log.lines().rev().find(|l| l.starts_with("fluxvm-container-run:")) {
+            if let Some(line) = log
+                .lines()
+                .rev()
+                .find(|l| l.starts_with("fluxvm-container-run:"))
+            {
                 teardown(&spec, manager).await;
                 let _ = std::fs::remove_dir_all(&workspace);
-                bail!("the container could not be set up: {}", line.trim_start_matches("fluxvm-container-run:").trim());
+                bail!(
+                    "the container could not be set up: {}",
+                    line.trim_start_matches("fluxvm-container-run:").trim()
+                );
             }
         }
 
-        let expires_at = create.ttl_seconds.map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
+        let expires_at = create
+            .ttl_seconds
+            .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
         let mut record = crate::procbox_sandbox::make_record(id, &workspace, create, expires_at);
-        record.labels.insert(RUNTIME_LABEL.into(), "container".into());
-        record.labels.insert("fluxvm.runtime.reason".into(), decision.reason.clone());
-        record.labels.insert("fluxvm.runtime.unit".into(), spec.unit_name());
-        record.labels.insert(oci_images::OCI_LABEL.into(), image.manifest_digest.clone());
-        record.labels.insert(crate::oci_sandbox::OCI_IMAGE_LABEL.into(), oci.image.clone());
+        record
+            .labels
+            .insert(RUNTIME_LABEL.into(), "container".into());
+        record
+            .labels
+            .insert("fluxvm.runtime.reason".into(), decision.reason.clone());
+        record
+            .labels
+            .insert("fluxvm.runtime.unit".into(), spec.unit_name());
+        record
+            .labels
+            .insert(oci_images::OCI_LABEL.into(), image.manifest_digest.clone());
+        record.labels.insert(
+            crate::oci_sandbox::OCI_IMAGE_LABEL.into(),
+            oci.image.clone(),
+        );
         if let Err(e) = self.store.insert(record.clone()).await {
             teardown(&spec, manager).await;
             let _ = std::fs::remove_dir_all(&workspace);
@@ -613,7 +813,14 @@ impl VmManager {
         }
         let vm_id = id.to_string();
         let tenant = record.request.tenant.clone().unwrap_or_default();
-        crate::audit_event("vm.create", &[("vm_id", &vm_id), ("tenant", &tenant), ("backend", "container")]);
+        crate::audit_event(
+            "vm.create",
+            &[
+                ("vm_id", &vm_id),
+                ("tenant", &tenant),
+                ("backend", "container"),
+            ],
+        );
         Ok(record)
     }
 
@@ -629,12 +836,22 @@ impl VmManager {
             bail!(
                 "container {} is not running{}; exec needs a running container",
                 vm.name,
-                st.exit_code.map(|c| format!(" (it exited with code {c})")).unwrap_or_default()
+                st.exit_code
+                    .map(|c| format!(" (it exited with code {c})"))
+                    .unwrap_or_default()
             );
         };
-        let limit = Duration::from_secs(timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS));
+        let limit = Duration::from_secs(
+            timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS),
+        );
         let mut cmd = tokio::process::Command::new(&m.spec.launcher);
-        cmd.arg("exec").arg("--spec").arg(render::spec_path(&m.spec)).arg("--pid").arg(pid.to_string()).arg("--").args(&argv);
+        cmd.arg("exec")
+            .arg("--spec")
+            .arg(render::spec_path(&m.spec))
+            .arg("--pid")
+            .arg(pid.to_string())
+            .arg("--")
+            .args(&argv);
         cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
         let out = match tokio::time::timeout(limit, cmd.output()).await {
             Ok(r) => r.context("running the launcher")?,
@@ -657,13 +874,27 @@ impl VmManager {
 
     fn running_pid(m: &ContainerMarker) -> Result<i32> {
         let st = state_of(&m.spec.state_dir);
-        st.pid.filter(|_| st.running).context("the container is not running")
+        st.pid
+            .filter(|_| st.running)
+            .context("the container is not running")
     }
 
-    pub(crate) async fn container_get_file(&self, m: &ContainerMarker, path: String) -> Result<AgentResponse> {
+    pub(crate) async fn container_get_file(
+        &self,
+        m: &ContainerMarker,
+        path: String,
+    ) -> Result<AgentResponse> {
         let pid = Self::running_pid(m)?;
         let out = tokio::process::Command::new(&m.spec.launcher)
-            .args(["read", "--pid", &pid.to_string(), "--path", &path, "--max", &MAX_FILE_TRANSFER_BYTES.to_string()])
+            .args([
+                "read",
+                "--pid",
+                &pid.to_string(),
+                "--path",
+                &path,
+                "--max",
+                &MAX_FILE_TRANSFER_BYTES.to_string(),
+            ])
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output()
@@ -672,24 +903,50 @@ impl VmManager {
         if !out.status.success() {
             bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
         }
-        let nl = out.stdout.iter().position(|b| *b == b'\n').context("malformed launcher output")?;
+        let nl = out
+            .stdout
+            .iter()
+            .position(|b| *b == b'\n')
+            .context("malformed launcher output")?;
         let head = std::str::from_utf8(&out.stdout[..nl]).unwrap_or_default();
-        let mode = head.strip_prefix("MODE ").and_then(|m| u32::from_str_radix(m, 8).ok()).context("malformed launcher output")?;
+        let mode = head
+            .strip_prefix("MODE ")
+            .and_then(|m| u32::from_str_radix(m, 8).ok())
+            .context("malformed launcher output")?;
         Ok(AgentResponse::FileContent {
             content_base64: base64::engine::general_purpose::STANDARD.encode(&out.stdout[nl + 1..]),
             mode,
         })
     }
 
-    pub(crate) async fn container_put_file(&self, m: &ContainerMarker, path: String, content_base64: String, mode: Option<u32>) -> Result<AgentResponse> {
+    pub(crate) async fn container_put_file(
+        &self,
+        m: &ContainerMarker,
+        path: String,
+        content_base64: String,
+        mode: Option<u32>,
+    ) -> Result<AgentResponse> {
         use tokio::io::AsyncWriteExt;
         let pid = Self::running_pid(m)?;
-        let data = base64::engine::general_purpose::STANDARD.decode(content_base64.as_bytes()).context("content_base64 is not valid base64")?;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(content_base64.as_bytes())
+            .context("content_base64 is not valid base64")?;
         if data.len() > MAX_FILE_TRANSFER_BYTES {
-            bail!("file is {} bytes; the limit is {MAX_FILE_TRANSFER_BYTES}", data.len());
+            bail!(
+                "file is {} bytes; the limit is {MAX_FILE_TRANSFER_BYTES}",
+                data.len()
+            );
         }
         let mut child = tokio::process::Command::new(&m.spec.launcher)
-            .args(["write", "--pid", &pid.to_string(), "--path", &path, "--mode", &format!("{:o}", mode.unwrap_or(0o644))])
+            .args([
+                "write",
+                "--pid",
+                &pid.to_string(),
+                "--path",
+                &path,
+                "--mode",
+                &format!("{:o}", mode.unwrap_or(0o644)),
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
@@ -706,7 +963,12 @@ impl VmManager {
         Ok(AgentResponse::FileWritten)
     }
 
-    pub(crate) async fn container_logs(&self, vm: &VmRecord, m: &ContainerMarker, lines: usize) -> Result<crate::oci_sandbox::SandboxLogs> {
+    pub(crate) async fn container_logs(
+        &self,
+        vm: &VmRecord,
+        m: &ContainerMarker,
+        lines: usize,
+    ) -> Result<crate::oci_sandbox::SandboxLogs> {
         let log = crate::oci_sandbox::read_console(&vm.log_path).await?;
         let st = state_of(&m.spec.state_dir);
         let init_error = log
@@ -714,10 +976,18 @@ impl VmManager {
             .rev()
             .find(|l| l.starts_with("fluxvm-container-run:"))
             .filter(|_| st.exit_code == Some(126) || st.exit_code == Some(125))
-            .map(|l| l.trim_start_matches("fluxvm-container-run:").trim().to_string());
+            .map(|l| {
+                l.trim_start_matches("fluxvm-container-run:")
+                    .trim()
+                    .to_string()
+            });
         Ok(crate::oci_sandbox::SandboxLogs {
             id: vm.id,
-            status: if st.running { VmStatus::Running } else { VmStatus::Stopped },
+            status: if st.running {
+                VmStatus::Running
+            } else {
+                VmStatus::Stopped
+            },
             oci: true,
             exit_code: st.exit_code,
             init_error,
@@ -770,7 +1040,12 @@ impl VmManager {
 
 async fn run_cmd(argv: &[String]) -> Result<std::process::Output> {
     let (prog, args) = argv.split_first().context("empty command")?;
-    tokio::process::Command::new(prog).args(args).stdin(std::process::Stdio::null()).output().await.with_context(|| format!("running {prog}"))
+    tokio::process::Command::new(prog)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("running {prog}"))
 }
 
 async fn start(spec: &ContainerSpec, manager: Manager) -> Result<()> {
@@ -778,16 +1053,25 @@ async fn start(spec: &ContainerSpec, manager: Manager) -> Result<()> {
         Manager::SystemdSystem | Manager::SystemdUser => {
             let out = run_cmd(&render::systemd_run_argv(spec, manager)).await?;
             if !out.status.success() {
-                bail!("systemd-run: {}", String::from_utf8_lossy(&out.stderr).trim());
+                bail!(
+                    "systemd-run: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
             }
             Ok(())
         }
         Manager::Direct => {
             use std::os::unix::process::CommandExt;
-            let log = std::fs::OpenOptions::new().create(true).append(true).open(&spec.log_path)?;
+            let log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&spec.log_path)?;
             let mut cmd = std::process::Command::new(&spec.launcher);
             cmd.arg("run").arg("--spec").arg(render::spec_path(spec));
-            cmd.stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log).process_group(0);
+            cmd.stdin(std::process::Stdio::null())
+                .stdout(log.try_clone()?)
+                .stderr(log)
+                .process_group(0);
             let child = cmd.spawn().context("starting the launcher")?;
             let _ = std::fs::write(spec.state_dir.join("helper.pid"), child.id().to_string());
             // Reap it when it exits so it does not linger as a zombie of the daemon.
@@ -803,7 +1087,11 @@ async fn start(spec: &ContainerSpec, manager: Manager) -> Result<()> {
 async fn teardown(spec: &ContainerSpec, manager: Manager) {
     match manager {
         Manager::SystemdSystem | Manager::SystemdUser => {
-            let user: &[&str] = if manager == Manager::SystemdUser { &["--user"] } else { &[] };
+            let user: &[&str] = if manager == Manager::SystemdUser {
+                &["--user"]
+            } else {
+                &[]
+            };
             for verb in ["stop", "reset-failed"] {
                 let mut argv: Vec<String> = vec!["systemctl".into()];
                 argv.extend(user.iter().map(|s| s.to_string()));
@@ -813,7 +1101,9 @@ async fn teardown(spec: &ContainerSpec, manager: Manager) {
             }
         }
         Manager::Direct => {
-            let pid: Option<i32> = std::fs::read_to_string(spec.state_dir.join("helper.pid")).ok().and_then(|s| s.trim().parse().ok());
+            let pid: Option<i32> = std::fs::read_to_string(spec.state_dir.join("helper.pid"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok());
             if let Some(pid) = pid {
                 unsafe { libc::kill(pid, libc::SIGTERM) };
                 for _ in 0..120 {
@@ -861,7 +1151,13 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spec_with(r: &SandboxCreateRequest, o: &ContainerOptions, trust: Trust, rootless: bool, oc: &crate::oci_sandbox::OciSandboxSpec) -> Result<ContainerSpec> {
+    fn spec_with(
+        r: &SandboxCreateRequest,
+        o: &ContainerOptions,
+        trust: Trust,
+        rootless: bool,
+        oc: &crate::oci_sandbox::OciSandboxSpec,
+    ) -> Result<ContainerSpec> {
         let cfg = ContainerRuntimeConfig::default();
         let p = process();
         build_spec(&SpecInputs {
@@ -883,7 +1179,14 @@ mod tests {
 
     #[test]
     fn spec_generation_defaults() {
-        let s = spec_with(&req(serde_json::json!({"oci": {"image": "alpine:3.22"}})), &ContainerOptions::default(), Trust::Dev, true, &oci()).unwrap();
+        let s = spec_with(
+            &req(serde_json::json!({"oci": {"image": "alpine:3.22"}})),
+            &ContainerOptions::default(),
+            Trust::Dev,
+            true,
+            &oci(),
+        )
+        .unwrap();
         assert_eq!(s.name, "fx-1a2b3c4d");
         assert_eq!(s.user, "", "rootless: your uid is root in the container");
         assert_eq!(s.limits.memory_mib, Some(512));
@@ -893,16 +1196,34 @@ mod tests {
         assert_eq!(s.net, Net::None);
         assert!(s.env.iter().all(|e| !e.starts_with("HOSTNAME=")));
         assert!(s.cgroup_dir.is_none());
-        assert_eq!(s.log_path, PathBuf::from("/var/lib/fluxvm/instances/x/console.log"));
+        assert_eq!(
+            s.log_path,
+            PathBuf::from("/var/lib/fluxvm/instances/x/console.log")
+        );
     }
 
     #[test]
     fn spec_generation_applies_request_fields() {
-        let r = req(serde_json::json!({"oci": {"image": "alpine:3.22", "restart": "on-failure", "read_only_root": false}, "memory_mib": 256, "vcpus": 2, "ttl_seconds": 90}));
-        let o = ContainerOptions { pids: Some(64), io_weight: Some(50), after: vec!["fx-db.service".into()], ..Default::default() };
+        let r = req(
+            serde_json::json!({"oci": {"image": "alpine:3.22", "restart": "on-failure", "read_only_root": false}, "memory_mib": 256, "vcpus": 2, "ttl_seconds": 90}),
+        );
+        let o = ContainerOptions {
+            pids: Some(64),
+            io_weight: Some(50),
+            after: vec!["fx-db.service".into()],
+            ..Default::default()
+        };
         let s = spec_with(&r, &o, Trust::Trusted, false, &r.oci.clone().unwrap()).unwrap();
         assert_eq!(s.user, "1000:1000", "a root daemon keeps the image user");
-        assert_eq!(s.limits, Limits { memory_mib: Some(256), cpu_percent: Some(200), pids: Some(64), io_weight: Some(50) });
+        assert_eq!(
+            s.limits,
+            Limits {
+                memory_mib: Some(256),
+                cpu_percent: Some(200),
+                pids: Some(64),
+                io_weight: Some(50)
+            }
+        );
         assert_eq!(s.restart, Restart::OnFailure);
         assert_eq!(s.ttl_seconds, Some(90));
         assert!(!s.hardening.read_only_root);
@@ -913,30 +1234,75 @@ mod tests {
     fn spec_generation_refusals() {
         let base = req(serde_json::json!({"oci": {"image": "alpine"}}));
         let over = req(serde_json::json!({"oci": {"image": "alpine"}, "memory_mib": 1000000}));
-        assert!(spec_with(&over, &Default::default(), Trust::Dev, true, &oci()).unwrap_err().to_string().contains("max_memory_mib"));
-        let host = ContainerOptions { net: Some(Net::Host), ..Default::default() };
-        assert!(spec_with(&base, &host, Trust::Untrusted, true, &oci()).unwrap_err().to_string().contains("host's network"));
-        assert_eq!(spec_with(&base, &host, Trust::Dev, true, &oci()).unwrap().net, Net::Host);
+        assert!(
+            spec_with(&over, &Default::default(), Trust::Dev, true, &oci())
+                .unwrap_err()
+                .to_string()
+                .contains("max_memory_mib")
+        );
+        let host = ContainerOptions {
+            net: Some(Net::Host),
+            ..Default::default()
+        };
+        assert!(
+            spec_with(&base, &host, Trust::Untrusted, true, &oci())
+                .unwrap_err()
+                .to_string()
+                .contains("host's network")
+        );
+        assert_eq!(
+            spec_with(&base, &host, Trust::Dev, true, &oci())
+                .unwrap()
+                .net,
+            Net::Host
+        );
         let offline = req(serde_json::json!({"oci": {"image": "alpine"}, "offline": true}));
-        assert_eq!(spec_with(&offline, &host, Trust::Dev, true, &oci()).unwrap().net, Net::None);
-        let unconf = ContainerOptions { seccomp: Some(Seccomp::Unconfined), ..Default::default() };
+        assert_eq!(
+            spec_with(&offline, &host, Trust::Dev, true, &oci())
+                .unwrap()
+                .net,
+            Net::None
+        );
+        let unconf = ContainerOptions {
+            seccomp: Some(Seccomp::Unconfined),
+            ..Default::default()
+        };
         assert!(spec_with(&base, &unconf, Trust::Agent, true, &oci()).is_err());
         let mut nonroot = oci();
         nonroot.user = Some("1000".into());
-        assert!(spec_with(&base, &Default::default(), Trust::Dev, true, &nonroot).unwrap_err().to_string().contains("root daemon"));
+        assert!(
+            spec_with(&base, &Default::default(), Trust::Dev, true, &nonroot)
+                .unwrap_err()
+                .to_string()
+                .contains("root daemon")
+        );
     }
 
     #[test]
     fn unsupported_features_are_refused_with_a_reason() {
         let cases = [
-            (serde_json::json!({"oci": {"image": "a", "ports": ["8080:80"]}}), "ports"),
-            (serde_json::json!({"oci": {"image": "a"}, "allow_hosts": ["example.com"]}), "allow_hosts"),
-            (serde_json::json!({"oci": {"image": "a"}, "volumes": [{"name": "v", "guest_path": "/v"}]}), "volumes"),
-            (serde_json::json!({"oci": {"image": "a", "healthcheck": {"command": ["true"]}}}), "healthcheck"),
+            (
+                serde_json::json!({"oci": {"image": "a", "ports": ["8080:80"]}}),
+                "ports",
+            ),
+            (
+                serde_json::json!({"oci": {"image": "a"}, "allow_hosts": ["example.com"]}),
+                "allow_hosts",
+            ),
+            (
+                serde_json::json!({"oci": {"image": "a"}, "volumes": [{"name": "v", "guest_path": "/v"}]}),
+                "volumes",
+            ),
+            (
+                serde_json::json!({"oci": {"image": "a", "healthcheck": {"command": ["true"]}}}),
+                "healthcheck",
+            ),
         ];
         for (v, what) in cases {
             let r = req(v);
-            let e = refuse_unsupported(&r, r.oci.as_ref().unwrap()).unwrap_err().to_string();
+            let e = refuse_unsupported(&r, r.oci.as_ref().unwrap())
+                .unwrap_err()
+                .to_string();
             assert!(e.contains(&format!("does not support {what}")), "{e}");
         }
         let ok = req(serde_json::json!({"oci": {"image": "a"}, "offline": true}));
@@ -948,10 +1314,19 @@ mod tests {
         let passwd = "root:x:0:0:r:/root:/bin/sh\nnginx:x:101:101::/n:/sbin/nologin\n";
         let group = "root:x:0:\nnginx:x:101:\nstaff:x:50:\n";
         assert_eq!(resolve_user_str("nginx", passwd, group).unwrap(), "101:101");
-        assert_eq!(resolve_user_str("nginx:staff", passwd, group).unwrap(), "101:50");
-        assert_eq!(resolve_user_str("1000", passwd, group).unwrap(), "1000:1000");
+        assert_eq!(
+            resolve_user_str("nginx:staff", passwd, group).unwrap(),
+            "101:50"
+        );
+        assert_eq!(
+            resolve_user_str("1000", passwd, group).unwrap(),
+            "1000:1000"
+        );
         assert_eq!(resolve_user_str("101:7", passwd, group).unwrap(), "101:7");
-        assert_eq!(resolve_user_str("65534:65534", "", "").unwrap(), "65534:65534");
+        assert_eq!(
+            resolve_user_str("65534:65534", "", "").unwrap(),
+            "65534:65534"
+        );
         assert!(resolve_user_str("ghost", passwd, group).is_err());
         assert!(resolve_user_str("nginx:ghost", passwd, group).is_err());
     }
@@ -972,10 +1347,22 @@ mod tests {
 
     #[test]
     fn inspect_shows_the_unit_and_the_decision() {
-        let s = spec_with(&req(serde_json::json!({"oci": {"image": "alpine:3.22"}})), &Default::default(), Trust::Dev, true, &oci()).unwrap();
+        let s = spec_with(
+            &req(serde_json::json!({"oci": {"image": "alpine:3.22"}})),
+            &Default::default(),
+            Trust::Dev,
+            true,
+            &oci(),
+        )
+        .unwrap();
         let m = ContainerMarker {
             spec: s,
-            decision: Decision { runtime: Runtime::Container, reason: "auto: trust=dev".into(), isolation: "x".into(), warning: None },
+            decision: Decision {
+                runtime: Runtime::Container,
+                reason: "auto: trust=dev".into(),
+                isolation: "x".into(),
+                warning: None,
+            },
             manager: Manager::SystemdUser,
             rootless: true,
             image: "alpine:3.22".into(),
@@ -1003,22 +1390,53 @@ mod tests {
     #[ignore = "needs registry access"]
     async fn live_pull_and_unpack() {
         let d = tempfile::tempdir().unwrap();
-        let cfg = fluxvm_core::config::Config { state_dir: d.path().to_path_buf(), ..Default::default() };
-        let image = oci_images::pull(&cfg, "alpine:3.22", host_arch()).await.unwrap();
+        let cfg = fluxvm_core::config::Config {
+            state_dir: d.path().to_path_buf(),
+            ..Default::default()
+        };
+        let image = oci_images::pull(&cfg, "alpine:3.22", host_arch())
+            .await
+            .unwrap();
         let cache = ensure_cache(&cfg, &image, false).unwrap();
-        for p in ["bin/busybox", "etc/os-release", "proc", "dev", "tmp", "etc/resolv.conf", ".fluxvm-unpacked"] {
-            assert!(std::fs::symlink_metadata(cache.join(p)).is_ok(), "{p} missing in {}", cache.display());
+        for p in [
+            "bin/busybox",
+            "etc/os-release",
+            "proc",
+            "dev",
+            "tmp",
+            "etc/resolv.conf",
+            ".fluxvm-unpacked",
+        ] {
+            assert!(
+                std::fs::symlink_metadata(cache.join(p)).is_ok(),
+                "{p} missing in {}",
+                cache.display()
+            );
         }
-        assert_eq!(ensure_cache(&cfg, &image, false).unwrap(), cache, "second call reuses the cache");
+        assert_eq!(
+            ensure_cache(&cfg, &image, false).unwrap(),
+            cache,
+            "second call reuses the cache"
+        );
         let rootfs = d.path().join("copy");
         copy_rootfs(&cache, &rootfs).unwrap();
         assert!(rootfs.join("bin/busybox").exists());
         let proc_ = init::resolve_process(
-            &init::ImageProcess { entrypoint: image.config.entrypoint.clone(), cmd: image.config.cmd.clone(), env: image.config.env.clone(), working_dir: image.config.working_dir.clone(), user: image.config.user.clone() },
+            &init::ImageProcess {
+                entrypoint: image.config.entrypoint.clone(),
+                cmd: image.config.cmd.clone(),
+                env: image.config.env.clone(),
+                working_dir: image.config.working_dir.clone(),
+                user: image.config.user.clone(),
+            },
             &init::ProcessOverrides::default(),
         )
         .unwrap();
         assert_eq!(proc_.argv, ["/bin/sh"]);
-        eprintln!("unpacked {} layers into {}", image.layers.len(), cache.display());
+        eprintln!(
+            "unpacked {} layers into {}",
+            image.layers.len(),
+            cache.display()
+        );
     }
 }

@@ -38,7 +38,11 @@ pub trait Remote {
     fn stamp(&self) -> String;
 
     fn servers(&self) -> Vec<String> {
-        self.nodes().into_iter().filter(|(_, r)| *r == Role::Server).map(|(n, _)| n).collect()
+        self.nodes()
+            .into_iter()
+            .filter(|(_, r)| *r == Role::Server)
+            .map(|(n, _)| n)
+            .collect()
     }
     /// Runs a script on the first server that answers.
     async fn run_server(&self, script: &str, stdin: Option<&[u8]>) -> Result<String> {
@@ -60,7 +64,11 @@ pub struct HostRemote<'a, H: Host> {
 
 impl<H: Host> Remote for HostRemote<'_, H> {
     fn nodes(&self) -> Vec<(String, Role)> {
-        self.st.ordered().iter().map(|n| (n.name.clone(), n.role)).collect()
+        self.st
+            .ordered()
+            .iter()
+            .map(|n| (n.name.clone(), n.role))
+            .collect()
     }
     async fn run(&self, node: &str, script: &str, stdin: Option<&[u8]>) -> Result<String> {
         let out = self.h.ssh(self.st, node, script, stdin).await?;
@@ -75,7 +83,10 @@ impl<H: Host> Remote for HostRemote<'_, H> {
 }
 
 fn path_ok(p: &str) -> bool {
-    p.starts_with('/') && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)) && !p.contains("..")
+    p.starts_with('/')
+        && p.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+        && !p.contains("..")
 }
 
 /// A script that receives a file on stdin and installs it root-owned with `mode`, creating its directory.
@@ -85,14 +96,33 @@ pub fn write_file_script(path: &str, mode: &str) -> String {
     format!(": fluxvm-op platform-write; set -eu; sudo -n install -D -m {mode} /dev/stdin {path}")
 }
 
-pub async fn put<R: Remote>(r: &R, node: &str, path: &str, mode: &str, content: &str) -> Result<()> {
-    r.run(node, &write_file_script(path, mode), Some(content.as_bytes())).await?;
+pub async fn put<R: Remote>(
+    r: &R,
+    node: &str,
+    path: &str,
+    mode: &str,
+    content: &str,
+) -> Result<()> {
+    r.run(
+        node,
+        &write_file_script(path, mode),
+        Some(content.as_bytes()),
+    )
+    .await?;
     Ok(())
 }
 
 /// Restarts k3s on a node and waits until it is active (and, on a server, its API says ready).
 pub async fn restart_and_wait<R: Remote>(r: &R, node: &str, role: Role) -> Result<()> {
-    r.run(node, &format!(": fluxvm-op platform-restart; set -eu; sudo -n systemctl restart {}.service", role.unit()), None).await?;
+    r.run(
+        node,
+        &format!(
+            ": fluxvm-op platform-restart; set -eu; sudo -n systemctl restart {}.service",
+            role.unit()
+        ),
+        None,
+    )
+    .await?;
     wait_up(r, node, role).await
 }
 
@@ -104,11 +134,13 @@ pub async fn wait_up<R: Remote>(r: &R, node: &str, role: Role) -> Result<()> {
         match (role, active) {
             (_, Err(e)) => last = e.to_string(),
             (Role::Agent, Ok(a)) if a.trim() == "active" => return Ok(()),
-            (Role::Server, Ok(a)) if a.trim() == "active" => match r.run(node, &script::readyz_script(), None).await {
-                Ok(o) if o.trim() == "ok" => return Ok(()),
-                Ok(o) => last = format!("readyz: {o}"),
-                Err(e) => last = e.to_string(),
-            },
+            (Role::Server, Ok(a)) if a.trim() == "active" => {
+                match r.run(node, &script::readyz_script(), None).await {
+                    Ok(o) if o.trim() == "ok" => return Ok(()),
+                    Ok(o) => last = format!("readyz: {o}"),
+                    Err(e) => last = e.to_string(),
+                }
+            }
             (_, Ok(a)) => last = format!("service is {a}"),
         }
         r.pause(POLL_SECS).await;
@@ -129,13 +161,20 @@ pub fn profile_disables(profile: &str) -> Result<Vec<String>> {
     Ok(match profile {
         "default" => vec![],
         // Nothing bundled but CoreDNS: bring your own load balancer, storage and metrics.
-        "minimal" => vec!["servicelb".into(), "local-storage".into(), "metrics-server".into()],
+        "minimal" => vec![
+            "servicelb".into(),
+            "local-storage".into(),
+            "metrics-server".into(),
+        ],
         // MetalLB replaces ServiceLB.
         "metallb" => vec!["servicelb".into()],
         // Nothing is turned off: Envoy's LoadBalancer Services are answered by ServiceLB. Envoy Gateway itself is installed
         // after create (see `PlatformPlan::install`).
         "envoy-gateway" => vec![],
-        other => bail!("--addons {other:?} must be one of: {}", ADDON_PROFILES.join(", ")),
+        other => bail!(
+            "--addons {other:?} must be one of: {}",
+            ADDON_PROFILES.join(", ")
+        ),
     })
 }
 
@@ -199,14 +238,18 @@ pub fn read_registries(path: &Path) -> Result<String> {
     if meta.len() > 256 * 1024 {
         bail!("{} is larger than 256 KiB", path.display());
     }
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     check_registries(&text)?;
     Ok(text)
 }
 
 pub fn check_registries(text: &str) -> Result<()> {
-    let v: serde_yaml::Value = serde_yaml::from_str(text).context("registries file is not valid YAML")?;
-    let m = v.as_mapping().context("registries file must be a YAML mapping")?;
+    let v: serde_yaml::Value =
+        serde_yaml::from_str(text).context("registries file is not valid YAML")?;
+    let m = v
+        .as_mapping()
+        .context("registries file must be a YAML mapping")?;
     if m.is_empty() {
         bail!("registries file is empty");
     }
@@ -220,7 +263,9 @@ pub fn check_registries(text: &str) -> Result<()> {
 }
 
 fn has_mirrors(text: &str) -> bool {
-    serde_yaml::from_str::<serde_yaml::Value>(text).ok().is_some_and(|v| v.get("mirrors").is_some())
+    serde_yaml::from_str::<serde_yaml::Value>(text)
+        .ok()
+        .is_some_and(|v| v.get("mirrors").is_some())
 }
 
 /// Everything the flags ask for, as data. `registries` is the content of `--registries-file`, already read.
@@ -249,13 +294,19 @@ pub fn plan(a: &PlatformArgs, registries: Option<&str>) -> Result<PlatformPlan> 
                 p.notes.push("wrote a registries.yaml that sends every registry through the embedded mirror; nodes need TCP 5001 and 6443 open to each other".into());
             }
             Some(t) if !has_mirrors(t) => {
-                bail!("--embedded-registry needs the registries file to have a `mirrors:` entry for the registries to serve (for example `mirrors: {{\"*\": {{}}}}`)")
+                bail!(
+                    "--embedded-registry needs the registries file to have a `mirrors:` entry for the registries to serve (for example `mirrors: {{\"*\": {{}}}}`)"
+                )
             }
             Some(_) => {}
         }
     }
     if let Some(r) = reg {
-        p.all_files.push(GuestFile { path: REGISTRIES_PATH.into(), mode: "0600", content: r });
+        p.all_files.push(GuestFile {
+            path: REGISTRIES_PATH.into(),
+            mode: "0600",
+            content: r,
+        });
     }
     if let Some(h) = &a.harden {
         assert_eq!(h, "cis");
@@ -299,14 +350,23 @@ pub struct ApplyReport {
 /// then the drop-in, then restarts one node at a time, servers first, each one waited for. A failure stops at that node and
 /// names what was already done; running the command again repeats the same writes.
 pub async fn apply<R: Remote>(r: &R, p: &PlatformPlan, restart: bool) -> Result<ApplyReport> {
-    let mut rep = ApplyReport { notes: p.notes.clone(), ..Default::default() };
+    let mut rep = ApplyReport {
+        notes: p.notes.clone(),
+        ..Default::default()
+    };
     let nodes = r.nodes();
     let progress = |rep: &ApplyReport, e: anyhow::Error, node: &str| {
-        anyhow::anyhow!("{node}: {e:#}; written so far: [{}]; restarted so far: [{}]; run the command again to finish", rep.wrote.join(", "), rep.restarted.join(", "))
+        anyhow::anyhow!(
+            "{node}: {e:#}; written so far: [{}]; restarted so far: [{}]; run the command again to finish",
+            rep.wrote.join(", "),
+            rep.restarted.join(", ")
+        )
     };
     for (node, role) in &nodes {
         for f in &p.all_files {
-            put(r, node, &f.path, f.mode, &f.content).await.map_err(|e| progress(&rep, e, node))?;
+            put(r, node, &f.path, f.mode, &f.content)
+                .await
+                .map_err(|e| progress(&rep, e, node))?;
             rep.wrote.push(format!("{node}:{}", f.path));
         }
         if *role != Role::Server {
@@ -336,9 +396,12 @@ pub async fn apply<R: Remote>(r: &R, p: &PlatformPlan, restart: bool) -> Result<
     }
     if restart {
         for (node, role) in &nodes {
-            let touched = !p.all_files.is_empty() || (*role == Role::Server && (p.dropin.is_some() || !p.server_files.is_empty()));
+            let touched = !p.all_files.is_empty()
+                || (*role == Role::Server && (p.dropin.is_some() || !p.server_files.is_empty()));
             if touched {
-                restart_and_wait(r, node, *role).await.map_err(|e| progress(&rep, e, node))?;
+                restart_and_wait(r, node, *role)
+                    .await
+                    .map_err(|e| progress(&rep, e, node))?;
                 rep.restarted.push(node.clone());
             }
         }
@@ -371,10 +434,15 @@ pub(crate) mod fake {
             for i in 1..=agents {
                 roles.push((format!("c-a{i}"), Role::Agent));
             }
-            FakeRemote { roles, ..Default::default() }
+            FakeRemote {
+                roles,
+                ..Default::default()
+            }
         }
         pub fn answer(&self, contains: &str, reply: &str) {
-            self.answers.borrow_mut().push((contains.into(), reply.into()));
+            self.answers
+                .borrow_mut()
+                .push((contains.into(), reply.into()));
         }
         pub fn fail_on(&self, contains: &str, msg: &str) {
             self.fail.borrow_mut().push((contains.into(), msg.into()));
@@ -385,7 +453,10 @@ pub(crate) mod fake {
                 .borrow()
                 .iter()
                 .map(|(n, s, _)| {
-                    let op = s.strip_prefix(": fluxvm-op ").and_then(|x| x.split(';').next()).unwrap_or("-");
+                    let op = s
+                        .strip_prefix(": fluxvm-op ")
+                        .and_then(|x| x.split(';').next())
+                        .unwrap_or("-");
                     format!("{n}:{op}")
                 })
                 .collect()
@@ -397,8 +468,17 @@ pub(crate) mod fake {
             self.roles.clone()
         }
         async fn run(&self, node: &str, script: &str, stdin: Option<&[u8]>) -> Result<String> {
-            self.log.borrow_mut().push((node.into(), script.into(), stdin.map(|b| String::from_utf8_lossy(b).into_owned())));
-            if let Some((_, m)) = self.fail.borrow().iter().find(|(k, _)| script.contains(k.as_str())) {
+            self.log.borrow_mut().push((
+                node.into(),
+                script.into(),
+                stdin.map(|b| String::from_utf8_lossy(b).into_owned()),
+            ));
+            if let Some((_, m)) = self
+                .fail
+                .borrow()
+                .iter()
+                .find(|(k, _)| script.contains(k.as_str()))
+            {
                 bail!("{m}");
             }
             if script.contains("is-active") {
@@ -407,7 +487,13 @@ pub(crate) mod fake {
             if script.contains("/readyz") {
                 return Ok("ok".into());
             }
-            Ok(self.answers.borrow().iter().find(|(k, _)| script.contains(k.as_str())).map(|(_, v)| v.clone()).unwrap_or_default())
+            Ok(self
+                .answers
+                .borrow()
+                .iter()
+                .find(|(k, _)| script.contains(k.as_str()))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default())
         }
         async fn pause(&self, _: u64) {}
         fn stamp(&self) -> String {
@@ -434,7 +520,10 @@ mod tests {
 
     #[test]
     fn profiles() {
-        assert_eq!(profile_disables("minimal").unwrap(), ["servicelb", "local-storage", "metrics-server"]);
+        assert_eq!(
+            profile_disables("minimal").unwrap(),
+            ["servicelb", "local-storage", "metrics-server"]
+        );
         assert_eq!(profile_disables("metallb").unwrap(), ["servicelb"]);
         assert!(profile_disables("default").unwrap().is_empty());
         assert!(profile_disables("envoy-gateway").unwrap().is_empty());
@@ -443,15 +532,37 @@ mod tests {
 
     #[test]
     fn envoy_gateway_profile_installs_and_disables_nothing() {
-        let p = plan(&PlatformArgs { addons: Some("envoy-gateway".into()), ..args() }, None).unwrap();
+        let p = plan(
+            &PlatformArgs {
+                addons: Some("envoy-gateway".into()),
+                ..args()
+            },
+            None,
+        )
+        .unwrap();
         assert_eq!(p.install, ["envoy-gateway"]);
         assert!(p.disable.is_empty() && p.dropin.is_none());
-        assert!(plan(&PlatformArgs { addons: Some("metallb".into()), ..args() }, None).unwrap().install.is_empty());
+        assert!(
+            plan(
+                &PlatformArgs {
+                    addons: Some("metallb".into()),
+                    ..args()
+                },
+                None
+            )
+            .unwrap()
+            .install
+            .is_empty()
+        );
     }
 
     #[test]
     fn cilium_dropin_golden() {
-        let a = PlatformArgs { cilium: true, cilium_kube_proxy_replacement: true, ..args() };
+        let a = PlatformArgs {
+            cilium: true,
+            cilium_kube_proxy_replacement: true,
+            ..args()
+        };
         let p = plan(&a, None).unwrap();
         assert_eq!(
             p.dropin.unwrap(),
@@ -466,9 +577,17 @@ mod tests {
 
     #[test]
     fn embedded_registry_without_file_writes_the_wildcard_mirror() {
-        let a = PlatformArgs { embedded_registry: true, ..args() };
+        let a = PlatformArgs {
+            embedded_registry: true,
+            ..args()
+        };
         let p = plan(&a, None).unwrap();
-        assert!(p.dropin.as_ref().unwrap().contains("embedded-registry: true"));
+        assert!(
+            p.dropin
+                .as_ref()
+                .unwrap()
+                .contains("embedded-registry: true")
+        );
         assert_eq!(p.all_files.len(), 1);
         assert_eq!(p.all_files[0].path, REGISTRIES_PATH);
         assert_eq!(p.all_files[0].mode, "0600");
@@ -478,14 +597,26 @@ mod tests {
 
     #[test]
     fn embedded_registry_with_a_file_that_has_no_mirrors_is_refused() {
-        let a = PlatformArgs { embedded_registry: true, ..args() };
-        assert!(plan(&a, Some("configs:\n  r:\n    auth: {username: a, password: b}\n")).is_err());
+        let a = PlatformArgs {
+            embedded_registry: true,
+            ..args()
+        };
+        assert!(
+            plan(
+                &a,
+                Some("configs:\n  r:\n    auth: {username: a, password: b}\n")
+            )
+            .is_err()
+        );
         assert!(plan(&a, Some("mirrors:\n  docker.io:\n")).is_ok());
     }
 
     #[test]
     fn registries_file_checks() {
-        assert!(check_registries("mirrors:\n  docker.io:\n    endpoint:\n      - https://m:5000\n").is_ok());
+        assert!(
+            check_registries("mirrors:\n  docker.io:\n    endpoint:\n      - https://m:5000\n")
+                .is_ok()
+        );
         assert!(check_registries("mirror:\n  a: b\n").is_err());
         assert!(check_registries("- a\n").is_err());
         assert!(check_registries("").is_err());
@@ -494,12 +625,25 @@ mod tests {
 
     #[test]
     fn cis_plan_has_files_config_and_the_chosen_psa_level() {
-        let a = PlatformArgs { harden: Some("cis".into()), psa_level: Some("baseline".into()), ..args() };
+        let a = PlatformArgs {
+            harden: Some("cis".into()),
+            psa_level: Some("baseline".into()),
+            ..args()
+        };
         let p = plan(&a, None).unwrap();
         let d = p.dropin.unwrap();
-        assert!(d.contains("protect-kernel-defaults: true") && d.contains("secrets-encryption: true"));
+        assert!(
+            d.contains("protect-kernel-defaults: true") && d.contains("secrets-encryption: true")
+        );
         let paths: Vec<_> = p.server_files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, ["/etc/sysctl.d/90-kubelet.conf", "/var/lib/rancher/k3s/server/psa.yaml", "/var/lib/rancher/k3s/server/audit.yaml"]);
+        assert_eq!(
+            paths,
+            [
+                "/etc/sysctl.d/90-kubelet.conf",
+                "/var/lib/rancher/k3s/server/psa.yaml",
+                "/var/lib/rancher/k3s/server/audit.yaml"
+            ]
+        );
         assert!(p.server_files[1].content.contains("enforce: \"baseline\""));
         assert!(p.notes[0].contains("not a benchmark result"));
     }
@@ -520,45 +664,95 @@ mod tests {
 
     #[tokio::test]
     async fn apply_orders_files_before_config_before_restart_servers_first() {
-        let a = PlatformArgs { harden: Some("cis".into()), embedded_registry: true, ..args() };
+        let a = PlatformArgs {
+            harden: Some("cis".into()),
+            embedded_registry: true,
+            ..args()
+        };
         let p = plan(&a, None).unwrap();
         let r = FakeRemote::cluster(2, 1);
         let rep = apply(&r, &p, true).await.unwrap();
         let ops = r.ops();
         // registries on every node, hardening files and the drop-in on servers only
-        assert_eq!(ops.iter().filter(|o| o.ends_with("platform-write")).count(), 3 /*registries*/ + 2 * 4);
+        assert_eq!(
+            ops.iter().filter(|o| o.ends_with("platform-write")).count(),
+            3 /*registries*/ + 2 * 4
+        );
         assert_eq!(rep.restarted, ["c-s1", "c-s2", "c-a1"]);
-        let first_restart = ops.iter().position(|o| o.ends_with("platform-restart")).unwrap();
-        let last_write = ops.iter().rposition(|o| o.ends_with("platform-write")).unwrap();
+        let first_restart = ops
+            .iter()
+            .position(|o| o.ends_with("platform-restart"))
+            .unwrap();
+        let last_write = ops
+            .iter()
+            .rposition(|o| o.ends_with("platform-write"))
+            .unwrap();
         assert!(last_write < first_restart);
-        let sysctl = ops.iter().position(|o| o == "c-s1:platform-sysctl").unwrap();
+        let sysctl = ops
+            .iter()
+            .position(|o| o == "c-s1:platform-sysctl")
+            .unwrap();
         assert!(sysctl < first_restart);
         // the drop-in comes after the files it points at
         let log = r.log.borrow();
-        let audit = log.iter().position(|(_, s, _)| s.contains("/server/audit.yaml")).unwrap();
-        let dropin = log.iter().position(|(_, s, _)| s.contains("40-fluxvm-platform.yaml")).unwrap();
+        let audit = log
+            .iter()
+            .position(|(_, s, _)| s.contains("/server/audit.yaml"))
+            .unwrap();
+        let dropin = log
+            .iter()
+            .position(|(_, s, _)| s.contains("40-fluxvm-platform.yaml"))
+            .unwrap();
         assert!(audit < dropin);
         // agents never get the server drop-in
-        assert!(!log.iter().any(|(n, s, _)| n == "c-a1" && s.contains("40-fluxvm-platform")));
+        assert!(
+            !log.iter()
+                .any(|(n, s, _)| n == "c-a1" && s.contains("40-fluxvm-platform"))
+        );
     }
 
     #[tokio::test]
     async fn apply_without_restart_says_so() {
-        let p = plan(&PlatformArgs { cilium: true, ..args() }, None).unwrap();
+        let p = plan(
+            &PlatformArgs {
+                cilium: true,
+                ..args()
+            },
+            None,
+        )
+        .unwrap();
         let r = FakeRemote::cluster(1, 0);
         let rep = apply(&r, &p, false).await.unwrap();
         assert!(rep.restarted.is_empty());
-        assert!(rep.notes.iter().any(|n| n.contains("nothing was restarted")));
+        assert!(
+            rep.notes
+                .iter()
+                .any(|n| n.contains("nothing was restarted"))
+        );
         assert!(!r.ops().iter().any(|o| o.ends_with("platform-restart")));
     }
 
     #[tokio::test]
     async fn apply_failure_names_the_node_and_stops() {
-        let p = plan(&PlatformArgs { cilium: true, ..args() }, None).unwrap();
+        let p = plan(
+            &PlatformArgs {
+                cilium: true,
+                ..args()
+            },
+            None,
+        )
+        .unwrap();
         let r = FakeRemote::cluster(2, 0);
         r.fail_on("platform-restart", "boom");
         let e = apply(&r, &p, true).await.unwrap_err().to_string();
-        assert!(e.contains("c-s1: boom") && e.contains("run the command again"), "{e}");
-        assert!(!r.ops().iter().any(|o| o.starts_with("c-s2:platform-restart")));
+        assert!(
+            e.contains("c-s1: boom") && e.contains("run the command again"),
+            "{e}"
+        );
+        assert!(
+            !r.ops()
+                .iter()
+                .any(|o| o.starts_with("c-s2:platform-restart"))
+        );
     }
 }

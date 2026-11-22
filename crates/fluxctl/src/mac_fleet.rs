@@ -209,7 +209,12 @@ pub struct UpgradeArgs {
     #[arg(long, conflicts_with = "force")]
     pub rolling: bool,
     /// With --rolling: seconds to wait for a drained Mac's VMs to end.
-    #[arg(long, value_name = "SECS", default_value_t = 3600, requires = "rolling")]
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = 3600,
+        requires = "rolling"
+    )]
     pub drain_timeout: u64,
     /// With --rolling: seconds to wait for the daemon to answer at the new version after the upgrade.
     #[arg(long, value_name = "SECS", default_value_t = 300, requires = "rolling")]
@@ -414,7 +419,8 @@ pub(crate) fn transport(conn: &Conn, inv: Option<&Inventory>) -> Box<dyn Transpo
         Box::new(DryTransport::new(opts))
     } else {
         let mut t = SshTransport::new(opts);
-        t.step_timeout = (conn.step_timeout > 0).then(|| std::time::Duration::from_secs(conn.step_timeout));
+        t.step_timeout =
+            (conn.step_timeout > 0).then(|| std::time::Duration::from_secs(conn.step_timeout));
         Box::new(t)
     }
 }
@@ -767,12 +773,19 @@ fn headless_findings(f: &Facts) -> Vec<Finding> {
                     c["name"].as_str().unwrap_or("host"),
                     c["detail"].as_str().unwrap_or("")
                 ),
-                c["fix"].as_str().unwrap_or("fluxctl mac host headless-check"),
+                c["fix"]
+                    .as_str()
+                    .unwrap_or("fluxctl mac host headless-check"),
             ))
         })
         .collect();
     if out.is_empty() {
-        out.push(fnd(Level::Ok, "headless", "the login session can restore saved VM state", ""));
+        out.push(fnd(
+            Level::Ok,
+            "headless",
+            "the login session can restore saved VM state",
+            "",
+        ));
     }
     out
 }
@@ -1123,7 +1136,11 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
                     tr.as_ref(),
                     &targets,
                     &s.install,
-                    crate::mac_fleet_roll::RollOpts { drain_timeout: a.drain_timeout, health_timeout: a.health_timeout, poll: 10 },
+                    crate::mac_fleet_roll::RollOpts {
+                        drain_timeout: a.drain_timeout,
+                        health_timeout: a.health_timeout,
+                        poll: 10,
+                    },
                 );
             }
             let rs = par_map(&targets, jobs(&a.conn), |t| {
@@ -1506,7 +1523,12 @@ mod tests {
         let old = FRESH.replace("fluxctl_version=", "fluxctl_version=0.4.21");
         let f = FakeTransport::new(move |_, _| ok(&old));
         assert_eq!(status_host(&f, &t).session, "-");
-        assert!(doctor_host(&f, &t, Want::default()).findings.iter().all(|x| x.id != "headless"));
+        assert!(
+            doctor_host(&f, &t, Want::default())
+                .findings
+                .iter()
+                .all(|x| x.id != "headless")
+        );
     }
 
     #[test]

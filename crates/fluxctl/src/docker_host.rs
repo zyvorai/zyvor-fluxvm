@@ -103,7 +103,13 @@ pub fn parse_share(s: &str, cwd: &Path, home: Option<&Path>) -> Result<Value> {
 
 /// The VM request for the engine: Debian 13, Docker from apt, the user's SSH key, folders shared at matching paths.
 pub fn engine_spec(o: &EngineOptions, user: &str, key: &str, shares: Vec<Value>) -> Value {
-    engine_spec_net(o, user, key, shares, crate::vm_net::host_network_spec(&o.name, vec![]))
+    engine_spec_net(
+        o,
+        user,
+        key,
+        shares,
+        crate::vm_net::host_network_spec(&o.name, vec![]),
+    )
 }
 
 /// [`engine_spec`] with the `network` member given (see `vm_net`).

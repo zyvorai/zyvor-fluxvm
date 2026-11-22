@@ -875,7 +875,9 @@ async fn fetch_apple_caps(
 }
 
 /// Session lock, sleep, thermal and disk facts of this Mac for placement. Read-only probes, run off the async threads.
-fn to_facts(h: fluxvm_apple::host_health::HostHealth) -> fluxvm_scheduler::apple_placement::HostHealthFacts {
+fn to_facts(
+    h: fluxvm_apple::host_health::HostHealth,
+) -> fluxvm_scheduler::apple_placement::HostHealthFacts {
     fluxvm_scheduler::apple_placement::HostHealthFacts {
         session_unlocked: h.session_unlocked,
         sleep_held: h.sleep_held,
