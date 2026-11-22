@@ -39,7 +39,35 @@ pub struct AppleHostCaps {
     /// does not report it or the daemon would not say; `Some(0)` is a pool with every slot leased, or none enrolled.
     #[serde(default)]
     pub macos_pool_idle: Option<u32>,
+    /// Session lock, sleep, thermal and disk facts from the node agent. `None` from an older agent: no bias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HostHealthFacts>,
 }
+
+/// Host facts that make a Mac a bad place for a VM right now. Same wire shape as `fluxvm_apple::host_health::HostHealth`;
+/// every field is optional and unknown never counts against a host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostHealthFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_unlocked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_held: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_disk_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_build: Option<String>,
+}
+
+/// Below this free disk (MiB) a Mac is not given a new VM.
+pub const MIN_FREE_DISK_MIB: u64 = 5 * 1024;
+/// Thermal speed limit (percent) below which a Mac is not given a new VM.
+pub const THERMAL_ADMISSION_LIMIT: u32 = 80;
+/// Subtracted from a host whose session is locked (a restore would fail there); larger than the image bonus.
+pub const LOCKED_SESSION_PENALTY: i64 = 4_000_000;
+/// Subtracted from a host whose sleep is not held off.
+pub const SLEEP_NOT_HELD_PENALTY: i64 = 100_000;
 
 /// Memory kept back for macOS itself: the larger of 3 GiB and a quarter of the Mac's unified memory. Kairon's Mac
 /// node reports allocatable memory the same way, so a fleet scheduler and `fluxvm-agent central` agree.
@@ -164,6 +192,20 @@ pub fn score(c: &AppleHostCaps, r: &ApplePlacementRequest) -> Option<i64> {
     {
         return None;
     }
+    let mut penalty = 0i64;
+    if let Some(h) = &c.health {
+        if h.thermal_limit.is_some_and(|n| n < THERMAL_ADMISSION_LIMIT)
+            || h.free_disk_mib.is_some_and(|m| m < MIN_FREE_DISK_MIB)
+        {
+            return None;
+        }
+        if h.session_unlocked == Some(false) {
+            penalty += LOCKED_SESSION_PENALTY;
+        }
+        if h.sleep_held == Some(false) {
+            penalty += SLEEP_NOT_HELD_PENALTY;
+        }
+    }
     let cpu_after = i64::from(c.free_cpu - r.vcpus);
     let mem_after = i64::try_from((c.free_memory_mib - r.memory_mib) / 64).unwrap_or(i64::MAX);
     let fit = -(cpu_after.saturating_mul(1024).saturating_add(mem_after));
@@ -171,11 +213,13 @@ pub fn score(c: &AppleHostCaps, r: &ApplePlacementRequest) -> Option<i64> {
         .image
         .as_ref()
         .is_some_and(|i| c.images.iter().any(|x| x == i));
-    Some(if cached {
-        fit + IMAGE_PRESENT_BONUS
-    } else {
-        fit
-    })
+    Some(
+        (if cached {
+            fit + IMAGE_PRESENT_BONUS
+        } else {
+            fit
+        }) - penalty,
+    )
 }
 
 /// Index of the best host, or `None` if no host fits. Ties go to the earlier host.
@@ -208,6 +252,7 @@ mod tests {
             rosetta: false,
             images: vec![],
             macos_pool_idle: None,
+            health: None,
         }
     }
 
@@ -424,5 +469,54 @@ mod tests {
         assert_eq!((r.vcpus, r.memory_mib), (2, 1024));
         assert!(r.needs_nested && !r.macos_guest && !r.needs_vmnet);
         assert_eq!(r.bridge_interface.as_deref(), Some("en0"));
+    }
+
+    #[test]
+    fn bad_hosts_are_avoided_and_unknown_health_is_not() {
+        let req = ApplePlacementRequest {
+            vcpus: 2,
+            memory_mib: 4096,
+            ..Default::default()
+        };
+        let base = studio();
+        let with = |h: HostHealthFacts| AppleHostCaps {
+            health: Some(h),
+            ..base.clone()
+        };
+        let good = with(HostHealthFacts {
+            session_unlocked: Some(true),
+            sleep_held: Some(true),
+            ..Default::default()
+        });
+        let locked = with(HostHealthFacts {
+            session_unlocked: Some(false),
+            ..Default::default()
+        });
+        let hot = with(HostHealthFacts {
+            thermal_limit: Some(50),
+            ..Default::default()
+        });
+        let full = with(HostHealthFacts {
+            free_disk_mib: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(score(&hot, &req), None);
+        assert_eq!(score(&full, &req), None);
+        let (g, l, u) = (
+            score(&good, &req).unwrap(),
+            score(&locked, &req).unwrap(),
+            score(&base, &req).unwrap(),
+        );
+        assert!(l < g && g == u, "locked is demoted, unknown is not");
+        assert_eq!(pick(&[locked.clone(), good.clone()], &req), Some(1));
+        assert_eq!(pick(&[locked, hot], &req), Some(0));
+    }
+
+    #[test]
+    fn caps_without_health_decode_and_encode_unchanged() {
+        let old = r#"{"free_cpu":4,"free_memory_mib":8192,"nested_virtualization":false,"vmnet":false,"custom_virtio":false,"bridged_interfaces":[]}"#;
+        let c: AppleHostCaps = serde_json::from_str(old).unwrap();
+        assert!(c.health.is_none());
+        assert!(!serde_json::to_string(&c).unwrap().contains("health"));
     }
 }

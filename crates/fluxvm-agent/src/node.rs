@@ -299,6 +299,9 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig, preferred: usize) -> Res
         Some(h) => Some(sim_apple_caps(h, local)),
         None => fetch_apple_caps(vcpus_total, memory_mib_total, local).await,
     };
+    if let (Some(caps), None) = (apple.as_mut(), &cfg.sim) {
+        caps.health = fetch_host_health().await;
+    }
     if let (Some(caps), true, None) = (apple.as_mut(), reachable, &cfg.sim) {
         caps.images = fetch_cached_images(http, &cfg.fluxvm_url).await;
         caps.macos_pool_idle = fetch_macos_pool_idle(http, &cfg.fluxvm_url).await;
@@ -839,6 +842,7 @@ fn sim_apple_caps(h: &SimHost, local: LocalVmStats) -> AppleHostCaps {
         rosetta: true,
         images: Vec::new(),
         macos_pool_idle: None,
+        health: None,
     }
 }
 
@@ -866,7 +870,26 @@ async fn fetch_apple_caps(
         rosetta: caps.rosetta == "installed",
         images: Vec::new(),
         macos_pool_idle: None,
+        health: None,
     })
+}
+
+/// Session lock, sleep, thermal and disk facts of this Mac for placement. Read-only probes, run off the async threads.
+fn to_facts(h: fluxvm_apple::host_health::HostHealth) -> fluxvm_scheduler::apple_placement::HostHealthFacts {
+    fluxvm_scheduler::apple_placement::HostHealthFacts {
+        session_unlocked: h.session_unlocked,
+        sleep_held: h.sleep_held,
+        thermal_limit: h.thermal_limit,
+        free_disk_mib: h.free_disk_mib,
+        os_build: h.os_build,
+    }
+}
+
+async fn fetch_host_health() -> Option<fluxvm_scheduler::apple_placement::HostHealthFacts> {
+    let h = tokio::task::spawn_blocking(fluxvm_apple::host_health::probe)
+        .await
+        .ok()?;
+    Some(to_facts(h))
 }
 
 #[cfg(not(target_os = "macos"))]

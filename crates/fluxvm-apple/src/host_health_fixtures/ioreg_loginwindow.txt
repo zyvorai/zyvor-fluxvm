@@ -1,0 +1,4 @@
+  | {
+      "IOConsoleLocked" = No
+      "IOConsoleUsers" = ()
+  }

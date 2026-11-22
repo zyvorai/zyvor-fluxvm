@@ -96,6 +96,12 @@ pub fn require_guest(vm: &VmRecord, what: &str) -> Result<()> {
     if is_procbox(vm) {
         return Err(unsupported(what));
     }
+    if crate::container_sandbox::is_container(vm) {
+        return Err(ProcboxError::Unsupported(format!(
+            "{what} needs a guest VM and is not available for a native container sandbox (runtime=container); use --runtime vm"
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -1252,7 +1258,7 @@ impl VmManager {
     }
 }
 
-fn make_record(
+pub(crate) fn make_record(
     id: Uuid,
     workspace: &Path,
     create: CreateVmRequest,
@@ -1298,7 +1304,7 @@ fn make_record(
 
 /// A `CreateVmRequest` for the record: accounting fields only, since no VM is
 /// ever launched from it.
-fn minimal_request(name: Option<String>, spec: &ProcboxSpec) -> CreateVmRequest {
+pub(crate) fn minimal_request(name: Option<String>, spec: &ProcboxSpec) -> CreateVmRequest {
     CreateVmRequest {
         egress: None,
         apple: None,

@@ -11,6 +11,9 @@ That downloads the release package for your machine from GitHub Releases, **veri
 The script is [`scripts/install.sh`](https://github.com/zyvorai/zyvor-fluxvm/blob/main/scripts/install.sh) served
 unchanged: read it first with `curl -fsSL https://zyvorai.github.io/zyvor-fluxvm/install.sh | less` if you like.
 
+> **Setting up several machines?** `install.sh --server` on the first and `install.sh --join URL` on the others build FluxVM's own fleet
+> (no Kubernetes), installing the prerequisites for you: [Cluster quickstart](cluster-quickstart.md).
+
 ## Contents
 
 - [Requirements](#requirements)

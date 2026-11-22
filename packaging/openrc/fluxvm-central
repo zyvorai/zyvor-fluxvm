@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+# Copyright 2026 Zyvor
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
+
+# The OpenRC counterpart of packaging/systemd/fluxvm-central.service: the fleet registry (`fluxvm-agent central`).
+# Installed by scripts/install.sh --server. Reads optional /etc/fluxvm/central.env (LISTEN, FLUXVM_NODE_AUTH, ...). No token
+# is passed: central makes an operator token on first start in /var/lib/fluxvm-central/operator-token (mode 0600).
+# Not tested on a live OpenRC host yet.
+
+description="Zyvor FluxVM fleet central (cluster server)"
+command="/usr/local/bin/fluxvm-agent"
+command_args="central"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/fluxvm-central.log"
+error_log="/var/log/fluxvm-central.log"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	if [ -r /etc/fluxvm/central.env ]; then
+		set -a
+		# shellcheck disable=SC1091
+		. /etc/fluxvm/central.env
+		set +a
+	fi
+	export FLUXVM_AGENT_STATE_DIR=/var/lib/fluxvm-central
+	checkpath --directory --mode 0700 /var/lib/fluxvm-central
+}

@@ -1,0 +1,47 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cluster passport</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem;color:#1b1f23}table{border-collapse:collapse;width:100%}td,th{border:1px solid #d0d7de;padding:.3rem .6rem;text-align:left}th{background:#f6f8fa}pre{background:#f6f8fa;padding:.6rem;overflow:auto}.offline{color:#b42318}.online{color:#067647}</style></head><body>
+<h1>Cluster passport</h1>
+<p>Generated 2026-11-21T10:00:00Z by fluxctl 0.4.21. Server: http://192.168.1.20:7799</p>
+<p><em>This document contains no passwords, tokens or keys.</em></p>
+<h2>Summary</h2>
+<ul><li>Machines: 2 (1 online, 1 offline, 0 cordoned, 0 outdated)</li><li>Machines asking to join: 1</li></ul>
+<h2>Machines and roles</h2>
+<table><tr><th>Name</th><th>Role</th><th>CPUs</th><th>Memory</th><th>VMs</th><th>Version</th><th>Status</th><th>Last seen</th></tr>
+<tr><td>mini-1</td><td>Mac (macOS VMs, Docker, k3s)</td><td>10</td><td>32 GiB</td><td>2</td><td>0.4.21</td><td class="online">online</td><td>2026-11-21T09:59:50Z</td></tr>
+<tr><td>box-1</td><td>Linux (VMs)</td><td>8</td><td>16 GiB</td><td>0</td><td>0.4.20</td><td class="offline">offline</td><td>2026-11-20T10:00:00Z</td></tr>
+</table>
+<h2>Versions</h2>
+<ul><li>fluxctl: 0.4.21</li><li>node agent 0.4.20: 1 machine(s)</li><li>node agent 0.4.21: 1 machine(s)</li></ul>
+<h2>How to add a machine</h2>
+<p>On the new machine (Mac mini or Linux box), with fluxctl installed:</p>
+<pre>fluxctl cluster pair</pre>
+<p>It finds this cluster by itself and shows a short code like ABCDE-FGHJK.</p>
+<p>On the server, check that the code matches the machine's screen, then approve it:</p>
+<pre>fluxctl cluster pending
+fluxctl cluster approve ABCDE-FGHJK</pre>
+<p>(or press Approve on the Studio page &quot;Machines asking to join&quot;).</p>
+<p>If the network blocks discovery: `fluxctl cluster pair --server http://192.168.1.20:7799`.</p>
+<p>Pairing is on for this server.</p>
+<h2>How to back up and restore</h2>
+<p>The server keeps everything in /var/lib/fluxvm-agent. Back it up while central is stopped or idle:</p>
+<pre>tar czf fluxvm-central-backup.tgz -C /var/lib/fluxvm-agent . &amp;&amp; chmod 600 fluxvm-central-backup.tgz</pre>
+<p>The archive holds the keys that make machine credentials: keep it private and off shared drives.</p>
+<p>To restore: stop central, unpack the archive into the same folder, start central again.</p>
+<p>Machines keep their own credential; they reconnect by themselves. A machine that lost its own state pairs again.</p>
+<p>Apps from recipes: see each recipe's backup line (`fluxctl recipe show NAME`).</p>
+<h2>How to undo</h2>
+<p>Stop sending work to a machine:  fluxctl fleet cordon NAME</p>
+<p>Take a machine out:              fluxctl fleet deregister NAME   (its credential stops working)</p>
+<p>A machine was approved by mistake: deregister it, then check the Activity page in Studio.</p>
+<p>Stop accepting new machines:     restart central without --pairing.</p>
+<p>Go back to the previous FluxVM version on a Linux machine: fluxvm-bootstrap rollback</p>
+<p>Remove an app from a recipe:     fluxctl recipe uninstall NAME</p>
+<h2>Where the logs are</h2>
+<p>Mac, node agent:  ~/Library/Logs/fluxvm-agent.log</p>
+<p>Linux, services:  journalctl -u fluxvm-agent -u fluxvm --since today</p>
+<p>Server (central): journalctl -u fluxvm-agent, or the terminal it was started in</p>
+<p>Activity and audit trail: Studio, page Activity.</p>
+<h2>Apps installed from recipes</h2>
+<ul><li>registry</li></ul>
+<h2>Contacts and notes</h2>
+<pre>Call Ana on 555-0101 if the power fails.</pre>
+</body></html>

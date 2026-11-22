@@ -72,6 +72,22 @@ reaper_interval_secs = 5
 # egress_proxy_listen = "127.0.0.1:18080"       # live L7 egress proxy (empty = off)
 # http_proxy_default_port = 8080                # guest port for /sandbox/{id}/... with no port in the path
 
+# FluxVM's own Linux container runtime and the default for `--runtime auto` (docs/linux-runtime.md).
+# `auto` gives trust dev/trusted a native container and untrusted/agent a microVM. A container shares the host kernel, so
+# it is refused for untrusted/agent code unless allow_untrusted is on AND the caller passes allow_container_untrusted.
+# [sandbox.container]
+# enabled = true
+# default_runtime = "auto"        # auto | container | vm
+# default_trust = "untrusted"     # dev | trusted | untrusted | agent
+# allow_untrusted = false
+# default_memory_mib = 512
+# max_memory_mib = 16384
+# default_pids = 512
+# max_pids = 32768
+# max_ttl_seconds = 0             # 0 = no cap
+# launcher = ""                   # path of fluxvm-container-run; empty = next to the daemon, then PATH
+# manager = "auto"                # auto | systemd | direct
+
 # Rootless process sandboxes ("procbox": Landlock + seccomp on the host kernel).
 # Off by default; a weaker boundary than a microVM (see docs/procbox-backend.md).
 # [sandbox.procbox]

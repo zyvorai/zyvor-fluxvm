@@ -30,6 +30,7 @@ pub mod branch;
 pub mod cbt;
 pub mod changes;
 pub mod confidential;
+pub mod container_sandbox;
 pub mod density;
 pub mod diagnostics;
 pub mod events;
@@ -1066,7 +1067,12 @@ impl VmManager {
         // failure here shouldn't block VmManager from doing everything
         // else, only resource-control/metrics for VMs it launches.
         if let Err(e) = fluxvm_cgroup::ensure_delegation() {
-            tracing::warn!(error = %e, "failed to delegate cgroup controllers — resource control/metrics will be unavailable");
+            tracing::warn!(
+                error = %e,
+                "failed to delegate cgroup controllers — VM resource control/metrics will be unavailable. \
+                 Run the daemon as a systemd unit with Delegate=yes (packaging/systemd/fluxvm.service) or as root; \
+                 `fluxctl doctor` shows what is missing. Native containers are not affected: each runs as its own transient unit"
+            );
         }
         if let Err(e) = fluxvm_network::xdp::ensure(&cfg.sandbox.dataplane) {
             if cfg.sandbox.dataplane.xdp.required {
@@ -2784,6 +2790,19 @@ impl VmManager {
         }
         if req.backend == BackendKind::Vz {
             apple_placement::enforce_macos_guest_limit(&req, &self.store.list().await)?;
+            // Thermal-aware admission: a throttled Mac gets no new VMs until it cools (docs/macos-host.md).
+            let limit = tokio::task::spawn_blocking(fluxvm_apple::host_health::probe_thermal_limit)
+                .await
+                .ok()
+                .flatten();
+            let health = fluxvm_apple::host_health::HostHealth {
+                thermal_limit: limit,
+                ..Default::default()
+            };
+            if let Some(why) = health.admission_blockers().into_iter().next() {
+                audit_event("admission.deny", &[("scope", "thermal"), ("reason", &why)]);
+                bail!("this Mac is {why}; retry when `pmset -g therm` shows no speed limit, or place the VM on another Mac");
+            }
         }
         self.admit_under_pressure(req.memory_mib).await?;
         // Every storage backend except CephRbd points `image` at a real
@@ -5488,6 +5507,11 @@ impl VmManager {
         if procbox_sandbox::is_procbox(&vm) {
             return self.procbox_put_file(&vm, path, content_base64, mode).await;
         }
+        if let Some(m) = container_sandbox::load(&vm)? {
+            return self
+                .container_put_file(&m, path, content_base64, mode)
+                .await;
+        }
         if vm.backend == BackendKind::Vz {
             return self.vz_put_file(&vm, path, content_base64, mode).await;
         }
@@ -5513,6 +5537,9 @@ impl VmManager {
         let vm = self.get(id).await?;
         if procbox_sandbox::is_procbox(&vm) {
             return self.procbox_get_file(&vm, path).await;
+        }
+        if let Some(m) = container_sandbox::load(&vm)? {
+            return self.container_get_file(&m, path).await;
         }
         if vm.backend == BackendKind::Vz {
             return self.vz_get_file(&vm, path).await;
@@ -5543,6 +5570,8 @@ impl VmManager {
 
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let mut vm = self.get(id).await?;
+        // A native container has no VMM: stop its unit (or launcher) and cgroup first.
+        self.container_teardown(&vm).await;
         // A Paused VM is not "already stopped" — its process is fully
         // alive with vCPUs suspended (real bug found on real hardware: a
         // warm pool's never-claimed, still-Paused members were getting
@@ -6226,6 +6255,19 @@ impl VmManager {
                 me.run_pending_restarts().await;
                 me.ensure_crash_watchers().await;
                 me.run_power_schedules().await;
+                // Opt-in (`FLUXVM_KEEPAWAKE_WHILE_RUNNING=1`): hold a sleep assertion only while a vz VM runs.
+                {
+                    let running = me
+                        .store
+                        .list()
+                        .await
+                        .iter()
+                        .filter(|v| {
+                            v.request.backend == BackendKind::Vz && v.status == VmStatus::Running
+                        })
+                        .count();
+                    fluxvm_apple::keepawake::sync_running(running);
+                }
                 if !me
                     .scheduled_snapshots_busy
                     .swap(true, std::sync::atomic::Ordering::AcqRel)

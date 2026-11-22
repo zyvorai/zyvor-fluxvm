@@ -27,3 +27,30 @@ Status: parsers are tested on output captured from one Mac (`crates/fluxctl/src/
 keep-awake paths on a fake host and a temporary home. The read-only commands were run on that Mac. **Not run:** `keepawake install`
 against launchd, `tune --apply`, a Mac with no display or at the login window, a laptop on battery, or a throttled Mac (that sample is
 synthetic). On the capture Mac the two lock signals in `ioreg` disagreed; the check uses the session's own flag.
+
+## Host safety guards
+
+All of these read state without sudo and change no host setting.
+
+- **macOS build recorded with saved state.** `snapshot save` writes the host build (`sw_vers -buildVersion`) to `host-build.txt` in the
+  snapshot directory (fork and checkpoint copies carry it). A restore on a different build is not attempted: the guest boots cold from the
+  snapshot's disk and the log says why, or, with `FLUXVM_RESTORE_ON_OS_UPDATE=refuse` on the daemon, the launch fails with
+  "the saved VM state was written on macOS build X but this Mac now runs build Y". A snapshot with no record is restored as before.
+  Templates are cold-booted disks and are not affected.
+- **Locked-session guard.** Before restoring saved state the launch reads the console session. If it is locked or at the login window it fails
+  with "restoring saved VM state needs an unlocked login session ... run `fluxctl mac host headless-check`". Cold boots are not blocked.
+- **`mac-fleet doctor` / `status`.** The probe runs `fluxctl mac host headless-check --json` on each Mac over ssh. `doctor` prints one
+  `headless` warning per failing check; `status` has a SESSION column (`unlocked`, `locked`, `login window`, or `-` for an older install).
+- **Heartbeat facts and placement.** `fluxvm-agent node` adds an optional `health` object to its Apple capabilities (`session_unlocked`,
+  `sleep_held`, `thermal_limit`, `free_disk_mib`, `os_build`), all optional and skipped when empty, so older agents and central interoperate.
+  `apple_placement::score` rejects a Mac throttled below 80% or with under 5 GiB free, ranks a locked-session Mac last and a Mac whose sleep
+  is not held slightly lower. Unknown never counts against a Mac.
+- **Thermal admission.** Creating a `vz` VM on a Mac whose `pmset -g therm` shows `CPU_Speed_Limit` below 80 is refused, with an
+  `admission.deny` audit event.
+- **Keep-awake only while a VM runs (opt-in).** `FLUXVM_KEEPAWAKE_WHILE_RUNNING=1` on the daemon holds `caffeinate -i -m -s -w <pid>` while
+  a `vz` VM runs and releases it after the last stops (checked on the reaper tick). Off by default.
+- **Automatic macOS updates.** `status` shows `AutomaticallyInstallMacOSUpdates`; `headless-check` warns when it is on.
+
+Not run on a Mac: none of this was exercised against a live daemon, a locked session, a throttled Mac or a macOS update; parsers and decisions
+are unit-tested on fixtures and fakes.
+

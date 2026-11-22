@@ -233,6 +233,13 @@ pub(crate) fn validate(o: &KubeOptions) -> Result<()> {
     if o.workers > MAX_WORKERS {
         bail!("--workers must be 0 to {MAX_WORKERS}");
     }
+    let backend = crate::vm_net::Backend::host();
+    if o.workers > 0 {
+        backend.require_private_network("--workers")?;
+    }
+    if o.rosetta {
+        backend.require_rosetta()?;
+    }
     if let Some(d) = &o.offline
         && !offline_path_ok(d)
     {
@@ -452,6 +459,22 @@ pub fn node_spec(
     key: &str,
     shares: Vec<Value>,
 ) -> Value {
+    let network = crate::vm_net::host_network_spec(node, vec![]);
+    node_spec_on(crate::vm_net::Backend::host(), network, o, role, node, user, key, shares)
+}
+
+/// [`node_spec`] for a given backend, with the `network` member given (see `vm_net`).
+#[allow(clippy::too_many_arguments)]
+pub fn node_spec_on(
+    backend: crate::vm_net::Backend,
+    network: Value,
+    o: &KubeOptions,
+    role: &Role,
+    node: &str,
+    user: &str,
+    key: &str,
+    shares: Vec<Value>,
+) -> Value {
     // The default image (Debian 13) already has curl, wget, iptables and ca-certificates, which is all the k3s installer
     // needs, so nothing is installed: cloud-init's `apt update` also downloads the source indexes that image's apt sources
     // list (10 MB and more), took over three minutes on a slow link, and when cloud-init's apt wrapper timed out the whole
@@ -464,7 +487,7 @@ pub fn node_spec(
     };
     // The default NAT network keeps each VM apart from the others. Nodes of one cluster share a private network
     // (`10.89.N.0/24`, one switch per name) as a second card, which carries the node-to-node and pod traffic.
-    let mut apple = if o.workers > 0 {
+    let mut apple = if o.workers > 0 && backend.has_private_network() {
         json!({"networks": [{"name": o.name}]})
     } else {
         json!({})
@@ -490,7 +513,7 @@ pub fn node_spec(
         "vcpus": o.cpus,
         "memory_mib": o.memory_mib,
         "disk_size_gib": o.disk_gib,
-        "network": {"mode": "user", "forwards": []},
+        "network": network,
         "apple": apple,
         "shared_folders": shares,
         "cloud_init": {
@@ -2799,6 +2822,8 @@ mod tests {
     }
 
     #[test]
+    // Apple-only behaviour: workers, Rosetta and the `apple` network card are rejected or absent on Linux (see vm_net).
+    #[cfg(target_os = "macos")]
     fn workers_join_over_a_private_network_with_the_servers_token() {
         let o = KubeOptions {
             name: "dev".into(),
@@ -2910,6 +2935,8 @@ mod tests {
     }
 
     #[test]
+    // Apple-only behaviour: workers, Rosetta and the `apple` network card are rejected or absent on Linux (see vm_net).
+    #[cfg(target_os = "macos")]
     fn workers_offline_and_tokens_are_validated() {
         assert!(
             validate(&KubeOptions {
@@ -3490,6 +3517,8 @@ mod tests {
     }
 
     #[test]
+    // Apple-only behaviour: workers, Rosetta and the `apple` network card are rejected or absent on Linux (see vm_net).
+    #[cfg(target_os = "macos")]
     fn rosetta_adds_the_share_and_a_unit_that_runs_before_k3s() {
         let o = KubeOptions {
             rosetta: true,

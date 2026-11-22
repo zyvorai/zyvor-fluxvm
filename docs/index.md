@@ -11,7 +11,7 @@ Every feature area and every document, in one place.
 | A Mac with Apple silicon | [install-macos.md](install-macos.md) (Homebrew) or [install.md](install.md) (`curl \| bash`, no sudo), then [macos.md](macos.md) |
 | A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
 | A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
-| Something that is not working | [troubleshooting.md](troubleshooting.md) |
+| Something that is not working | [troubleshooting.md](troubleshooting.md), or `fluxctl cluster status` and `fluxctl fix` ([cluster-home.md](cluster-home.md)) |
 | A job in mind (CI runners, agent sandboxes, per-branch environments) | [Use cases](#use-cases) below |
 
 ## Feature highlights
@@ -103,6 +103,9 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) |
 | The Linux package: what is in it, how it is built and checked | [docs/linux-package.md](linux-package.md) |
 | Per-node enrollment: join tokens, node credentials, `--node-auth` | [docs/fleet-enroll.md](fleet-enroll.md) |
+| Add a machine with a short code (`fluxctl cluster pair`), LAN discovery, threat model | [docs/cluster-pairing.md](cluster-pairing.md) |
+| Recipes: dev database, website, CI runner, private registry, monitoring | [docs/recipes.md](recipes.md) |
+| The cluster passport: one shareable document (`fluxctl cluster report`) | [docs/cluster-passport.md](cluster-passport.md) |
 | Installing FluxVM on many nodes: signed releases, waves, the pull installer | [docs/fleet-install.md](fleet-install.md) |
 | The container image: how it is assembled, signed and pinned; Kubernetes host prep and its limits | [docs/container-image.md](container-image.md) |
 | Use FluxVM from a serverless backend, with live events | [docs/serverless-agent.md](serverless-agent.md) |
@@ -110,8 +113,10 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Native macOS backend (`vz`), Mac sandboxes and agent density | [docs/macos.md](macos.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
 | Guest-network observability (flows, DNS, capture) and FluxDisk overlays (`fluxvm-blockd`) | [docs/netobs.md](netobs.md) · [docs/flux-disk.md](flux-disk.md) |
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
+| Linux: run an image as FluxVM's own container or as a microVM, `--runtime auto\|container\|vm` | [docs/linux-runtime.md](linux-runtime.md) |
 | A real Docker engine on a Mac (`docker build`, Compose, bind mounts) | [docs/docker-engine.md](docker-engine.md) |
 | A Kubernetes (k3s) cluster on a Mac | [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
+| Kairon (Kubernetes-native VM orchestration) on the cluster FluxVM made, with checks | [docs/kairon-on-kube.md](kairon-on-kube.md) |
 | Undo a bad `kubectl apply`, bisect cluster history, reset to a clean state, chaos-test, sleep and wake a cluster | [docs/kubernetes-on-mac.md#time-travel-for-your-cluster](kubernetes-on-mac.md#time-travel-for-your-cluster) |
 | GPUs for sandboxes | [docs/sandbox-gpus.md](sandbox-gpus.md) |
 | Host topology and NUMA binding | [docs/host-topology.md](host-topology.md) |

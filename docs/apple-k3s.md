@@ -1,4 +1,6 @@
-# Apple-silicon native k3s (`fluxctl kube apple`)
+# Apple-silicon native k3s (`fluxctl kube cluster`, formerly `kube apple`)
+
+> This is now the one k3s lifecycle for Mac and Linux: see [kubernetes-unified.md](kubernetes-unified.md). `fluxctl kube apple` is an alias of `fluxctl kube cluster`. Everything below describes the Mac (vz) backend; on Linux (QEMU) the guest is reached through a loopback ssh forward, and multi-node clusters, Rosetta and the LaunchAgent are Mac-only.
 
 `fluxctl kube apple` runs k3s in **persistent ARM64 Linux guests on Apple Virtualization, one VM per node**, and drives the whole
 lifecycle from the Mac. It sits next to [`fluxctl kube up`](kubernetes-on-mac.md), which it does not replace:
@@ -15,6 +17,9 @@ lifecycle from the Mac. It sits next to [`fluxctl kube up`](kubernetes-on-mac.md
 
 Use `kube up` for a quick developer cluster with time travel; use `kube apple` when the cluster should be long-lived, pinned to a k3s
 build you vetted, and spread over several VMs or Macs.
+
+For registries and mirrors, CIS hardening, add-on profiles, Cilium, GitOps (Flux, Argo CD), MetalLB, cert-manager, metrics-server, network policies,
+`upgrade --channel` and multi-server snapshot restore, see [apple-k3s-platform.md](apple-k3s-platform.md).
 
 > **Verification status.** The lifecycle logic is unit-tested against a fake host (order of operations, cleanup, redaction), and the
 > failover forwarder is tested over real loopback sockets. The shell scripts that run inside the guests, the Apple Virtualization
@@ -352,6 +357,7 @@ Each finding is `ok`, `warn` or `FAIL` with the command that fixes it; the exit 
 (degraded vs lost), an even server count, whether every VM runs, that every server's unit has the journal's shared flags, the forwarder or the kube-vip
 manifest on every server, the tunnel LaunchAgent, the kubeconfig file, the snapshot schedule, offsite copy and age (etcd clusters), and the age of the
 token rotations. It reads the cluster and the guests; it changes nothing. This is separate from `fluxctl kube doctor`, which checks the `kube up` clusters.
+`--cis` adds the read-only CIS profile audit of every server (see [apple-k3s-platform.md](apple-k3s-platform.md#kube-apple-doctor-name---cis-kube-doctor---cis)); `fluxctl kube doctor --cis` does the same for a `kube up` server.
 
 ## Acceptance on hardware: `scripts/test-kube-apple.sh`
 
@@ -419,3 +425,5 @@ Not exercised against real hardware at the time of writing:
 Not implemented: automatic LAN load balancing beyond the forwarder and kube-vip, restoring etcd with multiple servers automatically (the other servers are still wiped and
 rejoined by hand), HA for clusters that join from another Mac (each Mac's servers are journalled where they run), and recovering the host keys, SHA-256 and sizing of a lost
 journal (see `rebuild`).
+
+To put Kairon (Kubernetes-native VM orchestration) on a cluster made this way, and register Macs and Linux hosts as its VM nodes, see [kairon-on-kube.md](kairon-on-kube.md): `fluxctl kube kairon install`.

@@ -29,6 +29,9 @@ use uuid::Uuid;
 mod agent_session;
 mod backup_verify_cmd;
 mod cloud;
+mod cluster_cmd;
+mod cluster;
+mod cluster_remote;
 mod compose;
 mod config_check;
 mod contexts;
@@ -45,11 +48,13 @@ mod image_mgmt;
 mod infer;
 mod instancetype_cmd;
 mod kube_addons;
+mod vm_net;
 mod kube_apple;
 mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
 mod kube_checkpoint;
+mod kube_cis;
 mod kube_cp;
 mod kube_dev;
 mod kube_diff;
@@ -60,6 +65,7 @@ mod kube_harden;
 mod kube_host;
 mod kube_hostsvc;
 mod kube_ingress;
+mod kube_kairon;
 mod kube_kubeconfig;
 mod kube_logs;
 mod kube_mcp;
@@ -91,6 +97,10 @@ mod mac_cp;
 mod mac_events;
 mod mac_fleet;
 mod mac_fleet_inv;
+mod mac_fleet_agg;
+mod mac_fleet_lease;
+mod mac_fleet_roll;
+mod mac_fleet_status;
 mod mac_fleet_remote;
 mod mac_fleet_run;
 mod mac_fleet_sched;
@@ -108,6 +118,8 @@ mod mac_json;
 mod mac_queue;
 mod mac_ready;
 mod mac_runner;
+mod mac_runner_life;
+mod mac_runner_pool;
 mod mac_more;
 mod mac_plus;
 mod mac_store;
@@ -115,7 +127,10 @@ mod mac_trust;
 mod mcp;
 mod mcp_install;
 mod netobs;
+mod cluster_pair;
+mod cluster_report;
 mod node_agent;
+mod recipes;
 mod output;
 mod remote;
 mod run;
@@ -467,6 +482,9 @@ enum KubeCommand {
         #[arg(long)]
         delete_data: bool,
     },
+    /// Kairon (Kubernetes-native VM orchestration) on this cluster: `install`, `status`, `upgrade`, `uninstall`, `selftest`. The pinned
+    /// chart and kaironctl are verified; the k3s VM is the control plane and FluxVM hosts are the Kairon nodes.
+    Kairon(kube_kairon::KaironArgs),
     /// A port-forward that stays: give a Service a port on 127.0.0.1 and a `.localhost` name, kept open by `kube
     /// supervise` across pod restarts. `fluxctl kube forward web` (80 -> 8080), `--list`, `--remove`.
     Forward {
@@ -743,6 +761,9 @@ enum KubeCommand {
         /// Make the safe repairs inside the VM (remove unused images, restart its resolver, step its clock), then check again.
         #[arg(long)]
         fix: bool,
+        /// Also audit the server against the k3s CIS profile (read-only; `kube addons config --cis` writes it).
+        #[arg(long)]
+        cis: bool,
     },
     /// Make this cluster the current `kubectl` context in ~/.kube/config (`fluxctl kube up` adds it without switching).
     Use(KubeArgs),
@@ -897,9 +918,12 @@ enum KubeCommand {
         #[command(subcommand)]
         command: KubeAgentCommand,
     },
-    /// An Apple-silicon native k3s cluster, one persistent ARM64 Linux VM per node: checksum-verified k3s, pinned SSH
-    /// host key, join, tunnel, upgrade, datastore backup/restore and recovery from ownership labels. See docs/apple-k3s.md.
-    Apple {
+    /// The one k3s cluster lifecycle, on a Mac (Apple Virtualization, arm64) or Linux (QEMU/KVM): one persistent VM per
+    /// node, checksum-verified k3s, pinned SSH host key, join, tunnel, upgrade, datastore backup/restore and recovery from
+    /// ownership labels. Multi-node clusters and Rosetta need the Mac backend. `apple` is the old name of this group.
+    /// See docs/kubernetes-unified.md.
+    #[command(alias = "apple")]
+    Cluster {
         #[command(subcommand)]
         command: kube_apple::AppleCommand,
     },
@@ -1014,12 +1038,25 @@ enum Command {
         #[command(subcommand)]
         command: node_agent::NodeAgentCommand,
     },
+    /// Ready-made things to run: a dev database, a website, a CI runner, a private registry, monitoring. Each prints
+    /// where to open it, where its credentials are, a backup schedule and how to uninstall. See docs/recipes.md.
+    Recipe {
+        #[command(subcommand)]
+        command: recipes::RecipeCommand,
+    },
     /// Several Macs as one fleet over SSH: `up user@host...` installs FluxVM (pinned, checksum-verified), starts the daemon,
     /// enrolls the node and optionally prepares k3s; plus `status`, `exec`, `upgrade`, `remove`, `doctor`, and `apply` for an
     /// inventory file. `--dry-run` shows the ssh commands. See docs/mac-fleet-quickstart.md.
     MacFleet {
         #[command(subcommand)]
         command: mac_fleet::MacFleetCommand,
+    },
+    /// A cluster of FluxVM machines, the k3s way: `cluster init` on the server (prints one join command), `cluster join URL`
+    /// on every other machine, `cluster add user@host` to bring Linux hosts in over SSH, `cluster nodes | token | remove`, and
+    /// optional add-ons (`cluster addon k3s`). Built on the fleet central, not on Kubernetes. See docs/cluster-quickstart.md.
+    Cluster {
+        #[command(subcommand)]
+        command: cluster::ClusterCommand,
     },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
@@ -1856,6 +1893,10 @@ enum Command {
     /// Explain an API error code (`NOT_FOUND`, `429`, `required`): what it means, what usually causes it and what to do.
     /// Offline; `--list` shows them all.
     Explain(explain::ExplainArgs),
+    /// Repair what is safe to repair by itself (start a stopped service, create a missing folder, pull a missing
+    /// image) and print the exact commands for the rest. Never runs sudo without `--sudo`, never changes a security
+    /// setting, and records what it changed.
+    Fix(cluster_cmd::FixArgs),
     /// Offline checks of a VM spec (`vm-spec check`): unknown keys, values the daemon refuses, settings the chosen
     /// backend ignores, missing paths.
     VmSpec {
@@ -3008,6 +3049,18 @@ enum SandboxCommand {
         #[arg(long, default_value_t = 200)]
         lines: usize,
     },
+    /// A native container sandbox (`--runtime container`) as the systemd unit it runs as, with the runtime decision and
+    /// its live state. REST: `GET /v1/sandboxes/{id}/inspect`.
+    Inspect {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Print only the unit file, ready to copy.
+        #[arg(long)]
+        unit: bool,
+    },
+    /// What this host supports for `--runtime container` and `--runtime vm`, with how to fix what is missing.
+    /// REST: `GET /v1/sandbox/runtimes`.
+    Runtimes,
     /// Fill the warm `vz` sandbox pool to COUNT slots in the daemon's
     /// background (macOS; needs --server). REST: `POST /v1/sandboxes/warm`.
     Warm {
@@ -5772,9 +5825,22 @@ async fn run_remote(
                 SandboxCommand::Logs { id, lines } => pretty(&serde_json::to_value(
                     sandbox_run::Target::Remote(r).logs(id, lines).await?,
                 )?)?,
+                SandboxCommand::Inspect { id, unit } => {
+                    let v = r
+                        .call(Method::GET, &format!("/v1/sandboxes/{id}/inspect"), None)
+                        .await?;
+                    if unit {
+                        print!("{}", v["unit"].as_str().unwrap_or_default());
+                    } else {
+                        pretty(&v)?
+                    }
+                }
+                SandboxCommand::Runtimes => {
+                    pretty(&r.call(Method::GET, "/v1/sandbox/runtimes", None).await?)?
+                }
                 _ => anyhow::bail!(
                     "this sandbox command is not available with --server; supported: run, logs, \
-                     speculate, changesets, changeset, approve, reject, apply, warm, density"
+                     inspect, runtimes, speculate, changesets, changeset, approve, reject, apply, warm, density"
                 ),
             }
         }
@@ -6194,6 +6260,18 @@ async fn main() -> Result<()> {
         };
         return tokio::task::block_in_place(|| mac_fleet::run(command));
     }
+    if matches!(&cli.command, Command::Cluster { command } if !matches!(command, cluster::ClusterCommand::Status(_))) {
+        let Command::Cluster { command } = cli.command else {
+            unreachable!()
+        };
+        return cluster::run(command).await;
+    }
+    if let Command::Recipe { .. } = &cli.command {
+        let Command::Recipe { command } = cli.command else {
+            unreachable!()
+        };
+        return tokio::task::block_in_place(|| recipes::run(command));
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -6424,6 +6502,24 @@ async fn main() -> Result<()> {
         std::process::exit(doctor::exit_code(&checks));
     }
 
+    // `cluster status` and `fix` read this machine (and, with an inventory, ssh to Macs): no VmManager, and they work
+    // when the daemon is down, which is when they are most needed.
+    if matches!(cli.command, Command::Cluster { .. } | Command::Fix(_)) {
+        let env = cluster_cmd::Env {
+            listen: cfg.listen.clone(),
+            state_dir: cfg.state_dir.clone(),
+            remote: remote::Remote::new(&cfg.listen, cli.server_token.clone()),
+        };
+        let code = match &cli.command {
+            Command::Cluster {
+                command: cluster::ClusterCommand::Status(a),
+            } => cluster_cmd::run_status(a, &env).await?,
+            Command::Fix(a) => cluster_cmd::run_fix(a, &env, &cfg.state_dir).await?,
+            _ => unreachable!(),
+        };
+        std::process::exit(code);
+    }
+
     // `status` without an id is the host panel (no write access required).
     // With an id it is machinectl-style VM status and needs the manager.
     if let Command::Status { verbose, id: None } = &cli.command {
@@ -6523,12 +6619,15 @@ async fn main() -> Result<()> {
         | Command::Config { .. }
         | Command::ExecPolicy { .. }
         | Command::Explain(_)
+        | Command::Fix(_)
         | Command::VmSpec { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
         | Command::NodeAgent { .. }
+        | Command::Recipe { .. }
         | Command::MacFleet { .. }
+        | Command::Cluster { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
@@ -7718,6 +7817,17 @@ async fn main() -> Result<()> {
                     serde_json::to_string_pretty(&m.sandbox_logs(id, lines).await?)?
                 );
             }
+            SandboxCommand::Inspect { id, unit } => {
+                let i = m.container_inspect(id).await?;
+                if unit {
+                    print!("{}", i.unit);
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&i)?);
+                }
+            }
+            SandboxCommand::Runtimes => {
+                println!("{}", serde_json::to_string_pretty(&m.runtime_report())?);
+            }
             SandboxCommand::Warm { .. } => {
                 anyhow::bail!(
                     "sandbox warm fills the pool in the daemon's background: use --server"
@@ -8729,6 +8839,12 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 kube_apps::remove(api, &cluster.options()?, app, delete_data).await?
             );
         }
+        KubeCommand::Kairon(a) => {
+            let code = kube_kairon::run(a).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         KubeCommand::Forward {
             cluster,
             service,
@@ -8963,9 +9079,12 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             let snapshot = kube_ps::gather(api, &cluster.options()?).await?;
             print!("{}", kube_ps::render(&snapshot));
         }
-        KubeCommand::Doctor { cluster, fix } => {
+        KubeCommand::Doctor { cluster, fix, cis } => {
             let o = cluster.options()?;
             let mut checks = kube_doctor::run(api, &o).await?;
+            if cis {
+                checks.extend(kube_cis::run_kube(api, &o).await?);
+            }
             print!("{}", kube_doctor::render(&checks));
             let plan = kube_doctor::plan(&checks);
             if fix && !plan.is_empty() {
@@ -8974,6 +9093,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 }
                 println!("\nchecking again:");
                 checks = kube_doctor::run(api, &o).await?;
+                if cis {
+                    checks.extend(kube_cis::run_kube(api, &o).await?);
+                }
                 print!("{}", kube_doctor::render(&checks));
             } else if fix {
                 println!("nothing `--fix` can repair");
@@ -9048,7 +9170,10 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         KubeCommand::Wake { cluster } => {
             println!("{}", kube_checkpoint::wake(api, &cluster.options()?).await?);
         }
-        KubeCommand::Apple { command } => kube_apple::run(api, command).await?,
+        KubeCommand::Cluster { command } => {
+            kube_apple::deprecation_note(&std::env::args().collect::<Vec<_>>());
+            kube_apple::run(api, command).await?
+        }
         KubeCommand::Services { cluster } => {
             let v = kube_host::services(api, &cluster.options()?).await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
@@ -10293,6 +10418,49 @@ mod sandbox_cli_tests {
     }
 
     #[test]
+    fn sandbox_run_runtime_flags_and_inspect_parse() {
+        let Command::Sandbox {
+            command: SandboxCommand::Run(args),
+        } = parse(&[
+            "sandbox",
+            "run",
+            "alpine:3.22",
+            "--runtime",
+            "container",
+            "--trust",
+            "dev",
+            "--allow-container-untrusted",
+            "--cpu-percent",
+            "50",
+            "--pids",
+            "64",
+            "--net",
+            "host",
+            "--print-unit",
+        ])
+        else {
+            panic!("expected SandboxCommand::Run");
+        };
+        assert_eq!(args.rt.runtime.as_deref(), Some("container"));
+        assert_eq!(args.rt.trust.as_deref(), Some("dev"));
+        assert!(args.rt.allow_container_untrusted && args.rt.print_unit);
+        assert_eq!((args.rt.cpu_percent, args.rt.pids), (Some(50), Some(64)));
+        let id = Uuid::new_v4();
+        let Command::Sandbox {
+            command: SandboxCommand::Inspect { id: got, unit },
+        } = parse(&["sandbox", "inspect", &id.to_string(), "--unit"])
+        else {
+            panic!("expected SandboxCommand::Inspect");
+        };
+        assert_eq!(got, id);
+        assert!(unit);
+        assert!(matches!(
+            parse(&["sandbox", "runtimes"]),
+            Command::Sandbox { command: SandboxCommand::Runtimes }
+        ));
+    }
+
+    #[test]
     fn sandbox_run_and_logs_parse() {
         let Command::Sandbox {
             command: SandboxCommand::Run(args),
@@ -10800,6 +10968,14 @@ mod backlog_tier1_cli_tests {
             cli(&["vm-spec", "check", "vm.json", "--offline", "--strict"]).command,
             Command::VmSpec { .. }
         ));
+        assert!(matches!(
+            cli(&["cluster", "status", "--json", "-f", "fleet.yaml"]).command,
+            Command::Cluster { .. }
+        ));
+        let Command::Fix(f) = cli(&["fix", "--dry-run", "--sudo", "--yes"]).command else {
+            panic!("expected fix");
+        };
+        assert!(f.dry_run && f.sudo && f.yes);
     }
 
     #[test]

@@ -55,6 +55,9 @@ pub struct ImagesExtra {
     /// Also show build-cache entries.
     #[arg(short = 'a', long)]
     pub all: bool,
+    /// List the images of every Mac of this inventory (`fleet.yaml`) over ssh instead of this Mac's store.
+    #[arg(long, value_name = "INVENTORY", num_args = 0..=1, default_missing_value = "fleet")]
+    pub fleet: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

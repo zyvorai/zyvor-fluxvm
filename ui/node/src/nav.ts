@@ -5,7 +5,13 @@ import type { NavGroup } from '@fluxvm/ui-core';
 
 // Phases add groups here as their pages land; nothing is listed that does not work.
 export const NAV: NavGroup[] = [
-  { label: 'Overview', items: [{ to: '/', label: 'Overview' }] },
+  {
+    label: 'Home',
+    items: [
+      { to: '/', label: 'Home', desc: 'Is everything OK, in plain words' },
+      { to: '/overview', label: 'Overview', desc: 'Machine counts and live events' },
+    ],
+  },
   {
     label: 'Machines',
     items: [

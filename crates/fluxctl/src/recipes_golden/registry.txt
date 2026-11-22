@@ -1,0 +1,19 @@
+Private registry
+
+Steps
+  1. hash the generated password for the registry (the password goes in through stdin)
+       docker run --rm -i --entrypoint htpasswd httpd:2 -Bin fluxvm   (secret on stdin)   > /home/demo/.config/fluxvm/recipes/registry/htpasswd
+  2. start the registry
+       docker run -d --name fluxvm-registry --restart unless-stopped -p 5000:5000 -v fluxvm-registry-data:/var/lib/registry -v /home/demo/.config/fluxvm/recipes/registry:/auth:ro -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=FluxVM -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd registry:2
+
+Open it      localhost:5000
+Credentials
+  user: fluxvm
+  login: fluxctl recipe credentials registry | docker login localhost:5000 -u fluxvm --password-stdin
+  generated (password), kept in /home/demo/.config/fluxvm/recipes/registry/credentials (mode 0600); show with `fluxctl recipe credentials registry`
+Backup       weekly, Sunday 03:00
+             docker run --rm -v fluxvm-registry-data:/data -v "$HOME/backups":/out alpine tar czf /out/registry-$(date +%F).tgz -C /data .
+Uninstall
+  docker rm -f fluxvm-registry
+  docker volume rm fluxvm-registry-data
+Note         Plain HTTP on this machine: Docker allows that for localhost. Put TLS in front (docs/recipes.md) before using it from other machines.

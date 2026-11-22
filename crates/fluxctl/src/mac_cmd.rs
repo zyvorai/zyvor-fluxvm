@@ -180,6 +180,7 @@ impl MacCommand {
             Self::Build { dry_run, .. } => *dry_run,
             // The fleet scheduler talks to the Macs over ssh, not to a daemon from here.
             Self::Run { sched, .. } => sched.fleet.is_some(),
+            Self::Ps { opts, .. } => opts.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) => true,
             _ => !matches!(
@@ -721,6 +722,14 @@ pub async fn run(command: MacCommand) -> Result<()> {
     };
     match command {
         MacCommand::Runner(a) => return tokio::task::block_in_place(|| crate::mac_runner::run(a)),
+        MacCommand::Ps { json, opts } if opts.fleet.is_some() => {
+            let inv = opts.fleet.clone().unwrap_or_default();
+            return tokio::task::block_in_place(|| crate::mac_fleet_agg::ps_fleet(&inv, json, &opts));
+        }
+        MacCommand::Images { json, extra } if extra.fleet.is_some() => {
+            let inv = extra.fleet.clone().unwrap_or_default();
+            return tokio::task::block_in_place(|| crate::mac_fleet_agg::images_fleet(&inv, json, &extra));
+        }
         MacCommand::Run {
             publish,
             name,

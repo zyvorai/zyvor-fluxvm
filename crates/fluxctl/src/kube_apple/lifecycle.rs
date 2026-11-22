@@ -182,7 +182,17 @@ async fn ensure_vm<H: Host>(h: &H, store: &Store, st: &mut State, node: &str) ->
     let key = h.new_host_key()?;
     st.node_mut(node).unwrap().host_key = key.public.clone();
     store.save(st)?;
-    let spec = script::node_spec(&st.params, &st.name, node, &st.user, &h.ssh_pub(), &key);
+    let backend = h.backend();
+    let spec = script::node_spec_on(
+        backend,
+        if backend == crate::vm_net::Backend::Qemu { h.ssh_forward_port(&n.vm_name) } else { 0 },
+        &st.params,
+        &st.name,
+        node,
+        &st.user,
+        &h.ssh_pub(),
+        &key,
+    );
     let id = h.create_vm(spec).await?;
     st.node_mut(node).unwrap().id = Some(id.clone());
     store.save(st)?;
@@ -213,7 +223,7 @@ async fn bootstrap_node<H: Host>(
     unit: &UnitOpts<'_>,
 ) -> Result<()> {
     let role = unit.role;
-    sh(h, st, node, &script::preflight_script()).await?;
+    sh(h, st, node, &script::preflight_script_for(h.backend().guest_arch())).await?;
     match install {
         Install::Binary { data, sha256 } => {
             h.ssh(
@@ -300,6 +310,9 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
         bail!(
             "--servers must be 1 or an odd number up to {MAX_SERVERS} (etcd needs a majority; an even count tolerates no more failures than one fewer)"
         );
+    }
+    if req.servers > 1 {
+        h.backend().require_private_network(&format!("--servers {}", req.servers))?;
     }
     if req.servers > 1 && req.datastore != Datastore::Etcd {
         bail!("--servers {} needs embedded etcd (--embedded-etcd)", req.servers);
@@ -570,6 +583,9 @@ pub async fn join<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinRe
 async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<JoinReport> {
     if !name_ok(&req.cluster) {
         bail!("{:?} is not a valid cluster name", req.cluster);
+    }
+    if req.external.is_none() {
+        h.backend().require_private_network("adding a node to a local cluster")?;
     }
     let (mut st, url, token, agent_token) = match &req.external {
         Some((url, file)) => {

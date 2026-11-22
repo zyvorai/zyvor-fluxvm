@@ -1,0 +1,15 @@
+CI runner (GitHub Actions)
+
+Steps
+  1. serve GitHub Actions jobs, one fresh macOS VM each (stays running; Ctrl-C to stop)
+       fluxctl mac runner --repo acme/app --token-file /home/demo/.config/fluxvm/recipes/ci-runner/github.token --template registry.example/ci-mac:1 --label fluxvm
+
+Open it      https://github.com/acme/app/settings/actions/runners
+Credentials
+  none
+Backup       nothing to back up: runners are disposable
+             none
+Uninstall
+  fluxctl mac ps
+Note         Workflow: `runs-on: [self-hosted, macOS, ARM64, fluxvm]`.
+Note         Save a GitHub token that may create runners in /home/demo/.config/fluxvm/recipes/ci-runner/github.token (mode 0600). `recipe run` stops if it is missing or readable by others; it is never passed on a command line.

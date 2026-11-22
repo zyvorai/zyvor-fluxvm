@@ -5,6 +5,7 @@
 //! functions of validated inputs. No script here takes the cluster token: it only ever travels on stdin.
 
 use super::model::*;
+use crate::vm_net::{Backend, network_spec};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -40,7 +41,28 @@ pub fn node_spec(
     ssh_pub: &str,
     key: &HostKey,
 ) -> Value {
+    node_spec_on(Backend::Vz, 0, p, cluster, node, user, ssh_pub, key)
+}
+
+/// [`node_spec`] for a backend. `ssh_port` is the loopback forward a `Qemu` guest is reached through (unused under `Vz`).
+#[allow(clippy::too_many_arguments)]
+pub fn node_spec_on(
+    backend: Backend,
+    ssh_port: u16,
+    p: &Params,
+    cluster: &str,
+    node: &str,
+    user: &str,
+    ssh_pub: &str,
+    key: &HostKey,
+) -> Value {
     let dropin = format!("HostKey {HOSTKEY_GUEST}\n");
+    // One private switch per cluster (vz only): the second card carries node-to-node and pod traffic.
+    let apple = if backend.has_private_network() {
+        json!({"networks": [{"name": cluster}]})
+    } else {
+        json!({})
+    };
     json!({
         "name": vm_name(node),
         "backend": "auto",
@@ -48,9 +70,8 @@ pub fn node_spec(
         "vcpus": p.cpus,
         "memory_mib": p.memory_mib,
         "disk_size_gib": p.disk_gib,
-        "network": {"mode": "user", "forwards": []},
-        // One private switch per cluster: the second card carries node-to-node and pod traffic.
-        "apple": {"networks": [{"name": cluster}]},
+        "network": network_spec(backend, vec![], ssh_port),
+        "apple": apple,
         "shared_folders": [],
         "cloud_init": {
             "hostname": node,
@@ -70,11 +91,18 @@ pub fn node_spec(
 
 /// Reads the guest's boot id and architecture; the first command run in every node.
 pub fn preflight_script() -> String {
-    "set -eu; test \"$(uname -m)\" = aarch64 || { echo 'guest is not arm64' >&2; exit 21; }; \
-     command -v systemctl >/dev/null || { echo 'guest has no systemd' >&2; exit 21; }; \
-     sudo -n true || { echo 'passwordless sudo is required' >&2; exit 21; }; \
-     command -v sha256sum >/dev/null || { echo 'sha256sum is missing' >&2; exit 21; }"
-        .into()
+    preflight_script_for("aarch64")
+}
+
+/// [`preflight_script`] for a guest architecture (`uname -m`: `aarch64` or `x86_64`).
+pub fn preflight_script_for(arch: &str) -> String {
+    assert!(arch.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    format!(
+        "set -eu; test \"$(uname -m)\" = {arch} || {{ echo 'guest is not {arch}' >&2; exit 21; }}; \
+     command -v systemctl >/dev/null || {{ echo 'guest has no systemd' >&2; exit 21; }}; \
+     sudo -n true || {{ echo 'passwordless sudo is required' >&2; exit 21; }}; \
+     command -v sha256sum >/dev/null || {{ echo 'sha256sum is missing' >&2; exit 21; }}"
+    )
 }
 
 /// Receives a k3s binary on stdin into a private temporary file, verifies its digest inside the guest and installs it.
@@ -580,6 +608,26 @@ mod tests {
             s["cloud_init"]["ssh_authorized_keys"][0],
             "ssh-ed25519 USER"
         );
+    }
+
+    #[test]
+    fn the_linux_spec_has_a_loopback_ssh_forward_and_no_private_switch() {
+        let s = node_spec_on(Backend::Qemu, 22345, &params(), "dev", "dev", "sus", "ssh-ed25519 USER", &key());
+        assert_eq!(s["network"]["forwards"][0]["host_port"], 22345);
+        assert_eq!(s["network"]["forwards"][0]["guest_port"], 22);
+        assert_eq!(s["network"]["forwards"][0]["host_addr"], "127.0.0.1");
+        assert_eq!(s["apple"], serde_json::json!({}));
+        assert_eq!(crate::run::loopback_ssh_endpoint(&s).as_deref(), Some("127.0.0.1:22345"));
+        // the Mac spec is unchanged
+        let m = node_spec_on(Backend::Vz, 0, &params(), "dev", "dev", "sus", "ssh-ed25519 USER", &key());
+        assert_eq!(m["network"]["forwards"], serde_json::json!([]));
+        assert_eq!(m["apple"]["networks"][0]["name"], "dev");
+    }
+
+    #[test]
+    fn the_preflight_checks_the_architecture_asked_for() {
+        assert!(preflight_script_for("x86_64").contains("= x86_64"));
+        assert!(preflight_script().contains("= aarch64"));
     }
 
     #[test]

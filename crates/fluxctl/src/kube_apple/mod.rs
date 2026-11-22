@@ -9,16 +9,40 @@
 
 mod agent;
 mod doctor;
+mod gitops;
 mod ha;
 mod ha_model;
 pub(crate) mod host;
 pub(crate) mod lifecycle;
 pub(crate) mod model;
+mod netpol;
 mod ops;
+pub(crate) mod pins;
+pub(crate) mod platform;
+mod platform_cmd;
+mod recipes;
+mod restore_all;
 pub(crate) mod script;
 mod script_ha;
+mod suc;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_backend {
+    use super::*;
+
+    fn a(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_old_name_is_noted_but_the_forwarder_and_the_new_name_are_not() {
+        assert!(wants_deprecation_note(&a(&["fluxctl", "kube", "apple", "list"])));
+        assert!(!wants_deprecation_note(&a(&["fluxctl", "kube", "cluster", "list"])));
+        assert!(!wants_deprecation_note(&a(&["fluxctl", "kube", "apple", "tunnel", "dev", "--foreground"])));
+    }
+}
 
 use crate::run::VmApi;
 use anyhow::{Result, bail};
@@ -26,16 +50,18 @@ use clap::{Args, Subcommand};
 use lifecycle::Install;
 use model::*;
 use std::path::PathBuf;
+pub use platform::PlatformArgs;
+pub use platform_cmd::PlatformCommand;
 
 #[derive(Args, Debug, Clone)]
 pub struct BinaryArgs {
-    /// The official k3s-arm64 release binary, downloaded on the Mac. Its SHA-256 is checked here and again in the guest.
+    /// The official k3s release binary for the guests' architecture (`k3s-arm64` on a Mac, `k3s` on x86-64 Linux), downloaded on this host. Its SHA-256 is checked here and again in the guest.
     #[arg(long, value_name = "FILE")]
     binary: Option<PathBuf>,
     /// The binary's published SHA-256 (64 hexadecimal characters).
     #[arg(long, value_name = "HEX")]
     sha256: Option<String>,
-    /// A `sha256sum-arm64.txt` from the release; the entry named like the binary is used.
+    /// The release's `sha256sum-arm64.txt` (`sha256sum-amd64.txt` on x86-64 Linux); the entry named like the binary is used.
     #[arg(long, value_name = "FILE")]
     sha256_file: Option<PathBuf>,
     /// The image already has k3s and its systemd service; install nothing.
@@ -114,6 +140,13 @@ pub enum SnapshotCommand {
         snapshot: String,
         #[arg(long)]
         yes: bool,
+        /// Several servers: stop them all, restore on one, wipe the etcd data of the others and rejoin them one at a time.
+        /// Without --yes it prints that plan. See docs/apple-k3s-platform.md.
+        #[arg(long)]
+        rejoin_servers: bool,
+        /// With --rejoin-servers: the server whose disk holds the snapshot (default: the first).
+        #[arg(long, requires = "rejoin_servers", value_name = "NODE")]
+        from_node: Option<String>,
     },
     /// The scheduled snapshots: set the cron, retention, compression and an S3 target on every server (restarting them one
     /// at a time), show what they have, or go back to k3s's defaults. S3 keys come from a mode-600 file or the environment,
@@ -217,6 +250,9 @@ pub enum AppleCommand {
         disable: Vec<String>,
         #[arg(long)]
         secrets_encryption: bool,
+        /// Registries, embedded registry, CIS hardening, add-on profile and Cilium (see docs/apple-k3s-platform.md).
+        #[command(flatten)]
+        platform: PlatformArgs,
     },
     /// Add a node, in a VM of its own on the cluster's private network. The token is read on the server and goes to the
     /// new node on stdin; it is never printed or put in an argument.
@@ -297,6 +333,9 @@ pub enum AppleCommand {
         /// JSON instead of text.
         #[arg(long)]
         json: bool,
+        /// Also audit each server against the CIS profile of `create --harden cis` (read-only).
+        #[arg(long)]
+        cis: bool,
     },
     /// Write a new journal for a cluster whose journal was lost, from the VMs' ownership labels and the guests. Without
     /// `--accept-host-keys` it only says what it would recover. The SSH host keys pinned at creation cannot be recovered:
@@ -310,6 +349,11 @@ pub enum AppleCommand {
         api_port: u16,
         #[command(flatten)]
         vm: VmArgs,
+    },
+    /// Registries, hardening, GitOps, MetalLB, cert-manager, metrics-server and network policies for an existing cluster.
+    Platform {
+        #[command(subcommand)]
+        command: PlatformCommand,
     },
     /// Every VM, ssh, the k3s service, node readiness and version skew, as JSON. Exits non-zero when unhealthy.
     Status { name: String },
@@ -335,6 +379,10 @@ pub enum AppleCommand {
         name: String,
         #[command(flatten)]
         binary: BinaryArgs,
+        /// Upgrade through the system-upgrade-controller, following a k3s release channel (stable, latest, testing, v1.31).
+        /// Instead of --binary; see docs/apple-k3s-platform.md.
+        #[arg(long, value_name = "CHANNEL", conflicts_with_all = ["binary", "sha256", "sha256_file", "preinstalled"])]
+        channel: Option<String>,
         #[arg(long)]
         allow_downgrade: bool,
         /// Skip the automatic backup.
@@ -405,7 +453,7 @@ pub fn resolve_install(b: &BinaryArgs, default: Option<Install>) -> Result<Insta
             let entry = path
                 .file_name()
                 .and_then(|f| f.to_str())
-                .unwrap_or("k3s-arm64");
+                .unwrap_or(crate::vm_net::Backend::host().k3s_binary());
             let Some(sha) = expected_sha(b.sha256.as_deref(), b.sha256_file.as_deref(), entry)?
             else {
                 bail!("--binary requires its published --sha256 (or --sha256-file)");
@@ -426,7 +474,26 @@ pub fn resolve_install(b: &BinaryArgs, default: Option<Install>) -> Result<Insta
     }
 }
 
+/// `kube apple` is the old name of `kube cluster`; say so on stderr, except for the long-running forwarder (its own
+/// output goes to a log). Machine output on stdout is never touched.
+pub fn deprecation_note(args: &[String]) {
+    if wants_deprecation_note(args) {
+        eprintln!("note: `fluxctl kube apple` is now `fluxctl kube cluster` (the same command on a Mac and on Linux); the old name still works.");
+    }
+}
+
+fn wants_deprecation_note(args: &[String]) -> bool {
+    let typed = |w: &str| args.iter().any(|a| a == w);
+    typed("apple") && !typed("cluster") && !typed("--foreground")
+}
+
 pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
+    if let AppleCommand::Platform { command: c } = &command
+        && c.is_offline()
+    {
+        let AppleCommand::Platform { command: c } = command else { unreachable!() };
+        return platform_cmd::run_offline(c);
+    }
     let store = Store::new(default_root()?);
     // The first connection to a guest happens through `RealHost`; reading the key and user fails early and clearly.
     let user = match &command {
@@ -453,10 +520,18 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
             service_cidr,
             cluster_dns,
             cluster_domain,
-            disable,
+            mut disable,
             secrets_encryption,
+            platform,
         } => {
             let install = resolve_install(&binary, None)?;
+            // Platform flags are checked (and the registries file read) before any VM exists.
+            let platform_plan = if platform.is_empty() { None } else { Some(platform_cmd::plan_from_args(&platform)?) };
+            for d in platform_plan.iter().flat_map(|p| p.disable.iter()) {
+                if !disable.contains(d) {
+                    disable.push(d.clone());
+                }
+            }
             let req = lifecycle::CreateReq {
                 name,
                 params: vm.params(),
@@ -472,7 +547,11 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
                 vip,
                 flags: SharedFlags { cluster_cidr, service_cidr, cluster_dns, cluster_domain, disable, secrets_encryption },
             };
-            json(&lifecycle::create(&h, &store, &req).await?)
+            let report = lifecycle::create(&h, &store, &req).await?;
+            let Some(plan) = platform_plan else { return json(&report) };
+            let mut v = serde_json::to_value(&report)?;
+            v["platform"] = serde_json::to_value(platform_cmd::after_create(&h, &store, &req.name, &plan).await?)?;
+            json(&v)
         }
         AppleCommand::Join { cluster, vm, binary, node, role, url, token_file, keep_failed } => {
             let external = url.zip(token_file);
@@ -561,7 +640,10 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
                 Ok(())
             }
         },
-        AppleCommand::Upgrade { name, binary, allow_downgrade, no_backup, drain } => {
+        AppleCommand::Upgrade { name, channel: Some(channel), allow_downgrade, no_backup, drain, .. } => {
+            platform_cmd::upgrade_channel(&h, &store, &name, channel, allow_downgrade, no_backup, drain).await
+        }
+        AppleCommand::Upgrade { name, binary, allow_downgrade, no_backup, drain, channel: None } => {
             let Install::Binary { data, sha256 } = resolve_install(&binary, None)? else {
                 bail!("upgrade needs --binary with its checksum");
             };
@@ -587,7 +669,10 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
             SnapshotCommand::Pull { name, snapshot, output } => {
                 json(&lifecycle::snapshot_pull(&h, &store, &name, &snapshot, output).await?)
             }
-            SnapshotCommand::Restore { name, snapshot, yes } => {
+            SnapshotCommand::Restore { name, snapshot, yes, rejoin_servers: true, from_node } => {
+                platform_cmd::restore_rejoin(&h, &store, &name, snapshot, from_node, yes).await
+            }
+            SnapshotCommand::Restore { name, snapshot, yes, .. } => {
                 lifecycle::snapshot_restore(&h, &store, &name, &snapshot, yes).await
             }
             SnapshotCommand::Schedule {
@@ -620,8 +705,14 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
         AppleCommand::Token { command: TokenCommand::Rotate { name, agent, server } } => {
             json(&ops::token_rotate(&h, &store, &name, &ops::RotateReq { agent, server }).await?)
         }
-        AppleCommand::Doctor { name, json: as_json } => {
-            let r = doctor::doctor(&h, &store, &name).await?;
+        AppleCommand::Platform { command } => platform_cmd::run(&h, &store, command).await,
+        AppleCommand::Doctor { name, json: as_json, cis } => {
+            let mut r = doctor::doctor(&h, &store, &name).await?;
+            if cis {
+                let st = store.require(&name)?;
+                r.findings.extend(platform_cmd::cis_findings(&platform::HostRemote { h: &h, st: &st }, &name).await);
+                r.ok = r.findings.iter().all(|f| f.level != doctor::Level::Fail);
+            }
             if as_json {
                 json(&r)?;
             } else {

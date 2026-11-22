@@ -24,6 +24,7 @@ fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
 fluxvm-cgroup = { path = "../fluxvm-cgroup" }
 fluxvm-procbox = { path = "../fluxvm-procbox" }
 fluxvm-oci-init = { path = "../fluxvm-oci-init" }
+fluxvm-ctr = { path = "../fluxvm-ctr" }
 fluxvm-diskinject = { path = "../fluxvm-diskinject" }
 anyhow = "1"
 base64 = "0.23"

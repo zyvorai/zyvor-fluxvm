@@ -1,0 +1,471 @@
+{
+  "title": "FluxVM Mac fleet and Apple k3s",
+  "uid": "fluxvm-mac",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "fluxvm",
+    "macos",
+    "k3s"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus"
+      },
+      {
+        "name": "instance",
+        "label": "Mac",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(fluxvm_mac_slots_max, instance)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Mac hosts: macOS guest slots (Apple allows 2 per Mac)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "title": "Slots used",
+      "type": "gauge",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(fluxvm_mac_slots_used{instance=~\"$instance\"})",
+          "legendFormat": "used"
+        }
+      ],
+      "description": "macOS guests running across the selected Macs.",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Slots used per Mac",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 9,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fluxvm_mac_slots_used{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{node}}"
+        },
+        {
+          "refId": "B",
+          "expr": "fluxvm_mac_slots_max{instance=~\"$instance\"}",
+          "legendFormat": "limit {{instance}}"
+        }
+      ],
+      "description": "Used against the limit of 2. A Mac at the limit queues the next job."
+    },
+    {
+      "id": 4,
+      "title": "Instances by state",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 15,
+        "y": 1,
+        "w": 9,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (fluxvm_mac_instances{instance=~\"$instance\"})",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "description": "`fluxctl mac ps` view of every Mac."
+    },
+    {
+      "id": 5,
+      "title": "Collection and templates",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 6,
+      "title": "Collector health",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (instance, source) (fluxvm_mac_collect_ok{instance=~\"$instance\"})",
+          "legendFormat": "{{instance}} {{source}}"
+        }
+      ],
+      "description": "0 means that part of the reading failed (daemon not answering, or the template store unreadable).",
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Templates held",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fluxvm_mac_templates{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{node}}"
+        }
+      ],
+      "description": "Templates in each Mac's store."
+    },
+    {
+      "id": 8,
+      "title": "Template store size",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fluxvm_mac_template_store_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{node}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Kubernetes on Apple guests (kube apple)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "title": "Clusters healthy",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (cluster) (fluxvm_kube_apple_cluster_healthy{instance=~\"$instance\"})",
+          "legendFormat": "{{cluster}}"
+        }
+      ],
+      "description": "`fluxctl kube apple status` finds no problem.",
+      "options": {
+        "colorMode": "background",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Node VMs up / Kubernetes Ready",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 6,
+        "y": 15,
+        "w": 10,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (cluster) (fluxvm_kube_apple_node_up{instance=~\"$instance\"})",
+          "legendFormat": "{{cluster}} VMs up"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (cluster) (fluxvm_kube_apple_node_ready{instance=~\"$instance\"})",
+          "legendFormat": "{{cluster}} Ready"
+        }
+      ],
+      "description": "Ready is absent while Kubernetes cannot be asked."
+    },
+    {
+      "id": 12,
+      "title": "Nodes not Ready",
+      "type": "table",
+      "gridPos": {
+        "x": 16,
+        "y": 15,
+        "w": 8,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fluxvm_kube_apple_node_ready{instance=~\"$instance\"} == 0",
+          "legendFormat": "{{cluster}} {{k8s_node}} ({{role}})"
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "transformations": [
+        {
+          "id": "reduce",
+          "options": {
+            "reducers": [
+              "lastNotNull"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "etcd snapshots",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fluxvm_kube_apple_snapshots{instance=~\"$instance\"}",
+          "legendFormat": "{{cluster}}"
+        }
+      ],
+      "description": "Absent for SQLite clusters."
+    },
+    {
+      "id": 14,
+      "title": "Newest etcd snapshot age",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fluxvm_kube_apple_snapshot_age_seconds{instance=~\"$instance\"}",
+          "legendFormat": "{{cluster}}"
+        }
+      ]
+    }
+  ]
+}

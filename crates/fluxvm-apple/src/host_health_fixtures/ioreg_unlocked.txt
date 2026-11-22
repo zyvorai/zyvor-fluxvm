@@ -1,0 +1,2 @@
+      "IOConsoleLocked" = No
+      "IOConsoleUsers" = ({"kCGSSessionOnConsoleKey"=Yes,"kSCSecuritySessionID"=100017,"kCGSSessionSystemSafeBoot"=No,"kCGSessionLoginDoneKey"=Yes,"kCGSSessionIDKey"=257,"kCGSSessionUserNameKey"="admin","kCGSSessionGroupIDKey"=20,"CGSSessionUniqueSessionUUID"="00000000-0000-0000-0000-000000000000","CGSSessionScreenLockedTime"=3942738672,"kCGSessionLongUserNameKey"="Admin User","CGSSessionScreenIsLocked"=No,"kCGSSessionAuditIDKey"=100017,"kCGSSessionSecureInputPID"=657,"kCGSSessionLoginwindowSafeLogin"=No,"kCGSSessionUserIDKey"=501})

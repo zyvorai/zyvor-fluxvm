@@ -55,6 +55,9 @@ impl VmManager {
         if procbox_sandbox::load_spec(&vm)?.is_some() {
             bail!("supervised jobs are not available on procbox sandboxes");
         }
+        if crate::container_sandbox::is_container(&vm) {
+            bail!("supervised jobs are not available on native container sandboxes");
+        }
         if vm.backend == fluxvm_core::model::BackendKind::Vz {
             if crate::oci_sandbox::is_oci(&vm) {
                 return self.oci_agent(&vm, request, timeout).await;
@@ -104,6 +107,25 @@ impl VmManager {
                 bail!("exec with argv is not supported on procbox sandboxes; pass a command");
             }
             return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
+        }
+        if let Some(m) = crate::container_sandbox::load(&vm)? {
+            if policy.is_some() {
+                bail!(
+                    "a per-exec policy is not supported on native container sandboxes (the container profile already confines them)"
+                );
+            }
+            let argv = match process {
+                Some(p) if !p.env.is_empty() || p.cwd.is_some() || p.user.is_some() || p.clean_env => {
+                    bail!(
+                        "exec on a native container takes only argv: env, cwd, user and clean_env are not supported (the container's own are used)"
+                    );
+                }
+                Some(p) => p.argv,
+                None => vec!["/bin/sh".to_string(), "-c".to_string(), command],
+            };
+            return self
+                .container_exec(&vm, &m, argv, timeout_seconds)
+                .await;
         }
         if vm.backend == fluxvm_core::model::BackendKind::Vz {
             return self

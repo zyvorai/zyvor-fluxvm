@@ -21,6 +21,13 @@ pub fn run_with_timeout(
     timeout: Option<Duration>,
     what: &str,
 ) -> Result<ExecOut> {
+    // Own process group, so a timeout can kill the whole tree: a shell that forks (dash does) would otherwise leave a
+    // grandchild holding the output pipes open, and the reads below would wait for it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -52,6 +59,13 @@ pub fn run_with_timeout(
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             timed_out = true;
+            #[cfg(unix)]
+            if let Ok(pid) = i32::try_from(child.id()) {
+                // SAFETY: killpg only sends a signal; the group id is our child's pid (process_group(0) above).
+                unsafe {
+                    libc::killpg(pid, libc::SIGKILL);
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
             break None;

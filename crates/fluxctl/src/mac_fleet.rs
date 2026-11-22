@@ -170,6 +170,10 @@ pub struct ApplyArgs {
 pub struct StatusArgs {
     #[command(flatten)]
     pub which: Which,
+    /// Add, per Mac: whether it is drained (and for how long), the templates it holds, free disk and power, and the
+    /// headless checks (`mac host headless-check`). With --json the same keys are added. Read-only.
+    #[arg(long)]
+    pub detail: bool,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -200,6 +204,16 @@ pub struct UpgradeArgs {
     /// Upgrade a Mac that has running VMs (the daemon restarts).
     #[arg(long)]
     pub force: bool,
+    /// One Mac at a time: drain it, wait for its VMs to end, upgrade, wait until its daemon answers at the new version,
+    /// put it back. The first failure stops the roll and leaves that Mac drained. Needs the scheduler's state file.
+    #[arg(long, conflicts_with = "force")]
+    pub rolling: bool,
+    /// With --rolling: seconds to wait for a drained Mac's VMs to end.
+    #[arg(long, value_name = "SECS", default_value_t = 3600, requires = "rolling")]
+    pub drain_timeout: u64,
+    /// With --rolling: seconds to wait for the daemon to answer at the new version after the upgrade.
+    #[arg(long, value_name = "SECS", default_value_t = 300, requires = "rolling")]
+    pub health_timeout: u64,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -264,6 +278,8 @@ pub struct StatusRow {
     pub macos_slots: String,
     pub k3s: String,
     pub node: String,
+    /// `unlocked`, `locked`, `login window` or `-` (the Mac's own `mac host headless-check`).
+    pub session: String,
     pub error: Option<String>,
 }
 
@@ -546,7 +562,7 @@ pub(crate) fn blank(target: &Target) -> HostResult {
     }
 }
 
-fn run_steps(
+pub(crate) fn run_steps(
     t: &dyn Transport,
     target: &Target,
     steps: &[Step],
@@ -717,12 +733,48 @@ pub fn doctor_host(t: &dyn Transport, target: &Target, want: Want) -> HostResult
     r.findings = check(&facts, want);
     if facts.known {
         r.findings.extend(installed_findings(&facts));
+        r.findings.extend(headless_findings(&facts));
     }
     r.ok = !has_errors(&r.findings);
     if !r.ok {
         r.error = Some("preflight found problems".into());
     }
     r
+}
+
+/// What the Mac's own `mac host headless-check` said: one `headless` finding per check, at most a warning (a locked session
+/// stops restores, not cold boots, so it should not fail a doctor run).
+fn headless_findings(f: &Facts) -> Vec<Finding> {
+    let Some(checks) = f
+        .headless_json
+        .as_ref()
+        .and_then(|j| j.get("checks")?.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<Finding> = checks
+        .iter()
+        .filter_map(|c| {
+            let st = c["status"].as_str()?;
+            if st == "ok" {
+                return None;
+            }
+            Some(fnd(
+                Level::Warn,
+                "headless",
+                format!(
+                    "{}: {}",
+                    c["name"].as_str().unwrap_or("host"),
+                    c["detail"].as_str().unwrap_or("")
+                ),
+                c["fix"].as_str().unwrap_or("fluxctl mac host headless-check"),
+            ))
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(fnd(Level::Ok, "headless", "the login session can restore saved VM state", ""));
+    }
+    out
 }
 
 fn installed_findings(f: &Facts) -> Vec<Finding> {
@@ -772,6 +824,7 @@ pub fn status_host(t: &dyn Transport, target: &Target) -> StatusRow {
         macos_slots: dash(),
         k3s: dash(),
         node: dash(),
+        session: dash(),
         error: None,
     };
     let facts = match probe(t, target, &blank(target)) {
@@ -800,6 +853,7 @@ pub fn status_host(t: &dyn Transport, target: &Target) -> StatusRow {
         row.macos_slots = format!("{macos}/{MACOS_SLOTS}");
     }
     row.k3s = facts.k3s_state();
+    row.session = facts.session_state();
     row.node = match (facts.enrolled, facts.agent_loaded) {
         (true, true) => "enrolled",
         (false, true) => "joining",
@@ -864,7 +918,7 @@ pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 pub fn render_status(rows: &[StatusRow]) -> String {
     let mut out = render_table(
         &[
-            "HOST", "STATE", "VERSION", "DAEMON", "VMS", "MACOS", "K3S", "NODE",
+            "HOST", "STATE", "VERSION", "DAEMON", "VMS", "MACOS", "K3S", "NODE", "SESSION",
         ],
         &rows
             .iter()
@@ -878,6 +932,7 @@ pub fn render_status(rows: &[StatusRow]) -> String {
                     r.macos_slots.clone(),
                     r.k3s.clone(),
                     r.node.clone(),
+                    r.session.clone(),
                 ]
             })
             .collect::<Vec<_>>(),
@@ -1008,6 +1063,9 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
         }
         MacFleetCommand::Status(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
+            if a.detail {
+                return crate::mac_fleet_status::status_detail_cmd(&a.conn, inv.as_ref(), &targets);
+            }
             do_status(&a.conn, inv.as_ref(), &targets)
         }
         MacFleetCommand::Exec(a) => {
@@ -1059,6 +1117,15 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
             let mut targets = targets;
             let s = build_settings(&flags, inv.as_ref(), &mut targets, None)?;
             let tr = transport(&a.conn, inv.as_ref());
+            if a.rolling {
+                return crate::mac_fleet_roll::roll_cmd(
+                    &a.conn,
+                    tr.as_ref(),
+                    &targets,
+                    &s.install,
+                    crate::mac_fleet_roll::RollOpts { drain_timeout: a.drain_timeout, health_timeout: a.health_timeout, poll: 10 },
+                );
+            }
             let rs = par_map(&targets, jobs(&a.conn), |t| {
                 upgrade_host(tr.as_ref(), t, &s.install, a.force)
             });
@@ -1415,6 +1482,31 @@ mod tests {
                 && table.contains("none")
         );
         assert!(table.contains("unreachable") && table.contains("ssh-copy-id"));
+    }
+
+    #[test]
+    fn doctor_and_status_show_the_macs_headless_check() {
+        let hj = r#"{"ok":false,"checks":[{"name":"console session","status":"ok","detail":"admin is logged in","fix":null},{"name":"screen lock","status":"fail","detail":"the session's screen is locked","fix":"unlock it"}]}"#;
+        let up = FRESH
+            .replace("fluxctl_version=", "fluxctl_version=0.4.21")
+            .replace("daemon_loaded=no", "daemon_loaded=yes")
+            .replace("daemon_healthy=no", "daemon_healthy=yes")
+            + &format!("headless_json={hj}\n");
+        let f = FakeTransport::new(move |_, _| ok(&up));
+        let t = Target::parse("a").unwrap();
+        let row = status_host(&f, &t);
+        assert_eq!(row.session, "locked");
+        assert!(render_status(&[row]).contains("SESSION"));
+        let r = doctor_host(&f, &t, Want::default());
+        let h: Vec<_> = r.findings.iter().filter(|x| x.id == "headless").collect();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].level, Level::Warn);
+        assert!(h[0].msg.contains("locked") && h[0].fix == "unlock it");
+        // An older install without the command: no finding, no column value.
+        let old = FRESH.replace("fluxctl_version=", "fluxctl_version=0.4.21");
+        let f = FakeTransport::new(move |_, _| ok(&old));
+        assert_eq!(status_host(&f, &t).session, "-");
+        assert!(doctor_host(&f, &t, Want::default()).findings.iter().all(|x| x.id != "headless"));
     }
 
     #[test]

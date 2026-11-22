@@ -1086,6 +1086,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "template": {"type": "string", "description": "sandbox template name"},
                     "oci_platform": {"type": "string", "enum": ["linux/arm64", "linux/amd64"], "description": "with oci_image: linux/amd64 runs an x86-64 image under Rosetta (default linux/arm64)"},
                     "oci_image": {"type": "string", "description": "macOS only: run this container image (alpine:3.22, ghcr.io/org/app:1.2) as the sandbox instead of a template. The first use of an image pulls it and builds its root filesystem (up to a few minutes)."},
+                    "runtime": {"type": "string", "enum": ["auto", "container", "vm"], "description": "how to run oci_image: container = FluxVM's own Linux container runtime (fast, shares the host kernel), vm = a microVM (own kernel), auto (default) = container for trust dev/trusted, vm for untrusted/agent. The reply's labels say what was chosen and why."},
+                    "trust": {"type": "string", "enum": ["dev", "trusted", "untrusted", "agent"], "description": "how much the workload is trusted; drives runtime=auto. container is refused for untrusted/agent unless allow_container_untrusted is set and the operator allows it. Default: the daemon's setting (untrusted)."},
+                    "allow_container_untrusted": {"type": "boolean", "description": "accept a shared-kernel container for untrusted/agent code (the operator must also allow it)"},
                     "oci_command": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: argv replacing the image's Cmd"},
                     "oci_env": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: KEY=value entries"},
                     "oci_ports": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: published TCP ports, HOST:CONTAINER (the Mac's 127.0.0.1:HOST reaches the container)"},
@@ -1123,6 +1126,14 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     }
                     if args.get("offline").and_then(|v| v.as_bool()) == Some(true) {
                         body["offline"] = json!(true);
+                    }
+                    for key in ["runtime", "trust"] {
+                        if let Some(v) = str_arg(&args, key) {
+                            body[key] = json!(v);
+                        }
+                    }
+                    if args.get("allow_container_untrusted").and_then(|v| v.as_bool()) == Some(true) {
+                        body["allow_container_untrusted"] = json!(true);
                     }
                     for key in ["template", "name"] {
                         if let Some(v) = str_arg(&args, key) {
