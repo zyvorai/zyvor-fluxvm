@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-1.0
 
 import { describe, expect, it } from 'vitest';
-import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas, checkpointLabelNow, checkpointLabelOk, checkpointsOf, serviceUrls } from './kube';
+import { type KubeEvent, type KubePod, type Workloads, ageOf, eventTone, filterEvents, filterPods, fmtCpu, fmtMem, inNamespace, kubeProblem, namespacesOf, namespacesOfAll, namespacesOfEvents, podTone, portText, readyTone, shortImage, summarize, usageTone, actionPath, actionToast, canScale, clampReplicas, checkpointLabelNow, checkpointLabelOk, checkpointsOf, serviceUrls, backendText, exposeCommand, gatewayTone } from './kube';
 
 const pod = (name: string, status: string, over: Partial<KubePod> = {}): KubePod => ({
   namespace: 'default', name, status, phase: null, ready: '1/1', restarts: 0, node: 'n1', pod_ip: '10.42.0.5', created: null, ...over,
@@ -160,5 +160,16 @@ describe('serviceUrls', () => {
   it('lists loopback urls for node ports of 1024 and up only', () => {
     expect(serviceUrls({ type: 'NodePort', ports: [port(30080), port(null), port(80)] })).toEqual(['http://127.0.0.1:30080']);
     expect(serviceUrls({ type: 'ClusterIP', ports: [port(30080)] })).toEqual([]);
+  });
+});
+
+describe('gateways', () => {
+  it('colours by state and words the backends and commands', () => {
+    expect(gatewayTone('ready')).toBe('ok');
+    expect(gatewayTone('waiting')).toBe('warn');
+    expect(gatewayTone('problem')).toBe('bad');
+    expect(backendText({ namespace: 'shop', name: 'api', port: 8080, ready_endpoints: 2 })).toBe('api:8080 (2 ready)');
+    expect(backendText({ namespace: 'shop', name: 'api', port: null, ready_endpoints: 0 })).toBe('api (none ready)');
+    expect(exposeCommand('web')).toBe('fluxctl gateway expose web');
   });
 });

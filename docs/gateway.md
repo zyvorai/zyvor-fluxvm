@@ -135,3 +135,15 @@ Prints JSON for an HTTPRoute: its generation; for each parent the controller and
 
 macOS guests (Apple Virtualization), HTTPS listeners and `--ca`, MetalLB, more than one cluster, and Envoy Gateway versions other than
 v1.10.0 on k3s versions other than v1.37.2.
+
+## In Studio
+
+The Kubernetes page has a **Gateways** tab for each cluster. It lists the Gateways with their listeners and the HTTPRoutes attached
+to them, each with a status in plain words: "Ready", "Waiting for the controller" (the controller has not yet seen the latest edit) or
+"Not accepted: <reason>". Backends show how many endpoints are ready. Every route row has a "Copy as fluxctl" button
+(`fluxctl gateway inspect ROUTE -n NS`). With no Gateways the tab explains how to start: `fluxctl gateway expose SERVICE`, which
+installs Envoy Gateway on first use.
+
+The data comes from `GET /v1/kube/{cluster}/gateways` (`schema: 1`): read-only, objects only (never Secrets), through the same client
+certificate as the Workloads tab. If the cluster cannot be read the answer carries `error` with a sentence and the next command
+instead of failing. Not compiled, type-checked or rendered when this section was written.

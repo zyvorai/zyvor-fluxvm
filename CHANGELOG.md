@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Studio: a Gateways tab on the Kubernetes page (Gateways, listeners, attached HTTPRoutes, plain-English status, ready endpoint counts, "Copy as fluxctl") backed by the new read-only `GET /v1/kube/{cluster}/gateways` (`schema: 1`; an unreachable cluster is an `error` field with the next command). Parsing is unit-tested with fixtures; **not compiled, type-checked or rendered when this entry was written**. See [docs/gateway.md](docs/gateway.md#in-studio).
+
 Live run on a Linux host (single-node k3s v1.37.2 in a QEMU/KVM guest, Envoy Gateway v1.10.0) found and fixed two bugs ([docs/gateway.md](docs/gateway.md#what-the-live-run-found)):
 
 - `kube cluster create` on Linux failed with `no address on the private network card`: the unit script required the macOS-only `10.89.x.y` card. A guest without it now uses its default-route address and card for `--node-ip` and flannel (`UnitOpts.private_net`, set from the backend).
