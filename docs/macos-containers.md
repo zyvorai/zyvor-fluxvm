@@ -22,7 +22,7 @@ Status: the commands below are implemented and unit-tested. Nothing has been run
 | Macfile `ENV`, `ARG`, `WORKDIR`, `LABEL`, `EXPOSE`, `CMD`, `ENTRYPOINT`, `ADD`, `HEALTHCHECK`; `.macignore` | Implemented (section "Macfile reference"). Parser and planner unit-tested; never built on a real VM. |
 | `mac doctor`, `mac wait-ready`, `run --queue`, `run/ps/inspect --json` | Implemented (sections "Preflight", "Waiting", "JSON output"). Unit-tested with fakes and golden files; **never run against a real daemon or VM**. `mac doctor`'s probes were run once on a developer Mac, which has no daemon. |
 | `scripts/test-mac-vz.sh` | A live acceptance script for all of the above. **Written, not yet run on hardware**; its `--self-test` (fake `fluxctl`) runs anywhere. |
-| `compose up/down/ps` | Implemented (section "Compose"). **At most 2 services (2 macOS VMs).** `up --dry-run` is client-side; the rest needs the daemon and was never run. |
+| `compose up/down/ps/logs/exec/restart/config/stop/start/images/pull/push/ls/run/top/cp` | Implemented (section "Compose"). **At most 2 services (2 macOS VMs).** `up --dry-run`, `config`, `images`, `pull` and `push` are client-side; the rest needs the daemon and was never run. |
 
 The image commands are client-side only: they talk to a registry and the local store, never to the daemon. `run` and the other instance
 commands start a stored image through the daemon.
@@ -229,6 +229,35 @@ at that service, naming what it already started).
   dependency on a service in a profile that is not enabled says which `--profile` to pass.
 - Each instance `up` creates carries `fluxvm.mac.owner` and `fluxvm.mac.created` (never an expiry), so `mac reap --owner NAME` and
   `mac ps` can tell whose project it is.
+### Docker Compose parity
+
+Everything works with no flags or set-up: `fluxctl mac compose config` is the first thing to run on a file. Nothing below was run
+against a real Mac, daemon or guest; the parsing, plans, request bodies and error texts are unit tested with fakes.
+
+| Docker Compose | Here |
+|---|---|
+| `up --wait` | `up --wait` (same as `--wait-healthy`). **Change:** `--wait` used to require a number (SSH seconds); `--wait 300` still works and means that and also waits for healthchecks. `--wait-timeout SECS` is a second name for `--health-timeout`. |
+| `config [-q] [--format json]` | `compose config` prints the file as used: `${VAR}` filled in, `.env` read, `include`/`extends` merged, `env_file` merged into `environment`, only the selected profiles (`--profile`, `COMPOSE_PROFILES`). `--quiet` only validates (exit status), `--services` lists the start order. No daemon needed. |
+| `stop`, `start` | `compose stop [SERVICE...]` (dependents first) and `compose start [SERVICE...]` (dependencies first). `start` is refused up front, naming the fix, when it would need more than the 2 macOS slots. |
+| `images`, `pull`, `push` | Table of service, image, id and size from the local store; `pull` fetches the `image:` of each service (a service with only `build:` is skipped); `push` pushes them (each `image:` must name a registry; the licence check, `--sign` and `--i-have-checked-the-licence` are those of `mac push`). No daemon needed. |
+| `ls [-a] [-q] [--format json]` | `compose ls [-a] [-q] [--json]`: projects on this Mac, `running(2)` / `exited(1)`. There is no config-file column (the daemon does not record it). |
+| `run [--rm] [-e] [-w] [-u] SERVICE [CMD]` | `compose run`: a **new** VM from the service's image, the command in the foreground over SSH. It needs a free macOS slot, so with 2 VMs running it is refused with a message naming `compose stop SERVICE`. It does not start dependencies (they must already run) and does not publish ports. Without `--rm` the one-off VM stays (labelled into the project; `compose down` removes it). |
+| `top`, `cp` | `compose top [SERVICE...] [-- ps-args]` and `compose cp SERVICE:/path LOCAL` (either direction), over SSH like `mac top` / `mac cp`. |
+| `extends` | `extends: other` or `extends: {service, file}`. Merge rules as Docker: scalars and `command` replaced; `environment`, `labels`, `depends_on`, `build` merged by key; `ports`, `profiles`, `env_file`, `secrets`, `configs` appended; a volume with the same guest path replaces the base one. Chains work; loops are an error. |
+| `include` | `include: [a.yaml]` or `- path: a.yaml`. Relative paths inside an included file are relative to that file. A name defined twice is an error. The options `project_directory` and `env_file` are refused with a message. |
+| `secrets`, `configs` | Only `file:` sources. The file is copied (mode 0444, in a 0700 staging directory under the temp directory) and shared **read-only** into the guest. Default place: `/private/var/run/secrets/NAME` and `/private/var/run/configs/NAME` (macOS has no `/run` and a read-only root); `target:` may be another absolute path (linked, needs sudo in the guest as `volumes:` do) or relative to those directories. **Refused with a plain message:** `external`, `environment`, inline `content`, and `uid`/`gid`/`mode` (the share is read-only as it is). The staged copy lives in the temp directory, so after a reboot `compose down` then `up` again. |
+| `env_file` | A path, a list of paths, or a list with `- path: X` / `required: false` (a missing optional file is skipped). `format:` other than `raw` is refused. |
+| `${VAR}`, `.env` | `${VAR}`, `${VAR:-d}`, `${VAR-d}`, `${VAR:+x}`, `${VAR:?msg}`, `$$`; values come from the environment, then a `.env` next to the compose file. **Differences from Docker:** a bare `$VAR` is left alone (so a guest `command: echo $HOME` keeps working) and an unset `${VAR}` is empty without a warning. |
+| `x-` keys, `version`, `<<` | `x-` extension keys, YAML anchors with `<<` merge, and an obsolete `version:` are accepted. |
+
+Not implemented, and an error that names the key: `networks`, `deploy`, `healthcheck:` (use the image's HEALTHCHECK), `extends`/`include` options not listed,
+`build` keys other than `context`/`dockerfile`/`args`, and every other Docker-only key. `compose ps/ls/stop/start/run` count against the 2-VM limit.
+A failure prints a `fluxctl explain` code: `MAC_COMPOSE_KEY_UNSUPPORTED`, `MAC_COMPOSE_VARIABLE`, `MAC_COMPOSE_INCLUDE`,
+`MAC_COMPOSE_FILE_MISSING`, `MAC_COMPOSE_NOT_UP` (and `MAC_SLOT_LIMIT` for the slot refusals).
+
+**Studio:** there is no Studio page for macOS instances or compose projects today (the pages are for Linux VMs, clusters and
+the node), so nothing was added there; the CLI is the only surface.
+
 - `mac compose logs SERVICE [--tail N] [-F]` (the VM's console log), `mac compose exec SERVICE [--user U] -- CMD` (over SSH) and
   `mac compose restart [SERVICE...]` act on the project's instances. `-f FILE` and `-p/--project-name NAME` work on every subcommand.
 

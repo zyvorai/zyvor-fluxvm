@@ -947,7 +947,7 @@ pub(crate) fn names_a_registry(reference: &str) -> bool {
     }
 }
 
-fn remote_reference(local: &str, explicit: Option<&str>) -> Result<String> {
+pub(crate) fn remote_reference(local: &str, explicit: Option<&str>) -> Result<String> {
     match explicit {
         Some(r) => {
             ensure!(
