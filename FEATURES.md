@@ -217,6 +217,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `mac-fleet upgrade --rolling`: drain, wait for VMs, upgrade, health gate, resume, one Mac at a time; stops at the first failure with that Mac still drained; fakes only
 - `mac ps --fleet` / `mac images --fleet`: every Mac's instances or images in one table or one JSON document, unreachable Macs reported, not hidden; read-only, fakes only
 - `mac-fleet status --detail`: drain state, held templates, power, disk and the headless checks per Mac, with `--json`; read-only, fakes only
+- `mac-fleet logs --name N`, `mac-fleet events`, `mac-fleet inventory import --hosts-file|--ssh-config|--bonjour [--merge]`, `mac runner --sweep-all`, `FLUXVM_MAC_FLEET_LEASES=off`: read-only fleet views and inventory building; fakes only ([docs/mac-fleet-ops.md](docs/mac-fleet-ops.md))
 - Leases shared between the `fluxctl` processes of one machine (file lock; one machine only, no FIFO; [docs/mac-fleet-scheduler.md](docs/mac-fleet-scheduler.md)); fakes and threads only
 - `mac runner` handles SIGINT/SIGTERM/SIGHUP (deletes in-flight guests, unregisters runners, second signal exits at once) and sweeps orphaned `fleet-*` guests and idle `fluxvm-*` runners at start ([docs/mac-runner.md](docs/mac-runner.md)); fakes only
 

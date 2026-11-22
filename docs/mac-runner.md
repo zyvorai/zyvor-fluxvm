@@ -57,7 +57,7 @@ as `pool: queued=.. busy=.. waiting=.. warm=.. cap=.. -> start N`.
 registered**, then exit 0. A second signal exits at once (status 130) and leaves the cleanup undone. A runner that is still waiting for a slot is unregistered and never starts a guest.
 
 At start (and again after a stop) a **sweep** looks for what a run that was killed with `SIGKILL` or a power cut left: guests named `fleet-*` labelled `fluxvm.owner=mac-fleet` on the Macs, and idle `fluxvm-*`
-runners on GitHub. It removes those whose job id is not in flight here and is not held by another process's live lease (see the scheduler page); a runner that is running a job is never touched. `--no-sweep` turns it off.
+runners on GitHub. It removes those whose job id is not in flight here and is not held by another process's live lease (see the scheduler page); a runner that is running a job is never touched. `--no-sweep` turns it off. `--sweep-all` also removes the ones another process holds a lease for (see [mac-fleet-ops.md](mac-fleet-ops.md#remove-everything-a-runner-left---sweep-all)).
 The sweep is by name: do not run two runners for the same repository or organisation that you do not want to see each other's leftovers, unless both are on one machine (where the shared leases tell them apart).
 
 ## What is not verified
