@@ -171,8 +171,9 @@ All need the daemon (`--server` or a context). `NAME` is the instance name from 
 | Command | What it does |
 |---|---|
 | `mac ps [-a] [-f KEY=VALUE]... [--format T] [-q] [--json]` | Without `-a` only running, paused and starting instances are listed (this changed from "all"). Filters: `name` (substring), `id` (prefix), `status` (`creating`, `running`, `paused`, `stopped`, `failed`), `image`, `label=k` or `label=k=v`. All filters must match (Docker ORs repeats of one key). `--format` takes `{{.Name}}`-style fields (`ID`, `Name`, `Image`, `Status`, `IP`, `Ports`, `Created`, `Restart`, `Project`, `Service`, `Labels`), `{{json .}}`, and a `table ` prefix (tab-separated columns with a header). `-q` prints short ids. |
-| `mac inspect NAME...` | JSON array: state, restart policy, network, ports, cpus, memory, mounts, user labels, disk path, the image's config and the raw VM record. |
-| `mac logs [-f] [--tail N] NAME` | The VM's console log (`GET /v1/vms/{id}/logs`; serial output, not the guest's own logs). `-f` streams until Ctrl-C. |
+| `mac inspect [-f TEMPLATE] NAME...` | JSON array (or, with `--format`, one templated line each: [subset](#mac-inspect---format)): state, restart policy, network, ports, cpus, memory, mounts, user labels, disk path, the image's config and the raw VM record. |
+| `mac logs [-f] [-t] [--tail N] NAME` | The VM's console log (`GET /v1/vms/{id}/logs`; serial output, not the guest's own logs). `-f` streams until Ctrl-C; `-t` (with `-f`) stamps lines with when they arrived. `--since` is refused: [why](#mac-logs---since-and--t-what-is-and-is-not-possible). |
+| `mac events [--since T] [--filter K=V]... [-f] [--json]` | Recorded `mac.*` and `kube.apple.*` events; [details](#mac-events---since-and---filter). |
 | `mac cp SRC DST` | `NAME:/path` is the guest side; either direction; `scp -r`. Between two instances is refused. |
 | `mac stats [NAME...] [--json]` | One reading of CPU, memory, disk I/O (`GET /v1/vms/{id}/stats`). CPU is averaged over the VM's life, and there is no live stream. |
 | `mac stop`, `start`, `restart NAME...` | `stop` keeps the disk. `start` needs a free macOS slot, and boots an instance made by `mac create`. See also `mac kill` and `mac update` below. |
@@ -198,7 +199,121 @@ Mac's login session is locked (a headless host needs an auto-login user with the
 | `mac commit INSTANCE NAME:TAG [-m MSG] [-a AUTHOR]` | Stores a **stopped** instance's disk, hardware model and auxiliary storage as a template (APFS clones), with the source image's config and a history line. The daemon must run on this Mac. |
 | `mac image prune [--all] [--dry-run] [-f]` | Removes store directories no name uses (a crashed pull) and scratch directories older than an hour. `--all` also removes images no instance uses and needs the daemon. |
 | `mac system df [--json]` | Images (names, in use, size, reclaimable), instances (running, size, reclaimable) and unreferenced directories. Sizes are **allocated** bytes (`st_blocks`), because `disk.raw` is sparse; APFS clones share blocks, so deleting can free less than shown. Instance sizes count only disks this Mac can read. `mac images` still shows apparent size. |
+| `mac system info`, `mac system version` `[--json]` | [`docker info` and `docker version`](#mac-system-info-and-mac-system-version). |
 | `mac system prune [--all] [-f]` | `mac prune --orphaned`, plus `image prune`; with `--all`, also unused images. |
+
+## Inspecting and observing: `--format`, `--since`, `--filter`, `system info`
+
+Everything here is unit-tested with fakes (sample daemon records, a fake event list, fixed clocks); **none of it was run against a
+real daemon or a real Mac**. No flag or set-up is needed for any of it; each command works as before when the new options are left
+out. Studio has no `fluxctl mac` page, so there is nothing to click for these (see "Studio" below).
+
+### `mac inspect --format`
+
+```
+fluxctl mac inspect --format '{{.State.Status}}' build-1
+fluxctl mac inspect -f '{{.Name}} {{.Network.IP}} {{index .Labels "team"}}' build-1 build-2
+fluxctl mac inspect -f '{{range .Network.Ports}}{{.Host}}->{{.Guest}} {{end}}' build-1
+fluxctl mac inspect -f '{{json .State}}' build-1
+```
+
+One output line per instance. The template is run against the same document as the default JSON (`mac inspect NAME`, without the
+array), so the way to find a field is to look at that JSON. Field names ignore case and underscores: `.State.Status`,
+`.state.status` and `.Resources.MemoryMiB` (the document's `memory_mib`) all work.
+
+The supported subset of Go templates, and nothing else:
+
+| Syntax | Meaning |
+|---|---|
+| `{{.A.B}}` | a field path; `{{.}}` is the current value |
+| `{{json X}}` or `{{X \| json}}` | compact JSON of a value |
+| `{{index X "key"}}`, `{{index X 0}}` | a key of an object, or a position in a list; more keys go deeper |
+| `{{range X}}...{{end}}` | repeat for each element of a list (or each value of an object, in key order); `.` is the element |
+| `"text"`, whole numbers | arguments to `index` |
+| `\n`, `\t` | in the text between actions |
+
+A missing or null value prints `<no value>`; text prints as is; numbers and booleans print as JSON; an object or list prints as
+compact JSON (Go would print `map[...]`). `if`, `with`, `printf`, `len`, variables, `{{-` trimming and every other function are
+refused with a message that lists the supported syntax and names `fluxctl explain MAC_TEMPLATE_SYNTAX`. The template is checked
+before the daemon is contacted. `range` over text or a number, and `index` past the end of a list, are errors too.
+
+### `mac images --format` and filters
+
+`mac images --format T` uses the same engine over one document per image: `Reference`, `Repository`, `Tag`, `ID` (first 12 digits
+of the digest), `Digest`, `Size` (allocated, human), `SizeBytes`, `AllocatedBytes`, `Source`, `Labels` (`{{index .Labels "k"}}`),
+`AddedUnix`, `LastUsedUnix`; `{{json .}}` prints the record. A `table ` prefix adds a header row and aligns the columns (columns are
+separated by `\t`; a bare `table` shows repository, tag, id and size). `--format` cannot be combined with `--json`, `--usage` or
+`--fleet`.
+
+`mac images --filter` already existed (`label=`, `reference=` with `*`, `source=`). `mac ps --filter` already had `name`, `id`,
+`status`, `image` and `label`; it now also accepts `project`, `service`, `ip` and `publish=PORT` (host or guest side). A wrong key
+or value says which keys exist and names `fluxctl explain MAC_FILTER_INVALID`.
+
+### `mac events --since` and `--filter`
+
+```
+fluxctl mac events --since 1h
+fluxctl mac events --since 2026-11-21 --filter type=mac --filter event=started
+fluxctl mac events -f --filter name=ci-1
+fluxctl mac events --since 30m --filter label=kairon.zyvor.dev/pool=ios --json
+```
+
+`--since` is a duration back from now (`30s`, `10m`, `2h`, `1d`, `1h30m`; units `s m h d w`), an RFC 3339 timestamp or a date
+(midnight UTC); it includes events at exactly that time. `--filter KEY=VALUE` is repeatable and every filter must match:
+
+| Key | Matches |
+|---|---|
+| `type` | `mac` (instances and slots) or `kube` (k3s nodes and clusters) |
+| `event` | the whole event name (`mac.instance.started`), its last part (`started`) or a leading part (`mac.instance`) |
+| `name` | part of the event's `name` field, or of its `node` field for k3s node events |
+| `image`, `project`, `status`, `cluster` | part of that field of the event |
+| `label` | `KEY` or `KEY=VALUE`; events carry only the `kairon.zyvor.dev/*` labels, as fields of the same name |
+
+They work with `-f` (follow: new events are filtered; `--since` applies to the history printed first) and with `--json` (the same
+one-object-per-line output, restricted). With filters, up to 10000 recent events are fetched from the daemon and filtered here, then
+the newest `--limit` are shown. A bad time names `fluxctl explain MAC_TIME_INVALID`.
+
+### `mac logs --since` and `-t`: what is and is not possible
+
+`mac logs` shows the VM's console log: raw serial output. The daemon records **no time per line**, and fluxctl does not invent one.
+So:
+
+- `mac logs --since X` is **refused**, with a message that says why (a bad `X` is reported as a bad time first). Use `--tail N`, or
+  `mac events --since 1h --filter name=NAME` for what happened to the instance, or `mac exec NAME -- log show --last 10m` for the
+  guest's own timestamped logs.
+- `mac logs -f -t NAME` works: each new line is prefixed with the time **fluxctl received it** (UTC, milliseconds), which is when the
+  guest wrote it to within the network delay and the daemon's 300 ms polling. The `--tail` lines already in the log are printed first
+  with `-` in the time column, because their time is unknown. Following asks the daemon for one more line of history and drops it when
+  it arrives at once, since it is the last line already printed; a VM that writes two identical lines in that first second could lose
+  one. `-t` without `-f` is refused, because a receipt time for old lines would be a lie.
+
+Both refusals name `fluxctl explain MAC_LOGS_NO_TIMESTAMPS`.
+
+### `mac system info` and `mac system version`
+
+`mac system info [--json]` is the `docker info` of `fluxctl mac`: fluxctl and daemon versions, the Mac (macOS version and build,
+chip), instances in use out of 2, images and their disk, instance disks, what could be reclaimed, free disk, the store path and the
+`mac doctor` summary with each problem and its fix. It reuses the `mac doctor` checks and the `mac system df` numbers and adds only
+the daemon's version (read from `GET /v1/openapi.json`). It needs no flags and no daemon: without one, the daemon line says how to
+connect (`--server`, `FLUXVM_URL`, a context), instances and instance disks show as unknown, and everything local is still shown.
+Like `mac doctor` (whose checks it runs), on a Mac it creates the store directory when it is missing; the disk figures read the
+store only when it exists. On a machine that is not a Mac it says so, and the doctor summary shows the platform failure with its fix.
+
+`mac system version [--json]` is `docker version`: client (fluxctl version, OS, architecture) and server (daemon version and address,
+or why there is none). `--json` documents of both carry `schema_version` 1; golden files `system-info.json` and
+`system-version.json` pin them under `crates/fluxctl/src/mac_json_golden/`. Keys are only added within a version.
+
+### `docker export`: not built
+
+`mac export NAME` is **not provided**. A stopped instance cannot be exported as a plain disk: a macOS guest boots from
+`disk.raw`, `hardware.bin` and `auxiliary.bin` together, so a tar of the disk alone would not start anywhere. A tar with all three
+plus the config is exactly what `mac commit NAME IMAGE:TAG` followed by `mac save IMAGE:TAG --output FILE.tar` already produces
+(and `mac load` reads back), so an `export` would duplicate `save`.
+
+### Studio
+
+Studio has no page for `fluxctl mac` instances, images or events, so none of the above has a Studio counterpart and none was added. The
+generic Machines page already has a Console tab and Overview shows live events for every VM; those were not changed or checked here.
 
 ## Macfile reference
 
@@ -456,6 +571,8 @@ the raw VM records; those are now under each object's `vm` key.
 | `ran_command` | bool | a command ran (in the background with `-d`) |
 | `detached` | bool | `-d` was given |
 
+`mac system info --json` and `mac system version --json` carry `schema_version` 1 and are pinned by goldens; see [above](#mac-system-info-and-mac-system-version).
+
 Not covered yet: `images`, `system df` and `stats` already print JSON but have no versioned schema.
 
 ## Live acceptance: `scripts/test-mac-vz.sh`
@@ -616,6 +733,8 @@ These come from the design and from macOS itself; they apply to the whole workfl
 others, a comparison with `fluxctl mac`, and a prioritised backlog.
 
 ## Not verified
+
+The observability options (`inspect --format`, `images --format`, `events --since/--filter`, `logs -t`, `system info/version`) were never run against a daemon or a Mac: the template engine, filters, time parsing, line stamping and the info document are unit-tested; the HTTP calls (`/v1/events?since=`, `/v1/openapi.json`, the two log requests) are not. The daemon's version is read from the OpenAPI document and has not been checked against a running daemon.
 
 Written from the source. The commands are covered by unit tests on a temporary store and on sample daemon records; none was run
 against a real registry or daemon, and no imported, pulled, built or committed template was booted. Specifically unverified: the

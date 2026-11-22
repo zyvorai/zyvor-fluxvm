@@ -757,6 +757,12 @@ pub async fn run(command: MacCommand) -> Result<()> {
     };
     match command {
         MacCommand::Runner(a) => return tokio::task::block_in_place(|| crate::mac_runner::run(a)),
+        MacCommand::More(crate::mac_more::MacMore::System {
+            command: crate::mac_more::SystemCommand::Info { json },
+        }) => return crate::mac_sysinfo::run_info(json, crate::remote::from_argv_env()).await,
+        MacCommand::More(crate::mac_more::MacMore::System {
+            command: crate::mac_more::SystemCommand::Version { json },
+        }) => return crate::mac_sysinfo::run_version(json, crate::remote::from_argv_env()).await,
         MacCommand::Ps { json, opts } if opts.fleet.is_some() => {
             let inv = opts.fleet.clone().unwrap_or_default();
             return tokio::task::block_in_place(|| {

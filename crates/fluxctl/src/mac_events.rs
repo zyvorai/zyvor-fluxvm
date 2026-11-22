@@ -436,35 +436,138 @@ pub async fn run_watch(
     .map(drop)
 }
 
+/// One `mac events --filter KEY=VALUE`. All filters must match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventFilter {
+    /// `type=mac` or `type=kube`: which family of events.
+    Type(String),
+    /// `event=started`: the whole name (`mac.instance.started`), its last part (`started`), or a leading part (`mac.instance`).
+    Event(String),
+    /// `name=ci`: part of the `name` field (instances), or of the `node` field (k3s node events).
+    Name(String),
+    /// `image=`, `project=`, `status=`, `cluster=`: part of that field of the event.
+    Field(String, String),
+    /// `label=KEY` or `label=KEY=VALUE`: events carry only the `kairon.zyvor.dev/*` labels, as fields of the same name.
+    Label(String, Option<String>),
+}
+
+/// The keys `--filter` accepts, for messages.
+pub const EVENT_FILTER_KEYS: &str = "type, event, name, image, project, status, cluster, label";
+
+/// `type=mac`, `event=started`, `name=ci`, `label=kairon.zyvor.dev/pool=ios`, ...
+pub fn parse_event_filter(s: &str) -> Result<EventFilter> {
+    let Some((k, v)) = s.split_once('=') else {
+        anyhow::bail!(
+            "filter {s:?} must be KEY=VALUE ({EVENT_FILTER_KEYS}); see `fluxctl explain MAC_FILTER_INVALID`"
+        );
+    };
+    anyhow::ensure!(
+        !v.is_empty(),
+        "filter {s:?} has an empty value; see `fluxctl explain MAC_FILTER_INVALID`"
+    );
+    Ok(match k {
+        "type" => {
+            anyhow::ensure!(
+                matches!(v, "mac" | "kube"),
+                "filter {s:?}: type is mac (instances) or kube (k3s nodes and clusters); see `fluxctl explain MAC_FILTER_INVALID`"
+            );
+            EventFilter::Type(v.into())
+        }
+        "event" => EventFilter::Event(v.into()),
+        "name" => EventFilter::Name(v.into()),
+        "image" | "project" | "status" | "cluster" => EventFilter::Field(k.into(), v.into()),
+        "label" => match v.split_once('=') {
+            Some((lk, lv)) => EventFilter::Label(lk.into(), Some(lv.into())),
+            None => EventFilter::Label(v.into(), None),
+        },
+        _ => anyhow::bail!(
+            "unknown filter {k:?}: use one of {EVENT_FILTER_KEYS}; see `fluxctl explain MAC_FILTER_INVALID`"
+        ),
+    })
+}
+
+pub fn parse_event_filters(f: &[String]) -> Result<Vec<EventFilter>> {
+    f.iter().map(|s| parse_event_filter(s)).collect()
+}
+
+fn field_has(ev: &VmEvent, k: &str, want: &str) -> bool {
+    ev.fields.get(k).is_some_and(|x| x.contains(want))
+}
+
+/// True when the event passes every filter.
+pub fn event_matches(ev: &VmEvent, filters: &[EventFilter]) -> bool {
+    filters.iter().all(|f| match f {
+        EventFilter::Type(t) => {
+            if t == "mac" {
+                ev.event.starts_with(MAC_PREFIX)
+            } else {
+                ev.event.starts_with(KUBE_PREFIX)
+            }
+        }
+        EventFilter::Event(e) => {
+            ev.event == *e
+                || ev.event.ends_with(&format!(".{e}"))
+                || ev.event.starts_with(&format!("{e}."))
+        }
+        EventFilter::Name(n) => field_has(ev, "name", n) || field_has(ev, "node", n),
+        EventFilter::Field(k, v) => field_has(ev, k, v),
+        EventFilter::Label(k, v) => match (ev.fields.get(k), v) {
+            (Some(x), Some(want)) => x == want,
+            (Some(_), None) => true,
+            (None, _) => false,
+        },
+    })
+}
+
+/// What `mac events` shows: `limit` newest of the events at or after `since` that pass `filters`, oldest first.
+pub fn select_events(
+    mut all: Vec<VmEvent>,
+    since: Option<DateTime<Utc>>,
+    filters: &[EventFilter],
+    limit: usize,
+) -> Vec<VmEvent> {
+    all.retain(|e| since.is_none_or(|s| e.ts >= s) && event_matches(e, filters));
+    all.sort_by_key(|e| e.ts);
+    let skip = all.len().saturating_sub(limit);
+    all.split_off(skip)
+}
+
 /// `mac events`: the recorded `mac.*` and `kube.apple.*` events from the daemon, then, with `follow`, new ones.
 pub async fn run_events(
     r: &crate::remote::Remote,
     limit: usize,
     follow: bool,
     json: bool,
+    since: Option<DateTime<Utc>>,
+    filters: &[EventFilter],
 ) -> Result<()> {
     let mut all: Vec<VmEvent> = vec![];
+    // The daemon keeps the newest `limit`; with filters here, ask for more so they have something to choose from.
+    let ask = if filters.is_empty() { limit } else { 10_000 };
     for prefix in [MAC_PREFIX, KUBE_PREFIX] {
-        let v = r
-            .call(
-                reqwest::Method::GET,
-                &format!(
-                    "/v1/events?event={}&limit={limit}",
-                    crate::remote::encode_query(prefix)
-                ),
-                None,
-            )
-            .await?;
+        let mut path = format!(
+            "/v1/events?event={}&limit={ask}",
+            crate::remote::encode_query(prefix)
+        );
+        if let Some(s) = since {
+            // The daemon's `since` is exclusive; the filter below is inclusive, so nothing at the boundary is lost.
+            path.push_str(&format!(
+                "&since={}",
+                crate::remote::encode_query(
+                    &(s - chrono::Duration::milliseconds(1))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                )
+            ));
+        }
+        let v = r.call(reqwest::Method::GET, &path, None).await?;
         all.extend(serde_json::from_value::<Vec<VmEvent>>(v["items"].clone())?);
     }
-    all.sort_by_key(|e| e.ts);
-    let skip = all.len().saturating_sub(limit);
-    for ev in &all[skip..] {
-        print_event(ev, json)?;
+    for ev in select_events(all, since, filters, limit) {
+        print_event(&ev, json)?;
     }
     if follow {
         r.follow_events("", |ev| {
-            if ours(&ev.event) {
+            if ours(&ev.event) && event_matches(&ev, filters) {
                 print_event(&ev, json)?;
             }
             Ok(())
@@ -698,5 +801,106 @@ mod tests {
         let ev = event(at(), "mac.slots.full", None, vec![("used", "2".into())]);
         let l = render_line(&ev);
         assert!(l.contains("mac.slots.full  -  used=2"), "{l}");
+    }
+
+    fn ev_at(secs: i64, name: &str, fields: Vec<(&str, &str)>) -> VmEvent {
+        VmEvent {
+            ts: DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap(),
+            event: name.into(),
+            vm_id: None,
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+        }
+    }
+
+    fn sample() -> Vec<VmEvent> {
+        vec![
+            ev_at(
+                0,
+                "mac.instance.created",
+                vec![("name", "ci-1"), ("image", "xcode:15")],
+            ),
+            ev_at(
+                10,
+                "mac.instance.started",
+                vec![
+                    ("name", "ci-1"),
+                    ("image", "xcode:15"),
+                    ("status", "running"),
+                    ("kairon.zyvor.dev/chip", "m4"),
+                ],
+            ),
+            ev_at(
+                20,
+                "mac.instance.started",
+                vec![("name", "web"), ("project", "shop")],
+            ),
+            ev_at(
+                30,
+                "kube.apple.node.ready",
+                vec![("cluster", "dev"), ("node", "server-1")],
+            ),
+            ev_at(40, "mac.slots.full", vec![("used", "2")]),
+        ]
+    }
+
+    fn pick(filters: &[&str], since: Option<i64>) -> Vec<String> {
+        let f = parse_event_filters(&filters.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .unwrap();
+        let since = since.map(|s| DateTime::from_timestamp(1_800_000_000 + s, 0).unwrap());
+        select_events(sample(), since, &f, 100)
+            .iter()
+            .map(|e| format!("{}@{}", e.event, e.ts.timestamp() - 1_800_000_000))
+            .collect()
+    }
+
+    #[test]
+    fn event_filters_by_type_event_name_and_label() {
+        assert_eq!(pick(&["type=kube"], None), ["kube.apple.node.ready@30"]);
+        assert_eq!(pick(&["type=mac", "event=started"], None).len(), 2);
+        assert_eq!(pick(&["event=mac.instance"], None).len(), 3);
+        assert_eq!(pick(&["event=mac.slots.full"], None), ["mac.slots.full@40"]);
+        assert_eq!(pick(&["name=web"], None), ["mac.instance.started@20"]);
+        assert_eq!(pick(&["name=server"], None), ["kube.apple.node.ready@30"]);
+        assert_eq!(pick(&["project=shop"], None), ["mac.instance.started@20"]);
+        assert_eq!(
+            pick(&["label=kairon.zyvor.dev/chip"], None),
+            ["mac.instance.started@10"]
+        );
+        assert_eq!(pick(&["label=kairon.zyvor.dev/chip=m1"], None).len(), 0);
+        assert_eq!(
+            pick(&["name=ci-1", "event=created"], None),
+            ["mac.instance.created@0"]
+        );
+    }
+
+    #[test]
+    fn since_is_inclusive_and_limit_keeps_the_newest() {
+        assert_eq!(pick(&[], Some(20)).len(), 3);
+        assert_eq!(pick(&["type=mac"], Some(21)), ["mac.slots.full@40"]);
+        let all = select_events(sample(), None, &[], 2);
+        assert_eq!(names(&all), ["kube.apple.node.ready", "mac.slots.full"]);
+        let mut shuffled = sample();
+        shuffled.reverse();
+        assert_eq!(
+            select_events(shuffled, None, &[], 100)[0].event,
+            "mac.instance.created"
+        );
+    }
+
+    #[test]
+    fn bad_event_filters_say_what_to_do() {
+        for bad in ["nokey", "type=docker", "colour=red", "name="] {
+            let e = parse_event_filter(bad).unwrap_err().to_string();
+            assert!(e.contains("MAC_FILTER_INVALID"), "{bad}: {e}");
+        }
+        assert!(
+            parse_event_filter("colour=red")
+                .unwrap_err()
+                .to_string()
+                .contains("type, event, name")
+        );
     }
 }
