@@ -187,6 +187,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 ### Cluster home (`fluxctl cluster status`, `fluxctl fix`, Studio Home)
 
+- Gateway from the cluster flow: `kube cluster create` asks "Install the Envoy gateway so you can reach apps by name? [Y/n]" on a terminal (`--gateway` / `--no-gateway` for scripts; no terminal and no flag means no gateway, as before); the missing-controller health code and the Studio Gateways tab point at `fluxctl kube cluster platform envoy-gateway NAME` ([docs/gateway.md](docs/gateway.md#install-envoy-gateway-on-a-fluxvm-k3s-cluster)).
 - Gateway health: `cluster status` and `fix` read the Gateways, HTTPRoutes and backends of each FluxVM cluster kubeconfig and report `ENVOY_GATEWAY_NOT_INSTALLED`, `GATEWAY_NOT_PROGRAMMED`, `ROUTE_NOT_ACCEPTED`, `ROUTE_BACKEND_UNRESOLVED`, `BACKEND_NO_READY_ENDPOINTS` in plain English with a command to run; stale conditions are not failures ([docs/cluster-home.md](docs/cluster-home.md)).
 - One health model (`fluxvm_core::health`) turns doctor, host, fleet, capacity and backup facts into plain-English items with a cause and a fix that says whether it is safe, needs sudo, a restart or a login, or touches a security setting; versioned JSON (schema 1).
 - `cluster status`: traffic light per machine and for the cluster, room for N more VMs (2 vCPU / 4 GiB), macOS slots n of 2, disk, memory, last backup age, update available, next best action; `-f` adds the Macs of a fleet inventory over read-only ssh.

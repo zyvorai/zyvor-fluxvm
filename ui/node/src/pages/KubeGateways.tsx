@@ -4,7 +4,7 @@
 import { Copy } from 'lucide-react';
 import type { Notify } from '../App';
 import { Button, Card, EmptyState, Pill, Skeleton, api, usePoll } from '@fluxvm/ui-core';
-import { type Gateways, backendText, exposeCommand, gatewayTone, kubeProblem } from '../lib/kube';
+import { type Gateways, backendText, exposeCommand, gatewayTone, installGatewayCommand, kubeProblem } from '../lib/kube';
 
 const enc = encodeURIComponent;
 
@@ -26,20 +26,35 @@ export function KubeGateways({ cluster, notify }: { cluster: string; notify: Not
       </Card>
     );
   }
-  if (!d.gateways.length) {
+  const install = installGatewayCommand(cluster);
+  const notice = !d.envoy_gateway.installed;
+  if (notice && !d.gateways.length) {
     return (
       <Card>
         <EmptyState
-          title="No Gateways yet"
-          body={`Run fluxctl gateway expose SERVICE to publish a Service on a hostname. ${d.envoy_gateway.installed ? 'Envoy Gateway is already installed.' : 'The first run installs Envoy Gateway for you.'}`}
+          title="Envoy Gateway is not installed on this cluster"
+          body={`Gateways need a controller to publish apps by name. Next, run: ${install} Then publish a Service with fluxctl gateway expose SERVICE. That command also installs it the first time, if you would rather skip this step.`}
         />
+        <Button size="sm" variant="ghost" onClick={() => void copy(install)}><Copy size={14} />Copy as fluxctl</Button>
+      </Card>
+    );
+  }
+  if (!d.gateways.length) {
+    return (
+      <Card>
+        <EmptyState title="No Gateways yet" body="Envoy Gateway is installed. Run fluxctl gateway expose SERVICE to publish a Service on a hostname." />
         <Button size="sm" variant="ghost" onClick={() => void copy(exposeCommand('SERVICE'))}><Copy size={14} />Copy as fluxctl</Button>
       </Card>
     );
   }
   return (
     <>
-      {!d.envoy_gateway.installed ? <Card><EmptyState title="Envoy Gateway is not installed" body="Gateways need a controller. Run fluxctl gateway expose SERVICE and it is installed for you." /></Card> : null}
+      {notice ? (
+        <Card>
+          <EmptyState title="Envoy Gateway is not installed on this cluster" body={`These Gateways cannot work without its controller. Next, run: ${install} They start working once it is installed.`} />
+          <Button size="sm" variant="ghost" onClick={() => void copy(install)}><Copy size={14} />Copy as fluxctl</Button>
+        </Card>
+      ) : null}
       <Card title="Gateways">
         <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Namespace</th><th>Name</th><th>Listeners</th><th>Status</th><th>Routes</th></tr></thead><tbody>
           {d.gateways.map((g) => (

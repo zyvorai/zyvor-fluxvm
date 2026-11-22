@@ -111,12 +111,13 @@ impl ExposeEnv for SystemEnv {
         };
         let exe = std::env::current_exe()?;
         let st = std::process::Command::new(exe)
-            .args(["kube", "apple", "platform", "envoy-gateway", name])
+            .args(["kube", "cluster", "platform", "envoy-gateway", name])
             .status()
             .map_err(|e| anyhow!("could not start the installer: {e}"))?;
         if !st.success() {
             bail!(
-                "installing Envoy Gateway failed (see the output above). You can run the installer yourself: fluxctl kube apple platform envoy-gateway {name}"
+                "installing Envoy Gateway failed (see the output above). You can run the installer yourself: {}",
+                crate::kube_apple::gateway_choice::install_command(name)
             );
         }
         Ok(())

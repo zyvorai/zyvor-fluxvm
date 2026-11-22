@@ -10,6 +10,7 @@
 mod agent;
 mod doctor;
 mod extras;
+pub(crate) mod gateway_choice;
 mod gitops;
 mod ha;
 mod ha_model;
@@ -265,6 +266,13 @@ pub enum AppleCommand {
         /// Registries, embedded registry, CIS hardening, add-on profile and Cilium (see docs/apple-k3s-platform.md).
         #[command(flatten)]
         platform: PlatformArgs,
+        /// Install the Envoy gateway so apps can be reached by name (a clearer way to say `--addons envoy-gateway`). Without
+        /// --gateway, --no-gateway or --addons, a terminal is asked; a script gets no gateway.
+        #[arg(long, conflicts_with = "no_gateway")]
+        gateway: bool,
+        /// Do not install the Envoy gateway and do not ask. Add it later with `fluxctl kube cluster platform envoy-gateway NAME`.
+        #[arg(long)]
+        no_gateway: bool,
     },
     /// Add a node, in a VM of its own on the cluster's private network. The token is read on the server and goes to the
     /// new node on stdin; it is never printed or put in an argument.
@@ -538,9 +546,22 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
             cluster_domain,
             mut disable,
             secrets_encryption,
-            platform,
+            mut platform,
+            gateway,
+            no_gateway,
         } => {
             let install = resolve_install(&binary, None)?;
+            // The gateway choice is made before any VM exists, so a contradiction costs nothing.
+            let choice = gateway_choice::decide(
+                platform.addons.as_deref(),
+                gateway,
+                no_gateway,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            )?;
+            let (addons, gateway_installed) = gateway_choice::resolve(platform.addons.take(), choice, || {
+                gateway_choice::ask(&mut std::io::stdin().lock(), &mut std::io::stderr())
+            })?;
+            platform.addons = addons;
             // Platform flags are checked (and the registries file read) before any VM exists.
             let platform_plan = if platform.is_empty() { None } else { Some(platform_cmd::plan_from_args(&platform)?) };
             for d in platform_plan.iter().flat_map(|p| p.disable.iter()) {
@@ -564,9 +585,17 @@ pub async fn run<A: VmApi>(api: &A, command: AppleCommand) -> Result<()> {
                 flags: SharedFlags { cluster_cidr, service_cidr, cluster_dns, cluster_domain, disable, secrets_encryption },
             };
             let report = lifecycle::create(&h, &store, &req).await?;
-            let Some(plan) = platform_plan else { return json(&report) };
+            let note = gateway_choice::choice_note(choice, gateway_installed).replace("NAME", &req.name);
+            let Some(plan) = platform_plan else {
+                // Nothing was asked for, but the choice is still recorded so the report says why there is no gateway.
+                let mut v = serde_json::to_value(&report)?;
+                v["platform"] = serde_json::json!({ "choices": [note] });
+                return json(&v);
+            };
             let mut v = serde_json::to_value(&report)?;
-            v["platform"] = serde_json::to_value(platform_cmd::after_create(&h, &store, &req.name, &plan).await?)?;
+            let mut applied = serde_json::to_value(platform_cmd::after_create(&h, &store, &req.name, &plan).await?)?;
+            applied["choices"] = serde_json::json!([note]);
+            v["platform"] = applied;
             json(&v)
         }
         AppleCommand::Join { cluster, vm, binary, node, role, url, token_file, keep_failed } => {

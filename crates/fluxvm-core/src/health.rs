@@ -534,7 +534,7 @@ pub const CODES: &[HealthCode] = &[
             "its controller (deployment envoy-gateway in envoy-gateway-system) is not running"
         ],
         [
-            "install it with `fluxctl kube cluster platform envoy-gateway NAME` (on a Mac: `fluxctl kube apple platform envoy-gateway NAME`)",
+            "install it with this one command (NAME is the cluster shown by `fluxctl cluster status`): `fluxctl kube cluster platform envoy-gateway NAME`",
             "then `fluxctl cluster status` again; the Gateways become Programmed within a minute"
         ]
     ),

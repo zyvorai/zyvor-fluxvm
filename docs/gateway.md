@@ -36,9 +36,16 @@ Errors say what to do next: no `kubectl` (how to install it), no reachable clust
 ## Install Envoy Gateway on a FluxVM k3s cluster
 
 ```
-fluxctl kube apple create dev --addons envoy-gateway      # at creation
-fluxctl kube apple platform envoy-gateway dev             # or later, on an existing cluster
+fluxctl kube cluster create dev                           # on a terminal: asks "Install the Envoy gateway so you can reach apps by name? [Y/n]"
+fluxctl kube cluster create dev --gateway                 # install it, no question (scripts)
+fluxctl kube cluster create dev --no-gateway              # do not install it, no question
+fluxctl kube cluster create dev --addons envoy-gateway    # the same as --gateway, by add-on name
+fluxctl kube cluster platform envoy-gateway dev           # or later, on an existing cluster
 ```
+
+The question is asked only when stdin is a terminal and neither `--gateway`, `--no-gateway` nor `--addons` was given. With no terminal and no flag (CI, scripts) nothing is asked and no gateway is installed, exactly as before; a script that passes `--addons` is never changed. `--gateway` cannot be combined with another `--addons` profile (a profile is one choice) and `--gateway --no-gateway` is refused with a message saying which to drop. The choice is recorded in the `platform.choices` list of the JSON `create` prints, for example `gateway: installed (you chose yes when asked)`, or `gateway: not installed; add it later with fluxctl kube cluster platform envoy-gateway dev`. `kube apple` is the old name of `kube cluster` and takes the same flags. `fluxctl kube up` (the single k3s VM) has no add-on profiles and is unchanged.
+
+If you skip it, nothing is lost: `fluxctl gateway expose SERVICE` offers to install Envoy Gateway the first time (`--yes` to skip the question), and the health code `ENVOY_GATEWAY_NOT_INSTALLED` in `fluxctl cluster status` / `fluxctl fix` names the one command that fixes it: `fluxctl kube cluster platform envoy-gateway NAME`. In Studio, the Gateways tab of the Kubernetes page shows "Envoy Gateway is not installed on this cluster" with that command and a "Copy as fluxctl" button when the controller is missing.
 
 Both install the release `install.yaml` of Envoy Gateway (Gateway API CRDs, Envoy Gateway CRDs, the controller in `envoy-gateway-system`) with server-side apply, then wait for `deployment/envoy-gateway` to be Available. It is the same pinned, checksum-verified path as Flux, Argo CD, MetalLB, cert-manager and metrics-server:
 

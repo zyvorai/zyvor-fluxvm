@@ -251,5 +251,11 @@ export const gatewayTone = (s: GwState): Tone => (s === 'ready' ? 'ok' : s === '
 export const routeCommand = (r: GwRoute): string => r.inspect;
 export const exposeCommand = (service: string): string => `fluxctl gateway expose ${service}`;
 
+/** The one command that installs Envoy Gateway on a cluster. A name with unusual characters is single-quoted for the shell. */
+export const installGatewayCommand = (cluster: string): string => {
+  const safe = /^[A-Za-z0-9._-]+$/.test(cluster) ? cluster : "'" + cluster.replace(/'/g, "'\\''") + "'";
+  return `fluxctl kube cluster platform envoy-gateway ${safe}`;
+};
+
 /** A route's backends in words: `api:8080 (2 ready)`, or a warning when none is ready. */
 export const backendText = (b: GwRoute['backends'][number]): string => `${b.name}${b.port != null ? `:${b.port}` : ''} (${b.ready_endpoints ? `${b.ready_endpoints} ready` : 'none ready'})`;
