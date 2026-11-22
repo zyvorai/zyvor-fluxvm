@@ -24,6 +24,8 @@ pub enum Base {
     Template(String),
     /// `IPSW latest`: install from the latest restore image.
     IpswLatest,
+    /// `IPSW /abs/path/UniversalMac.ipsw`: install from a restore image on this Mac.
+    IpswPath(String),
 }
 
 /// One parsed directive (without `FROM`, which lives on [`Macfile`]).
@@ -343,10 +345,15 @@ pub fn parse(src: &str) -> Result<Macfile, ParseError> {
                         if b.eq_ignore_ascii_case("latest") {
                             Base::IpswLatest
                         } else {
-                            return err(
-                                n,
-                                format!("unsupported IPSW selector '{b}' (only 'latest')"),
-                            );
+                            match crate::mac_ipsw::check_path_syntax(b) {
+                                Ok(()) => Base::IpswPath(b.clone()),
+                                Err(m) => {
+                                    return err(
+                                        n,
+                                        format!("unsupported IPSW selector '{b}' (only 'latest', or an absolute path to a .ipsw file): {m}"),
+                                    );
+                                }
+                            }
                         }
                     }
                     [a] if a.eq_ignore_ascii_case("ipsw") => {
@@ -531,6 +538,8 @@ pub enum Step {
     CloneTemplate { reference: String },
     /// Install a fresh macOS from the latest IPSW.
     InstallIpswLatest,
+    /// Install a fresh macOS from the restore image at `path`.
+    InstallIpswPath { path: String },
     /// Run `command` over SSH as `user` (None = the template's default user).
     Run {
         line: usize,
@@ -571,6 +580,7 @@ pub fn plan_with(
             reference: r.clone(),
         },
         Base::IpswLatest => Step::InstallIpswLatest,
+        Base::IpswPath(p) => Step::InstallIpswPath { path: p.clone() },
     }];
     let mut cfg = ImageConfig::default();
     let mut user: Option<String> = None;
@@ -739,6 +749,7 @@ pub fn render_dry_run(steps: &[Step]) -> String {
         let text = match s {
             Step::CloneTemplate { reference } => format!("clone template {reference}"),
             Step::InstallIpswLatest => "install macOS from the latest IPSW".to_string(),
+            Step::InstallIpswPath { path } => format!("install macOS from the IPSW {path}"),
             Step::Run {
                 line,
                 user,

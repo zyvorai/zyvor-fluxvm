@@ -352,6 +352,8 @@ pub fn inspect(vm: &Value, image: Option<Value>) -> Value {
             "pid": vm["pid"],
             "error": vm["error"],
             "restart_policy": vm["labels"][RESTART_LABEL].as_str().unwrap_or("no"),
+            "health": crate::mac_health::inspect_value(vm),
+            "expires_unix": vm["labels"][crate::mac_reap::EXPIRES_LABEL],
         },
         "created": vm["created_at"],
         "network": {

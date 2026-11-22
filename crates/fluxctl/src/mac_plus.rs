@@ -58,6 +58,9 @@ pub struct ImagesExtra {
     /// List the images of every Mac of this inventory (`fleet.yaml`) over ssh instead of this Mac's store.
     #[arg(long, value_name = "INVENTORY", num_args = 0..=1, default_missing_value = "fleet")]
     pub fleet: Option<std::path::PathBuf>,
+    /// Table of allocated and apparent size and when each image was last used by `mac run`.
+    #[arg(long)]
+    pub usage: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -338,7 +341,7 @@ impl Drop for TempFile {
 }
 
 /// Verify a local image against the signatures kept when it was pulled or pushed.
-fn verify_local(store: &Store, t: &TrustStore, reference: &str) -> Result<(String, String)> {
+pub(crate) fn verify_local(store: &Store, t: &TrustStore, reference: &str) -> Result<(String, String)> {
     let key = mac_store::normalize(reference)?;
     let (_, e) = store
         .list()?
@@ -601,6 +604,7 @@ pub fn images(store: &Store, json: bool, extra: &ImagesExtra) -> Result<()> {
         }
     }
     if json {
+        let last_used = crate::mac_imgstat::load(store);
         println!(
             "{}",
             serde_json::to_string_pretty(&json!(
@@ -608,6 +612,9 @@ pub fn images(store: &Store, json: bool, extra: &ImagesExtra) -> Result<()> {
                     .map(|(n, e, l)| json!({
                         "reference": n, "digest": e.digest, "source": e.source, "labels": l,
                         "size_bytes": dir_size(&store.root().join(&e.dir)),
+                        "allocated_bytes": crate::mac_image_ops::dir_usage(&store.root().join(&e.dir)).1,
+                        "added_unix": e.added_unix,
+                        "last_used_unix": last_used.get(n),
                     }))
                     .collect::<Vec<_>>()
             ))?
@@ -616,6 +623,11 @@ pub fn images(store: &Store, json: bool, extra: &ImagesExtra) -> Result<()> {
         let plain: Vec<(String, Entry)> = rows.into_iter().map(|(n, e, _)| (n, e)).collect();
         if plain.is_empty() && !extra.filter.is_empty() {
             println!("no images match the filter");
+        } else if extra.usage {
+            print!(
+                "{}",
+                crate::mac_imgstat::render_usage(store, &plain, crate::mac_health::now_unix())
+            );
         } else {
             print!("{}", crate::mac_cmd::render_images(store, &plain));
         }

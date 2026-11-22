@@ -8,10 +8,11 @@
 //!
 //! Supported service keys: `image`, `command` (string = shell text, list = argv), `environment` (map or `K=V` list),
 //! `env_file`, `ports` (`HOST:GUEST`), `volumes` (`./host:/guest[:ro]`, relative to the compose file), `working_dir`,
-//! `depends_on` (list, or map with a `condition` that is accepted and ignored), `labels`, `restart`, `cpus`, `mem_limit`,
+//! `depends_on` (list, or map with a `condition`: `service_healthy` waits for the dependency's image HEALTHCHECK, other values mean "started"), `labels`, `restart`, `cpus`, `mem_limit`,
 //! `user`. Anything else (`build`, `networks`, `deploy`, ...) is an error, not silently ignored.
 //!
-//! `depends_on` means "started after, once SSH answers", not "healthy": healthchecks are recorded in images but never run.
+//! `depends_on` means "started after, once SSH answers"; with `condition: service_healthy` it also waits (up to 10 minutes) for the
+//! dependency's image HEALTHCHECK to pass, probed over SSH (see mac_health). A dependency whose image has no HEALTHCHECK is an error.
 //! A service's `command` runs in the background in the guest (like `mac run -d`).
 //!
 //! Not verified against a real macOS VM: parsing, ordering and the request bodies are unit tested; `up`, `down` and `ps` were
@@ -49,6 +50,13 @@ pub enum ComposeCommand {
         /// Print the order and what would be created, and change nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Run `mac build` for every service with `build:` even when its image already exists (otherwise only missing images
+        /// are built).
+        #[arg(long)]
+        build: bool,
+        /// Also start services with this profile (repeatable; also `COMPOSE_PROFILES=a,b`).
+        #[arg(long = "profile", value_name = "NAME")]
+        profile: Vec<String>,
     },
     /// Stop and delete the project's instances (reverse depends_on order).
     Down {
@@ -56,6 +64,32 @@ pub enum ComposeCommand {
         file: Option<PathBuf>,
         #[arg(short = 'p', long = "project-name")]
         project: Option<String>,
+    },
+    /// Show a service's console log (the VM's serial output; `mac logs`).
+    Logs {
+        service: String,
+        #[command(flatten)]
+        t: Target,
+        #[arg(short = 'F', long)]
+        follow: bool,
+        #[arg(long, default_value_t = 100)]
+        tail: usize,
+    },
+    /// Run a command in a service's instance over SSH (`mac exec`).
+    Exec {
+        service: String,
+        #[command(flatten)]
+        t: Target,
+        #[arg(long, default_value = "admin")]
+        user: String,
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Stop and start the project's instances again (all, or the named services).
+    Restart {
+        services: Vec<String>,
+        #[command(flatten)]
+        t: Target,
     },
     /// List the project's instances.
     Ps {
@@ -67,6 +101,17 @@ pub enum ComposeCommand {
         #[arg(short = 'a', long)]
         all: bool,
     },
+}
+
+/// Which compose file and project a command is about.
+#[derive(clap::Args, Debug, Clone)]
+pub struct Target {
+    /// The compose file (default: mac-compose.yaml, .yml or .json in this directory).
+    #[arg(short = 'f', long)]
+    pub file: Option<PathBuf>,
+    /// Project name (default: `name:` in the file, else the directory name).
+    #[arg(short = 'p', long = "project-name")]
+    pub project: Option<String>,
 }
 
 impl ComposeCommand {
@@ -87,7 +132,15 @@ pub struct ComposeFile {
 #[derive(Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 struct Service {
+    /// May be omitted when `build` is set: the built image is then `PROJECT-SERVICE:latest`.
+    #[serde(default)]
     image: String,
+    /// `build: ./dir`, or `{context, dockerfile, args}`; `dockerfile` names the Macfile. Built with `mac build` on `up`.
+    #[serde(default)]
+    build: Option<BuildSpec>,
+    /// The service only runs when one of these profiles is selected (`--profile`, `COMPOSE_PROFILES`).
+    #[serde(default)]
+    profiles: Vec<String>,
     #[serde(default)]
     command: Option<StrOrList>,
     #[serde(default)]
@@ -112,6 +165,30 @@ struct Service {
     mem_limit: Option<Scalar>,
     #[serde(default)]
     user: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum BuildSpec {
+    Context(String),
+    Full {
+        #[serde(default)]
+        context: Option<String>,
+        #[serde(default)]
+        dockerfile: Option<String>,
+        #[serde(default)]
+        args: Option<MapOrList>,
+    },
+}
+
+/// A service's `build:` resolved against the compose file's directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildPlan {
+    pub context: PathBuf,
+    /// The Macfile, when not `CONTEXT/Macfile`.
+    pub file: Option<PathBuf>,
+    /// `NAME=value` build args.
+    pub args: Vec<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -177,7 +254,10 @@ pub struct ServicePlan {
     pub workdir: Option<String>,
     pub user: Option<String>,
     pub depends_on: Vec<String>,
+    /// The `depends_on` entries with `condition: service_healthy`: `up` waits for their HEALTHCHECK before starting this service.
+    pub healthy_deps: Vec<String>,
     pub has_dependents: bool,
+    pub build: Option<BuildPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -256,14 +336,42 @@ pub fn resolve(
     home: Option<&Path>,
     lookup: impl Fn(&str) -> Option<String> + Copy,
 ) -> Result<Resolved> {
+    resolve_with(file, project, base, home, lookup, &[])
+}
+
+/// A service runs when it has no `profiles`, or one of them is in `active`.
+fn selected(svc: &Service, active: &[String]) -> bool {
+    svc.profiles.is_empty()
+        || active.iter().any(|a| a == "*")
+        || svc.profiles.iter().any(|p| active.contains(p))
+}
+
+/// [`resolve`] with `--profile` selection. The two-VM limit applies to the SELECTED services.
+pub fn resolve_with(
+    file: &ComposeFile,
+    project: Option<&str>,
+    base: &Path,
+    home: Option<&Path>,
+    lookup: impl Fn(&str) -> Option<String> + Copy,
+    profiles: &[String],
+) -> Result<Resolved> {
     ensure!(
         !file.services.is_empty(),
         "the compose file defines no services"
     );
+    let active: Vec<(&String, &Service)> = file
+        .services
+        .iter()
+        .filter(|(_, s)| selected(s, profiles))
+        .collect();
     ensure!(
-        file.services.len() <= MAX_SERVICES,
-        "this file defines {} services, but a Mac runs at most {MAX_SERVICES} macOS VMs at once (Apple's licence limit). Remove services or split the file; macOS guests cannot be scaled past 2 per host",
-        file.services.len()
+        !active.is_empty(),
+        "no service is selected: every service has profiles; pass --profile NAME (or COMPOSE_PROFILES)"
+    );
+    ensure!(
+        active.len() <= MAX_SERVICES,
+        "this file selects {} services, but a Mac runs at most {MAX_SERVICES} macOS VMs at once (Apple's licence limit). Remove services or split the file, or select fewer with `profiles:` and --profile; macOS guests cannot be scaled past 2 per host",
+        active.len()
     );
     let project = project
         .map(str::to_string)
@@ -274,7 +382,7 @@ pub fn resolve(
         "project name {project:?} must be lowercase letters, digits, - or _"
     );
     let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, svc) in &file.services {
+    for (name, svc) in active.iter().map(|(n, s)| (*n, *s)) {
         ensure!(
             valid_name(name),
             "service name {name:?} must be lowercase letters, digits, - or _"
@@ -286,13 +394,29 @@ pub fn resolve(
         };
         deps.insert(name.clone(), d);
     }
-    let order = start_order(&deps)?;
+    let order = start_order(&deps).map_err(|e| {
+        if file.services.len() > active.len() {
+            e.context("(services outside the selected profiles are not considered)")
+        } else {
+            e
+        }
+    })?;
     let depended: BTreeSet<&String> = deps.values().flatten().collect();
     let mut services = Vec::new();
     for name in order {
         let svc = &file.services[&name];
         let ctx = |what: &str| format!("service {name:?}: {what}");
-        ensure!(!svc.image.trim().is_empty(), "{}", ctx("image is empty"));
+        ensure!(
+            !svc.image.trim().is_empty() || svc.build.is_some(),
+            "{}",
+            ctx("needs `image` or `build`")
+        );
+        let build = svc.build.as_ref().map(|b| build_plan(b, base));
+        let image = if svc.image.trim().is_empty() {
+            format!("{project}-{name}:latest")
+        } else {
+            svc.image.clone()
+        };
         let mounts = svc
             .volumes
             .iter()
@@ -364,7 +488,7 @@ pub fn resolve(
             service: name.clone(),
             spec: LaunchSpec {
                 name: format!("{project}-{name}"),
-                image: svc.image.clone(),
+                image,
                 publish,
                 mounts,
                 cpus,
@@ -378,10 +502,46 @@ pub fn resolve(
             workdir: svc.working_dir.clone(),
             user: svc.user.clone(),
             depends_on: deps[&name].clone(),
+            healthy_deps: healthy_deps(svc),
+            build,
             has_dependents: depended.contains(&name),
         });
     }
     Ok(Resolved { project, services })
+}
+
+fn build_plan(b: &BuildSpec, base: &Path) -> BuildPlan {
+    match b {
+        BuildSpec::Context(c) => BuildPlan {
+            context: base.join(c),
+            file: None,
+            args: vec![],
+        },
+        BuildSpec::Full {
+            context,
+            dockerfile,
+            args,
+        } => {
+            let ctx = base.join(context.as_deref().unwrap_or("."));
+            BuildPlan {
+                file: dockerfile.as_ref().map(|f| ctx.join(f)),
+                context: ctx,
+                args: args.as_ref().map(MapOrList::pairs).unwrap_or_default(),
+            }
+        }
+    }
+}
+
+/// The `depends_on` entries asking for `condition: service_healthy`.
+fn healthy_deps(svc: &Service) -> Vec<String> {
+    match &svc.depends_on {
+        Some(DependsOn::Map(m)) => m
+            .iter()
+            .filter(|(_, v)| v["condition"].as_str() == Some("service_healthy"))
+            .map(|(k, _)| k.clone())
+            .collect(),
+        _ => vec![],
+    }
 }
 
 pub fn render_plan(r: &Resolved) -> String {
@@ -394,7 +554,18 @@ pub fn render_plan(r: &Resolved) -> String {
         let after = if s.depends_on.is_empty() {
             String::new()
         } else {
-            format!(" after {}", s.depends_on.join(", "))
+            let list: Vec<String> = s
+                .depends_on
+                .iter()
+                .map(|d| {
+                    if s.healthy_deps.contains(d) {
+                        format!("{d} (healthy)")
+                    } else {
+                        d.clone()
+                    }
+                })
+                .collect();
+            format!(" after {}", list.join(", "))
         };
         out.push_str(&format!(
             "{}. {} = {} from {}{after}\n",
@@ -420,6 +591,31 @@ fn find_file(file: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn load(file: Option<PathBuf>, project: Option<&str>) -> Result<Resolved> {
+    load_with(file, project, &profiles_from_env(&[]))
+}
+
+/// `--profile` values plus `COMPOSE_PROFILES` (comma separated).
+fn profiles_from_env(flags: &[String]) -> Vec<String> {
+    let mut v = flags.to_vec();
+    if let Ok(e) = std::env::var("COMPOSE_PROFILES") {
+        v.extend(e.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    }
+    v
+}
+
+/// For commands about instances that already exist (`down`, `ps`, `logs`, ...): every profile counts, and a file that is over the
+/// two-service limit is not an error here (only `up` starts anything). Returns the project and the services in start order.
+fn load_existing(file: Option<PathBuf>, project: Option<&str>) -> Result<(String, Vec<String>)> {
+    match load_with(file.clone(), project, &["*".to_string()]) {
+        Ok(r) => Ok((r.project, r.services.into_iter().map(|s| s.service).collect())),
+        Err(e) => match project {
+            Some(p) => Ok((p.to_string(), vec![])),
+            None => Err(e),
+        },
+    }
+}
+
+fn load_with(file: Option<PathBuf>, project: Option<&str>, profiles: &[String]) -> Result<Resolved> {
     let path = find_file(file)?;
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -427,22 +623,47 @@ fn load(file: Option<PathBuf>, project: Option<&str>) -> Result<Resolved> {
     let abs = std::fs::canonicalize(&path).unwrap_or(path.clone());
     let base = abs.parent().unwrap_or(Path::new("."));
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    resolve(&parsed, project, base, home.as_deref(), |k| {
+    resolve_with(&parsed, project, base, home.as_deref(), |k| {
         std::env::var(k).ok()
-    })
+    }, profiles)
     .with_context(|| path.display().to_string())
 }
 
 /// `compose up --dry-run`: no daemon.
 pub fn run_client(cmd: ComposeCommand) -> Result<()> {
     match cmd {
-        ComposeCommand::Up { file, project, .. } => {
-            let r = load(file, project.as_deref())?;
+        ComposeCommand::Up {
+            file,
+            project,
+            profile,
+            ..
+        } => {
+            let r = load_with(file, project.as_deref(), &profiles_from_env(&profile))?;
             let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
             for s in &r.services {
-                store
-                    .resolve(&s.spec.image)
-                    .with_context(|| format!("service {:?}", s.service))?;
+                // A service with `build:` may have no image yet: `up` builds it.
+                if s.build.is_none() {
+                    store
+                        .resolve(&s.spec.image)
+                        .with_context(|| format!("service {:?}", s.service))?;
+                }
+            }
+            for s in &r.services {
+                for dep in &s.healthy_deps {
+                    let image = &r.services.iter().find(|d| &d.service == dep).map(|d| d.spec.image.clone());
+                    let built = r.services.iter().any(|d| &d.service == dep && d.build.is_some());
+                    let has = built
+                        || image
+                            .as_deref()
+                            .and_then(|i| store.resolve(i).ok())
+                            .and_then(|d| mac_config::load(&d).ok())
+                            .is_some_and(|c| c.healthcheck.is_some());
+                    ensure!(
+                        has,
+                        "service {:?} waits for {dep:?} to be healthy, but {dep:?}'s image has no HEALTHCHECK (add one to its Macfile)",
+                        s.service
+                    );
+                }
             }
             print!("{}", render_plan(&r));
             Ok(())
@@ -462,6 +683,32 @@ async fn project_instances(
     r.list_vms(Some(&sel)).await
 }
 
+/// The `mac build` a service's `build:` stands for.
+fn build_command(tag: &str, b: &BuildPlan, wait: u64) -> crate::mac_cmd::MacCommand {
+    crate::mac_cmd::MacCommand::Build {
+        file: b.file.clone(),
+        tag: tag.to_string(),
+        dry_run: false,
+        wait,
+        build_arg: b.args.clone(),
+        no_cache: false,
+        context: b.context.clone(),
+    }
+}
+
+/// The instance of `service` in `project`.
+async fn service_instance(
+    r: &crate::remote::Remote,
+    project: &str,
+    service: &str,
+) -> Result<serde_json::Value> {
+    project_instances(r, project)
+        .await?
+        .into_iter()
+        .find(|v| v["labels"][SERVICE_LABEL].as_str() == Some(service))
+        .with_context(|| format!("no instance for service {service:?} in project {project:?} (`fluxctl mac compose ps -a`)"))
+}
+
 /// `compose up|down|ps` against the daemon. Never run against a real daemon: see the module notes.
 pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Result<()> {
     use crate::mac_instance::{GuestJob, launch, run_in_guest};
@@ -471,8 +718,10 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             project,
             wait,
             dry_run,
+            build,
+            profile,
         } => {
-            let plan = load(file, project.as_deref())?;
+            let plan = load_with(file, project.as_deref(), &profiles_from_env(&profile))?;
             ensure!(!dry_run, "internal: dry-run is client side");
             let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
             let existing = project_instances(r, &plan.project).await?;
@@ -487,11 +736,31 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 );
             }
             eprint!("{}", render_plan(&plan));
+            {
+                let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+                for s in &plan.services {
+                    let Some(b) = &s.build else { continue };
+                    if !build && store.resolve(&s.spec.image).is_ok() {
+                        continue;
+                    }
+                    eprintln!("building {} from {} ...", s.spec.image, b.context.display());
+                    crate::mac_cmd::run_daemon(r, build_command(&s.spec.image, b, wait))
+                        .await
+                        .with_context(|| format!("service {:?}: build", s.service))?;
+                }
+            }
             eprintln!(
                 "note: at most {MAX_SERVICES} macOS VMs run on one Mac; the daemon refuses (409) if another macOS VM holds a slot"
             );
             let mut started: Vec<String> = Vec::new();
             for s in &plan.services {
+                for dep in &s.healthy_deps {
+                    let dep_name = format!("{}-{dep}", plan.project);
+                    eprintln!("waiting for {dep_name} to be healthy ...");
+                    crate::mac_health::wait_instance_healthy(r, &dep_name, 600)
+                        .await
+                        .with_context(|| format!("service {:?} depends_on {dep:?} being healthy (started instances stay: `fluxctl mac compose down`)", s.service))?;
+                }
                 eprintln!("starting {} ...", s.spec.name);
                 let cfg = mac_config::load(&store.resolve(&s.spec.image)?)?;
                 let command =
@@ -530,20 +799,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             Ok(())
         }
         ComposeCommand::Down { file, project } => {
-            let (project, order) = match load(file.clone(), project.as_deref()) {
-                Ok(p) => (
-                    p.project,
-                    p.services
-                        .into_iter()
-                        .map(|s| s.service)
-                        .rev()
-                        .collect::<Vec<_>>(),
-                ),
-                Err(e) => match project {
-                    Some(p) => (p, vec![]),
-                    None => return Err(e),
-                },
-            };
+            let (project, mut order) = load_existing(file.clone(), project.as_deref())?;
+            order.reverse();
             let mut vms = project_instances(r, &project).await?;
             ensure!(!vms.is_empty(), "no instances for project {project:?}");
             vms.sort_by_key(|v| {
@@ -559,12 +816,54 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             }
             Ok(())
         }
+        ComposeCommand::Logs {
+            service,
+            t,
+            follow,
+            tail,
+        } => {
+            let (project, _) = load_existing(t.file, t.project.as_deref())?;
+            let vm = service_instance(r, &project, &service).await?;
+            let name = vm["name"].as_str().unwrap_or_default().to_string();
+            crate::mac_more::run_daemon(
+                r,
+                crate::mac_more::MacMore::Logs {
+                    name,
+                    follow,
+                    tail,
+                },
+            )
+            .await
+        }
+        ComposeCommand::Exec {
+            service,
+            t,
+            user,
+            cmd,
+        } => {
+            let (project, _) = load_existing(t.file, t.project.as_deref())?;
+            let vm = service_instance(r, &project, &service).await?;
+            let name = vm["name"].as_str().unwrap_or_default().to_string();
+            crate::mac_more::exec(r, name, user, cmd, crate::mac_more::ExecOpts::default()).await
+        }
+        ComposeCommand::Restart { services, t } => {
+            let (project, _) = load_existing(t.file, t.project.as_deref())?;
+            let vms = project_instances(r, &project).await?;
+            let names: Vec<String> = vms
+                .iter()
+                .filter(|v| {
+                    services.is_empty()
+                        || services
+                            .iter()
+                            .any(|s| v["labels"][SERVICE_LABEL].as_str() == Some(s))
+                })
+                .filter_map(|v| v["name"].as_str().map(String::from))
+                .collect();
+            ensure!(!names.is_empty(), "no matching instances in project {project:?}");
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Restart { names }).await
+        }
         ComposeCommand::Ps { file, project, all } => {
-            let project = match load(file, project.as_deref()) {
-                Ok(p) => p.project,
-                Err(_) if project.is_some() => project.unwrap(),
-                Err(e) => return Err(e),
-            };
+            let (project, _) = load_existing(file, project.as_deref())?;
             let vms = project_instances(r, &project).await?;
             let rows: Vec<&serde_json::Value> = vms.iter().collect();
             let rows = crate::mac_inspect::select(&rows, all, &[]);
@@ -628,6 +927,67 @@ mod tests {
                 && plan.contains("2. tests = ci-tests from xcode:15 after db"),
             "{plan}"
         );
+    }
+
+    #[test]
+    fn service_healthy_is_recorded_and_other_conditions_are_plain_starts() {
+        let r = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: d:1\n").unwrap();
+        let web = r.services.iter().find(|s| s.service == "web").unwrap();
+        assert_eq!(web.healthy_deps, ["db"]);
+        assert!(render_plan(&r).contains("after db (healthy)"));
+        let r = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: service_started\n  db:\n    image: d:1\n").unwrap();
+        assert!(r.services.iter().all(|s| s.healthy_deps.is_empty()));
+    }
+
+    #[test]
+    fn build_services_default_their_image_and_resolve_against_the_file_directory() {
+        let r = res("name: ci\nservices:\n  app:\n    build:\n      context: ./app\n      dockerfile: Macfile.ci\n      args:\n        MODE: fast\n    command: ['./run']\n").unwrap();
+        let app = &r.services[0];
+        assert_eq!(app.spec.image, "ci-app:latest");
+        let b = app.build.as_ref().unwrap();
+        assert_eq!(b.context, Path::new("/proj/My App/./app"));
+        assert_eq!(b.file.as_deref(), Some(Path::new("/proj/My App/./app/Macfile.ci")));
+        assert_eq!(b.args, ["MODE=fast"]);
+        let r = res("services:\n  a:\n    build: ./x\n    image: mine:1\n").unwrap();
+        assert_eq!(r.services[0].spec.image, "mine:1");
+        assert_eq!(r.services[0].build.as_ref().unwrap().args.len(), 0);
+        let e = res("services:\n  a:\n    command: x\n").unwrap_err();
+        assert!(format!("{e:#}").contains("image"), "{e:#}");
+    }
+
+    #[test]
+    fn profiles_select_services_and_the_two_vm_limit_counts_the_selected() {
+        let y = "services:\n  a:\n    image: a:1\n  b:\n    image: b:1\n  dbg:\n    image: d:1\n    profiles: [debug]\n";
+        let f = parse(y).unwrap();
+        let go = |p: &[&str]| {
+            let p: Vec<String> = p.iter().map(|s| s.to_string()).collect();
+            resolve_with(&f, None, Path::new("/p"), None, |_| None, &p)
+        };
+        assert_eq!(go(&[]).unwrap().services.len(), 2);
+        let e = go(&["debug"]).unwrap_err().to_string();
+        assert!(e.contains("at most 2 macOS VMs") && e.contains("--profile"), "{e}");
+        assert!(go(&["*"]).is_err());
+        let only = parse("services:\n  a:\n    image: a:1\n    profiles: [x]\n").unwrap();
+        let e = resolve_with(&only, None, Path::new("/p"), None, |_| None, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no service is selected"), "{e}");
+    }
+
+    #[test]
+    fn the_new_subcommands_parse() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            c: ComposeCommand,
+        }
+        let p = |a: &[&str]| T::try_parse_from(std::iter::once("t").chain(a.iter().copied()));
+        assert!(matches!(p(&["logs", "db", "--tail", "5", "-p", "ci"]).unwrap().c, ComposeCommand::Logs { tail: 5, .. }));
+        assert!(matches!(p(&["exec", "db", "--", "ls"]).unwrap().c, ComposeCommand::Exec { .. }));
+        assert!(matches!(p(&["restart"]).unwrap().c, ComposeCommand::Restart { .. }));
+        assert!(matches!(p(&["up", "--build", "--profile", "debug"]).unwrap().c, ComposeCommand::Up { build: true, .. }));
+        assert!(p(&["exec", "db"]).is_err());
     }
 
     #[test]
@@ -769,6 +1129,8 @@ mod tests {
             project: None,
             wait: 1,
             dry_run,
+            build: false,
+            profile: vec![],
         };
         assert!(up(true).is_client_side());
         assert!(!up(false).is_client_side());
