@@ -6,6 +6,8 @@ a k3s guest on each. Nothing is pulled by a script you cannot read, nothing blin
 > **Status.** Unit-tested with a fake SSH transport and golden-tested remote commands. It has **not been run against a real Mac**
 > yet: expect to meet a rough edge, and use `--dry-run` first. See [What is not verified](#what-is-not-verified).
 
+For a step-by-step run from two bare Macs to a 2-node k3s, see [tutorial-mac-fleet-k3s.md](tutorial-mac-fleet-k3s.md). On one Mac, `fluxctl mac quickstart` is the guided way in.
+
 ## Three commands
 
 ```bash

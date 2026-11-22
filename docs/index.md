@@ -66,6 +66,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 |-------|-----|
 | Product positioning (who/why/when-not) | [docs/POSITIONING.md](POSITIONING.md) |
 | Install on a Mac with Homebrew (daemon, first VM, MCP agent client) | [docs/install-macos.md](install-macos.md) |
+| Tutorial: two bare Mac minis to a running 2-node k3s (`mac-fleet`, `mac quickstart`, `kube apple join`) | [docs/tutorial-mac-fleet-k3s.md](tutorial-mac-fleet-k3s.md) |
 | Build a Mac cloud (Mac mini and Mac Studio fleet on `vz`) | [docs/mac-cloud.md](mac-cloud.md) |
 | Mac cloud: tenants, leases, quotas, snapshots and clones, volumes, tunnels, SSO and roles, API keys, webhooks | [docs/mac-cloud-tenancy.md](mac-cloud-tenancy.md) |
 | Mac cloud: run central in production (flags, state, exposure, checklist) | [docs/mac-cloud-operations.md](mac-cloud-operations.md) |
