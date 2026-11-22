@@ -68,6 +68,7 @@ mod speculate_api;
 mod studio;
 mod support_bundle;
 mod tunnel_api;
+mod up_plan;
 mod volumes_api;
 mod vz_api;
 
@@ -1030,6 +1031,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(macos_pool_api::routes())
         .merge(cluster_health::routes())
         .merge(support_bundle::routes())
+        .merge(up_plan::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
         .merge(guest_ops::routes())
