@@ -72,6 +72,14 @@ Mac fleet operations: clean shutdown, shared leases, richer status, aggregated l
 - `fluxctl mac-fleet upgrade --rolling [--drain-timeout S] [--health-timeout S]`: one Mac at a time, drain, wait for its VMs, upgrade, health gate (daemon up at the new version), resume; the first failure stops the roll and leaves that Mac drained. Module `mac_fleet_roll`.
 - `fluxctl mac runner --org` warm pool: `--runner-group-name`, `--ephemeral-pool N` (ceiling, driven by the queue), `--queue-repo OWNER/REPO` and `--queue-scan [--scan-limit N]` read the queue from repositories because GitHub has no organisation-wide call; each start decision is logged. Module `mac_runner_pool`.
 - Grafana dashboard `deploy/grafana/fluxvm-mac.json` and Prometheus rules `deploy/prometheus/fluxvm-mac-alerts.yaml` for the `fluxvm_mac_*` and `fluxvm_kube_apple_*` families ([docs/mac-integrations.md](docs/mac-integrations.md)). Validated as JSON and YAML only.
+
+`fluxctl mac` made easy: a guided setup, friendlier errors, a cheatsheet and tab completion. Unit-tested with fakes (a fake environment for the quickstart, a fake source for completion); **not run against a real Mac, macOS guest or k3s**.
+
+- New `fluxctl mac quickstart` (alias `setup`, module `mac_ux`): `mac doctor`, then a template (`--from DIR` or `--pull REF`; asks on a terminal), a hello-world instance (`--no-hello` skips), and `kube up` with `--k3s`. `--yes` and any non-terminal never prompt, `--dry-run` prints the steps, `--ignore-doctor` carries on past a failed check.
+- `fluxctl explain` knows `MAC_SLOT_LIMIT` (409), `MAC_SESSION_LOCKED` (503), `SSH_HOSTKEY_MISMATCH`, `MAC_TEMPLATE_MISSING` and `MAC_DISK_FULL` (module `mac_errors`), each with causes and fixes; `explain 409` and `explain 503` show them with the API codes, and a failing quickstart step prints the matching hint.
+- New `fluxctl mac cheatsheet [--json]`, and `fluxctl mac complete-script zsh|bash`: completion of image, instance and inventory-host names on top of `fluxctl completions` (the project's completion is clap's static one, so this is a small wrapper around a hidden `mac complete`).
+- New [docs/tutorial-mac-fleet-k3s.md](docs/tutorial-mac-fleet-k3s.md): two bare Mac minis to a 2-node k3s.
+
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 
 - New `fluxctl mac host status | headless-check | keepawake install|uninstall|status | tune | rosetta` (module `mac_host`, see [docs/macos-host.md](docs/macos-host.md)). `status` reads `pmset`, `ioreg`, `fdesetup`, `defaults`, `system_profiler` and `df` without sudo.
