@@ -9,7 +9,7 @@
 //! Supported service keys: `image`, `command` (string = shell text, list = argv), `environment` (map or `K=V` list),
 //! `env_file`, `ports` (`HOST:GUEST`), `volumes` (`./host:/guest[:ro]`, relative to the compose file), `working_dir`,
 //! `depends_on` (list, or map with a `condition`: `service_healthy` waits for the dependency's image HEALTHCHECK, other values mean "started"), `labels`, `restart`, `cpus`, `mem_limit`,
-//! `user`. Anything else (`build`, `networks`, `deploy`, ...) is an error, not silently ignored.
+//! `user`. Anything else (`networks`, `deploy`, ...) is an error, not silently ignored.
 //!
 //! `depends_on` means "started after, once SSH answers"; with `condition: service_healthy` it also waits (up to 10 minutes) for the
 //! dependency's image HEALTHCHECK to pass, probed over SSH (see mac_health). A dependency whose image has no HEALTHCHECK is an error.
@@ -1032,10 +1032,11 @@ mod tests {
     fn unsupported_keys_and_bad_values_are_errors_not_ignored() {
         let e = format!(
             "{:#}",
-            res("services:\n  a:\n    image: x\n    build: .\n").unwrap_err()
+            res("services:\n  a:\n    image: x\n    networks: [n]\n").unwrap_err()
         );
-        assert!(e.contains("build"), "{e}");
-        let e = format!("{:#}", res("services:\n  a:\n    build: .\n").unwrap_err());
+        assert!(e.contains("networks"), "{e}");
+        // `build:` is supported now, but a service still needs an image or a build.
+        let e = format!("{:#}", res("services:\n  a:\n    command: [\"x\"]\n").unwrap_err());
         assert!(e.contains("image"), "{e}");
         let e = format!(
             "{:#}",

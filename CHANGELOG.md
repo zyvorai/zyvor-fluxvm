@@ -4,6 +4,7 @@
 
 One k3s lifecycle for Mac and Linux ([docs/kubernetes-unified.md](docs/kubernetes-unified.md)). Unit-tested; the Linux path has not been verified on a live host unless stated in the PR.
 
+- `mac inspect --json` gains `state.health` and `state.expires_unix` (additive; golden `inspect.json` updated). Compose `build:` is supported, so the old "build is an error" test now checks `networks:` instead. The `mac-fleet apply` cheatsheet and tutorial lines take the inventory as a positional file, not `-f`.
 - Fix: on Linux `fluxctl kube up` and `fluxctl docker up` waited forever for the guest's address (QEMU user networking has none). The VM request now carries a loopback-only ssh forward on a free port (new module `vm_net`, `Backend::{Vz,Qemu}`), which the existing endpoint lookup reads back for `wait_ssh`, ssh and the tunnels.
 - `fluxctl kube cluster` is the one lifecycle (journal, pinned host keys, HA, upgrade, backup, recover); `kube apple` is an alias that prints a deprecation note. On Linux it uses the host's architecture (`k3s`, `sha256sum-amd64.txt`); `--servers N>1`, joining local nodes, `--workers`, `--rosetta` and `--install-agent` say they are Mac-only.
 

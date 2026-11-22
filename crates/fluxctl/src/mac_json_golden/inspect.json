@@ -6,7 +6,9 @@
     "status": "running",
     "pid": null,
     "error": null,
-    "restart_policy": "always"
+    "restart_policy": "always",
+    "health": null,
+    "expires_unix": null
   },
   "created": "2026-11-21T10:00:00Z",
   "network": {

@@ -38,8 +38,8 @@ hosts:
 ```
 
 ```bash
-fluxctl mac-fleet apply -f fleet.yaml --dry-run          # prints every ssh command, sends nothing
-fluxctl mac-fleet apply -f fleet.yaml --accept-new-hostkey
+fluxctl mac-fleet apply fleet.yaml --dry-run          # prints every ssh command, sends nothing
+fluxctl mac-fleet apply fleet.yaml --accept-new-hostkey
 fluxctl mac-fleet status -f fleet.yaml
 ```
 
