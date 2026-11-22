@@ -480,7 +480,7 @@ pub fn set_self_control_socket(path: PathBuf) {
 /// The saved state a launch restores from, after the host guards. A disk-only snapshot has no state, so it cold-boots from its
 /// disk. State written on another macOS build is not restored (cold boot, or a refusal with
 /// `FLUXVM_RESTORE_ON_OS_UPDATE=refuse`), and a restore from a locked session fails here with a pointer to
-/// `fluxctl mac host headless-check` instead of a framework error.
+/// `fluxctl mac host headless-check` instead of a framework error (`FLUXVM_SKIP_SESSION_CHECK=1` skips that check).
 fn guarded_restore_state(req: &CreateVmRequest, workspace: &Path) -> Result<Option<PathBuf>> {
     let Some(tag) = req.loadvm_tag.as_deref() else {
         return Ok(None);
@@ -507,7 +507,12 @@ fn guarded_restore_state(req: &CreateVmRequest, workspace: &Path) -> Result<Opti
         tracing::warn!("{msg}; booting cold from the snapshot's disk instead of restoring memory");
         return Ok(None);
     }
-    if hh::probe_session_locked() == Some(true) {
+    if hh::env_flag_set(hh::SKIP_SESSION_CHECK_ENV) {
+        tracing::warn!(
+            "{} is set: not checking whether this Mac's login session is locked before restoring",
+            hh::SKIP_SESSION_CHECK_ENV
+        );
+    } else if hh::probe_session_locked() == Some(true) {
         bail!("{}", hh::locked_message());
     }
     Ok(Some(state))
