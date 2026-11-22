@@ -22,7 +22,7 @@ fluxctl kube apple create dev --servers 3 --binary k3s-arm64 --sha256-file sha25
 | `--registries-file FILE` | `FILE` is copied to `/etc/rancher/k3s/registries.yaml` (mode 0600) on **every** node. It is checked as YAML with only the keys k3s reads (`mirrors`, `configs`). |
 | `--embedded-registry` | `embedded-registry: true` on the servers. Without `--registries-file`, a `mirrors: {"*": {}}` file is written for you; with one, it must have a `mirrors:` entry. Nodes need TCP 5001 and 6443 open to each other. |
 | `--harden cis` [`--psa-level baseline\|restricted`] | The k3s CIS settings, `/etc/sysctl.d/90-kubelet.conf`, a Pod Security Admission file and a metadata-only audit policy on the servers. The sysctls are loaded before k3s restarts. Default level `restricted` (`kube-system` exempt); many images fail under it, so say `baseline` if that is too strict. This is the profile, not a benchmark result. |
-| `--addons default\|minimal\|metallb` | Bundled components to turn off, added to `--disable` and so carried in every server's unit and the journal: `minimal` = ServiceLB, local-storage and metrics-server off; `metallb` = ServiceLB off. Traefik is always off. |
+| `--addons default\|minimal\|metallb\|envoy-gateway` | Bundled components to turn off, added to `--disable` and so carried in every server's unit and the journal: `minimal` = ServiceLB, local-storage and metrics-server off; `metallb` = ServiceLB off; `envoy-gateway` = nothing off, and Envoy Gateway (pinned) is installed once the cluster is up (see [docs/gateway.md](gateway.md)). Traefik is always off. |
 | `--cilium` [`--cilium-kube-proxy-replacement`] | `flannel-backend: none`, `disable-network-policy: true` (and `disable-kube-proxy`). **Cilium is not installed**: the nodes have no pod network until you run the printed `helm install cilium` command (chart 1.20.5 in the text, change it if you want another). |
 
 How it works: `create` builds the cluster as before (the `--addons` components go into the unit), then writes the files and a k3s
@@ -93,6 +93,7 @@ that time); they have not been compared with a second source, and nothing was ap
 | MetalLB `metallb-native.yaml` | v0.16.2 | `platform metallb` |
 | cert-manager `cert-manager.yaml` | v1.21.3 | `platform cert-manager` |
 | metrics-server `components.yaml` | v0.9.1 | `platform metrics-server` |
+| Envoy Gateway `install.yaml` (about 4 MiB; Gateway API CRDs, Envoy Gateway CRDs, controller) | v1.10.0 | `platform envoy-gateway`, `create --addons envoy-gateway` |
 
 ## GitOps: `platform gitops flux|argo`
 
@@ -116,6 +117,7 @@ An https repository needs neither key nor host keys; credentials in the URL are 
   then applies an `IPAddressPool` and an `L2Advertisement`. Use `--print-pool` to see the YAML without a cluster. Create the cluster with `--addons metallb`, or ServiceLB and MetalLB both answer. The addresses must be free and on the
   nodes' network (the private 10.89.x.y network of `kube apple`), which the Mac does not route to by itself.
 * `platform cert-manager NAME`: installs cert-manager and waits for its three deployments. Create an issuer yourself.
+* `platform envoy-gateway NAME`: installs Envoy Gateway from the pinned `install.yaml` (server-side apply) and waits for `deployment/envoy-gateway` to be Available. It creates no GatewayClass or Gateway. `create --addons envoy-gateway` does the same after the cluster is up. See [docs/gateway.md](gateway.md).
 * `platform metrics-server NAME [--kubelet-insecure-tls]`: only for clusters created with metrics-server disabled (`--addons minimal`); refuses otherwise. k3s signs kubelet certificates with its own CA, which
   the stock metrics-server does not trust, so `kubectl top` may fail until you add `--kubelet-insecure-tls`, which turns that verification off.
 

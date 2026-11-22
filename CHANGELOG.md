@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Gateway API built in ([docs/gateway.md](docs/gateway.md)), ported from Zyvor Setura 0.1.0. Unit-tested with loopback servers and a fake kubectl; **not compiled or run on a live cluster, and Envoy Gateway has not been run, when this entry was written**.
+
+- New `fluxctl gateway publish GATEWAY --listener NAME [--dry-run]` (finds the one Envoy Service for the listener's port and runs `kubectl port-forward` on 127.0.0.1), `gateway explain URL` (one direct HTTP/1.1 GET reported as dns, tcp, tls, http and backend; `--address`, `--backend`, `--ca`, `--status`, `--timeout`, `--json`; the Host header and TLS name stay the URL's hostname; proxy environment variables are never read), `gateway check FILE` (JSON probes; exit 0 pass, 1 observed failure, 2 usage) and `gateway inspect ROUTE` (HTTPRoute conditions per parent with whether each is current, backend ports and ready EndpointSlice counts). Cluster selection: `--cluster NAME` (`~/.kube/fluxvm-NAME.yaml`) or `--kube-context`.
+- New `fluxctl gateway demo apply|teardown|print`: the Setura demo fixture (namespace, GatewayClass, Gateway, an app pinned by digest, HTTPRoute). `--dry-run` prints the kubectl commands; a real run needs `--cluster`, `--kube-context` or `--yes`.
+- New add-on: `kube apple platform envoy-gateway NAME` and `create --addons envoy-gateway` install Envoy Gateway v1.10.0 from its release `install.yaml`, pinned by SHA-256 like the other add-ons (the digest matches the one GitHub publishes for the asset), then wait for the controller. `fluxctl kube apple platform pins` lists it.
+- New direct dependency `rustls-native-certs` (already in the lock file) for the probe's system trust roots.
+
 One k3s lifecycle for Mac and Linux ([docs/kubernetes-unified.md](docs/kubernetes-unified.md)). Unit-tested; the Linux path has not been verified on a live host unless stated in the PR.
 
 - Fix: on Linux `fluxctl kube up` and `fluxctl docker up` waited forever for the guest's address (QEMU user networking has none). The VM request now carries a loopback-only ssh forward on a free port (new module `vm_net`, `Backend::{Vz,Qemu}`), which the existing endpoint lookup reads back for `wait_ssh`, ssh and the tunnels.
