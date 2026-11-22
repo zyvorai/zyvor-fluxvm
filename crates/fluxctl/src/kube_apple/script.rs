@@ -156,6 +156,9 @@ pub struct UnitOpts<'a> {
     pub agent_token_file: bool,
     /// The flags every server of the cluster shares (servers only; `None` means just `--disable traefik`).
     pub flags: Option<&'a SharedFlags>,
+    /// The guest has the cluster's private network card (`10.89.x.y`, macOS). Without it (QEMU user networking on Linux) the
+    /// node address and the flannel interface are the guest's default-route address and card.
+    pub private_net: bool,
 }
 
 pub fn exec_args(o: &UnitOpts) -> String {
@@ -202,10 +205,18 @@ pub fn exec_args(o: &UnitOpts) -> String {
 pub fn install_unit_script(o: &UnitOpts) -> String {
     let unit = o.role.unit();
     let exec = exec_args(o);
+    let find_addr = if o.private_net {
+        "PRIV=''; for i in $(seq 1 90); do PRIV=$(ip -4 -o addr show | grep -o '10\\.89\\.[0-9]*\\.[0-9]*' | head -1 || true); [ -n \"$PRIV\" ] && break; sleep 2; done; \
+         [ -n \"$PRIV\" ] || { echo 'no address on the private network card' >&2; exit 25; }; \
+         IFACE=$(ip -o -4 addr show | grep -F \"$PRIV/\" | cut -d' ' -f2);"
+    } else {
+        // QEMU user networking: one card, one address, no private network. Wait for the default route and use it.
+        "PRIV=''; for i in $(seq 1 90); do PRIV=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -o 'src [0-9.]*' | cut -d' ' -f2 | head -1 || true); [ -n \"$PRIV\" ] && break; sleep 2; done; \
+         [ -n \"$PRIV\" ] || { echo 'no default-route address in the guest' >&2; exit 25; }; \
+         IFACE=$(ip -4 route get 1.1.1.1 | grep -o 'dev [^ ]*' | cut -d' ' -f2 | head -1);"
+    };
     format!(
-        "set -eu; PRIV=''; for i in $(seq 1 90); do PRIV=$(ip -4 -o addr show | grep -o '10\\.89\\.[0-9]*\\.[0-9]*' | head -1 || true); [ -n \"$PRIV\" ] && break; sleep 2; done; \
-         [ -n \"$PRIV\" ] || {{ echo 'no address on the private network card' >&2; exit 25; }}; \
-         IFACE=$(ip -o -4 addr show | grep -F \"$PRIV/\" | cut -d' ' -f2); \
+        "set -eu; {find_addr} \
          sudo -n modprobe br_netfilter overlay 2>/dev/null || true; \
          sudo -n tee /etc/systemd/system/{unit}.service >/dev/null <<UNIT\n\
 [Unit]\n\
@@ -225,7 +236,8 @@ TimeoutStartSec=0\n\
 WantedBy=multi-user.target\n\
 UNIT\n\
 sudo -n systemctl daemon-reload && sudo -n systemctl enable --now {unit}.service",
-        role = o.role.as_str()
+        role = o.role.as_str(),
+        find_addr = find_addr
     )
 }
 
@@ -657,6 +669,7 @@ mod tests {
             token_file: false,
             agent_token_file: true,
             flags: None,
+            private_net: true,
         };
         let sc = install_unit_script(&o);
         assert!(sc.contains("--disable traefik"));
@@ -676,12 +689,35 @@ mod tests {
             token_file: true,
             agent_token_file: false,
             flags: None,
+            private_net: true,
         };
         let ex = exec_args(&join);
         assert!(ex.starts_with(
             "agent --server https://10.89.1.2:6443 --token-file /etc/rancher/k3s/token"
         ));
         assert!(install_unit_script(&join).contains("k3s-agent.service"));
+    }
+
+    #[test]
+    fn a_guest_without_a_private_card_uses_its_default_route() {
+        let mut o = UnitOpts {
+            role: Role::Server,
+            node: "dev",
+            tls_sans: &[],
+            cluster_init: false,
+            join_url: None,
+            token_file: false,
+            agent_token_file: true,
+            flags: None,
+            private_net: false,
+        };
+        let sc = install_unit_script(&o);
+        assert!(sc.contains("ip -4 route get 1.1.1.1"), "{sc}");
+        assert!(!sc.contains("10\\.89"), "{sc}");
+        assert!(sc.contains("--node-ip $PRIV --flannel-iface $IFACE"), "{sc}");
+        o.private_net = true;
+        let sc = install_unit_script(&o);
+        assert!(sc.contains("10\\.89") && !sc.contains("route get"), "{sc}");
     }
 
     #[test]

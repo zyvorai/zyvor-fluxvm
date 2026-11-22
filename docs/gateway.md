@@ -4,7 +4,7 @@
 
 This is a port of **Zyvor Setura 0.1.0**, the Python developer CLI from Zyvor, into `fluxctl` (Rust, no Python needed). The commands, the probe's behaviour and the demo fixture follow Setura; credit for the design is Setura's.
 
-> Status: the code is unit-tested with loopback HTTP and TLS servers and a fake `kubectl`. When this page was written it had **not** been run against a live cluster, and Envoy Gateway had not been run by us. Treat the first real run as the test.
+> Status: unit-tested with loopback HTTP and TLS servers and a fake `kubectl`, and **run once on a live FluxVM cluster** (a single-node k3s v1.37.2 in a QEMU/KVM guest on an x86-64 Linux host, Envoy Gateway v1.10.0): `platform envoy-gateway`, `demo apply`, `publish`, `explain`, `check`, `inspect` and `demo teardown` all worked after the two fixes described under [What the live run found](#what-the-live-run-found). Not run: macOS guests, HTTPS listeners, a second cluster, MetalLB.
 
 ## Install Envoy Gateway on a FluxVM k3s cluster
 
@@ -118,6 +118,20 @@ Prints JSON for an HTTPRoute: its generation; for each parent the controller and
 * The demo's names are `fluxvm-gateway-demo`, `fluxvm-demo-envoy` and `orders.fluxvm.test`; `demo apply|teardown` replace `scripts/cluster-smoke.sh`.
 * `X-Setura-Backend` stays the identity header, so existing Setura backends keep working.
 
+## What the live run found
+
+* **k3s 1.37 already installs the Gateway API CRDs** (standard channel, v1.6.3) with a ValidatingAdmissionPolicy that refuses
+  experimental-channel CRDs on top of them. Envoy Gateway's `install.yaml` carries experimental ones, so applying it as shipped failed
+  on `udproutes`. The add-on now checks the pinned SHA-256 first, then, if the cluster already has `gateways.gateway.networking.k8s.io`,
+  applies the manifest without its own `*.gateway.networking.k8s.io` CRDs (Envoy's `*.gateway.envoyproxy.io` and the `x-k8s.io`
+  extension CRDs stay).
+* **A single-server create never worked on Linux**: the node unit insisted on a `10.89.x.y` private-network card (macOS only) and failed with
+  `no address on the private network card`. Without that card the unit now uses the guest's default-route address and card.
+* `publish` found the one Envoy Service (the labels match v1.10.0), the demo Gateway reached `Programmed`, `explain` returned the backend
+  identity `orders-v1`, `/unmatched` returned the expected 404, a wrong `--backend` exited 1, `check` passed both cases, and `inspect`
+  showed `Accepted` and `ResolvedRefs` with one ready endpoint.
+
 ## Not verified
 
-Nothing here has run against a live cluster or a real Envoy Gateway. Things to watch on the first run: that Envoy Gateway v1.10.0 generates the Service labels `publish` looks for, that the 4 MiB `install.yaml` applies cleanly on your k3s version, and that the demo Gateway reaches `Programmed` with the ClusterIP EnvoyProxy settings.
+macOS guests (Apple Virtualization), HTTPS listeners and `--ca`, MetalLB, more than one cluster, and Envoy Gateway versions other than
+v1.10.0 on k3s versions other than v1.37.2.

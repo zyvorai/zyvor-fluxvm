@@ -417,6 +417,7 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
             token_file: false,
             agent_token_file: true,
             flags: Some(&flags),
+            private_net: h.backend() != crate::vm_net::Backend::Qemu,
         };
         // Agents join with their own token, made here and sent on stdin: it is never in the VM request.
         let agent_token = format!("{}{}", h.new_id(), h.new_id());
@@ -705,6 +706,7 @@ async fn join_inner<H: Host>(h: &H, store: &Store, req: &JoinReq) -> Result<Join
             token_file: true,
             agent_token_file: agent_token.is_some(),
             flags: (req.role == Role::Server).then_some(&flags),
+            private_net: h.backend() != crate::vm_net::Backend::Qemu,
         };
         bootstrap_node(
             h,
