@@ -95,8 +95,31 @@ do. They are listed with `fluxctl explain --list` (status `-`, as they are not A
 `NOT_INSTALLED`, `DAEMON_DOWN`, `NO_KVM`, `CGROUPS`, `OPEN_FILES`, `NET_DEVICES`, `IP_FORWARD`, `MISSING_BINARIES`,
 `RUNNER_PROBLEM`, `LOW_DISK`, `LOW_MEMORY`, `NO_LOGIN_SESSION`, `SECURITY_SETTING`, `AGENT_NOT_LOADED`,
 `POWER_SETTINGS`, `STORE_PROBLEM`, `NO_SSH_KEY`, `STALE_PATHS`, `MACOS_SLOTS_FULL`, `NO_BACKUP`, `STALE_BACKUP`,
-`K3S_NOT_READY`, `MISSING_IMAGE`, `UNSUPPORTED_HOST`, `NO_MACHINES`, `CHECK_FAILED` (a check with no dedicated
+`K3S_NOT_READY`, `MISSING_IMAGE`, `UNSUPPORTED_HOST`, `NO_MACHINES`, the Gateway codes below, `CHECK_FAILED` (a check with no dedicated
 explanation; its own message is shown).
+
+## Gateways: problems with your Gateway API setup
+
+When you have a FluxVM cluster kubeconfig (`~/.kube/fluxvm-NAME.yaml`, written by `fluxctl kube up`), `cluster status` and
+`fix` also read that cluster's Gateways, HTTPRoutes and their Services with `kubectl get` (read-only, that kubeconfig only;
+your default kubeconfig and clusters you have no FluxVM kubeconfig for are never touched). A cluster without Gateway API,
+or one that cannot be reached, adds nothing. The problems show as cluster-level items, with a fix that is a command:
+
+| Code | When | Fix |
+|---|---|---|
+| `ENVOY_GATEWAY_NOT_INSTALLED` | you have Gateways or routes of the Envoy class but its controller is not running. Never raised just because Envoy is absent. It hides the symptoms below for those objects. | `fluxctl kube cluster platform envoy-gateway NAME` |
+| `GATEWAY_NOT_PROGRAMMED` | a Gateway's `Programmed` condition is False | `kubectl describe gateway NAME -n NS` |
+| `ROUTE_NOT_ACCEPTED` | a route's `Accepted` condition is False for a Gateway | `fluxctl gateway inspect ROUTE -n NS --cluster NAME` |
+| `ROUTE_BACKEND_UNRESOLVED` | a route's `ResolvedRefs` condition is False | `fluxctl gateway inspect ROUTE -n NS --cluster NAME` |
+| `BACKEND_NO_READY_ENDPOINTS` | a route's Service has no ready endpoints (yellow: pods may still be starting) | `fluxctl gateway inspect ROUTE -n NS --cluster NAME` |
+
+A condition whose `observedGeneration` is older than the object's `generation`, one that is `Unknown`, and one the
+controller has not written yet all mean "not reconciled yet" and raise nothing, so a Gateway you just edited never flashes
+red. A Service whose endpoints could not be read is not reported as having none. None of these fixes is applied by
+`fluxctl fix`; it prints them. `fluxvm_core::health::gateway_items` is the pure rule set (fixtures cover every code, stale
+generations and the healthy case); the kubectl reads are `Cluster::facts` in `crates/fluxctl/src/gateway/kube.rs`. Not
+run against a live cluster when this section was written. The daemon's `GET /v1/cluster/health` describes its own node and
+does not include these.
 
 ## Where the checks come from
 

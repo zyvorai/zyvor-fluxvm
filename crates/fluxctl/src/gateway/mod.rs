@@ -20,7 +20,7 @@
 
 mod demo;
 mod expose;
-mod kube;
+pub(crate) mod kube;
 mod probe;
 
 use anyhow::{Context, Result, anyhow, bail};
