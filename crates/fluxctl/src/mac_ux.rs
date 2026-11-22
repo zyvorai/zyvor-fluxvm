@@ -324,7 +324,7 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
         "Fleet of Macs over SSH",
         &[
             ("fluxctl mac-fleet doctor -f hosts.yaml", "preflight every Mac"),
-            ("fluxctl mac-fleet apply -f hosts.yaml", "install and converge to the inventory"),
+            ("fluxctl mac-fleet apply hosts.yaml", "install and converge to the inventory"),
             ("fluxctl mac-fleet status -f hosts.yaml", "one table for the fleet"),
             ("fluxctl mac-fleet templates distribute -f hosts.yaml --template REG/REPO:TAG@sha256:HEX", "put a template on every Mac, digest-verified"),
             ("fluxctl mac-fleet run -f hosts.yaml --template NAME:TAG -- sw_vers", "run on whichever Mac has a free slot"),
