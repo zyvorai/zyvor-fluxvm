@@ -16,7 +16,9 @@ ip netns add "$NSC"; ip netns add "$NSB"; ip link add "$IN" type veth peer name 
 ip addr add 192.0.2.1/24 dev "$IN"; ip link set "$IN" up; ip link set "$OUT" up
 ip -n "$NSC" addr add 192.0.2.2/24 dev "$CP"; ip -n "$NSC" link set "$CP" up
 ip -n "$NSC" route add 198.51.100.100/32 via 192.0.2.1 dev "$CP"
-ip -n "$NSB" addr add 198.51.100.2/24 dev "$BP"; ip -n "$NSB" addr add 198.51.100.100/32 dev lo; ip -n "$NSB" link set "$BP" up; ip -n "$NSB" link set lo up
+# The backend needs a route back to the client: with reverse-path filtering on (rp_filter=1 or 2, the default on many
+# distros and runners) the kernel drops a packet whose source it cannot reach, and the redirected packets vanish silently.
+ip -n "$NSB" addr add 198.51.100.2/24 dev "$BP"; ip -n "$NSB" addr add 198.51.100.100/32 dev lo; ip -n "$NSB" link set "$BP" up; ip -n "$NSB" link set lo up; ip -n "$NSB" route add 192.0.2.0/24 dev "$BP"
 MAC="$(ip netns exec "$NSB" cat /sys/class/net/$BP/address)"
 "$ROOT/scripts/build-quiclb.sh" "$TMP/bpf" "$TMP/bin"
 cargo build --release -p fluxvm-intelligence --bin fluxvm-quiclb
@@ -41,7 +43,7 @@ for port in (40001,40002,40003):
     s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('192.0.2.2',port));s.sendto(p,('198.51.100.100',443));s.close()
 PY
 wait "$SP" || echo "the backend listener exited with $? (a timeout means fewer than 3 packets arrived)" >&2
-grep -q '^3$' "$TMP/server.out" || { echo "FAIL: the backend namespace did not receive all 3 QUIC packets via the DSR redirect" >&2; exit 1; }
+grep -q '^3$' "$TMP/server.out" || { echo "FAIL: the backend namespace did not receive all 3 QUIC packets via the DSR redirect" >&2; echo "--- listener output:" >&2; cat "$TMP/server.out" >&2; echo "--- loader status:" >&2; FLUXVM_QUICLB_LOADER="$TMP/bin/fluxvm-quiclb-loader" FLUXVM_QUICLB_STATE_ROOT="$TMP/state" "$ROOT/target/release/fluxvm-quiclb" status "$ID" >&2 || true; echo "--- link counters (OUT on the host, BP in the backend namespace):" >&2; ip -s link show "$OUT" >&2; ip -s -n "$NSB" link show "$BP" >&2; echo "--- backend namespace IP drops:" >&2; ip netns exec "$NSB" sh -c 'grep -E "^Ip:|^IpExt:|^Udp:|^TcpExt:" /proc/net/snmp /proc/net/netstat' >&2 || true; echo "--- rp_filter: all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter) in=$(cat /proc/sys/net/ipv4/conf/$IN/rp_filter)" >&2; exit 1; }
 S="$(FLUXVM_QUICLB_LOADER="$TMP/bin/fluxvm-quiclb-loader" FLUXVM_QUICLB_STATE_ROOT="$TMP/state" "$ROOT/target/release/fluxvm-quiclb" status "$ID")"
 python3 - "$S" <<'PY'
 import json,sys
