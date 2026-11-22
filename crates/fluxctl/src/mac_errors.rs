@@ -185,6 +185,75 @@ pub const CODES: &[MacCode] = &[
         aliases: &["docker-config-invalid"],
         signatures: &["config.json is not a json object"],
     },
+    MacCode {
+        code: "MAC_REGISTRY_LOGIN_FAILED",
+        status: None,
+        summary: "A registry refused the login you gave `fluxctl mac login` (or the saved one on a pull or push).",
+        causes: &[
+            "a wrong user name, or the account password where the registry wants an access token",
+            "the token expired, was revoked, or lacks the read/write scope for packages",
+            "the registry address is a different host from the one that issued the token (ghcr.io versus docker.io)",
+        ],
+        fixes: &[
+            "create a fresh access token in the registry settings and log in again: `fluxctl mac login REGISTRY -u USER` (the token is asked for without echo)",
+            "scripts: `printf %s \"$TOKEN\" | fluxctl mac login REGISTRY -u USER --password-stdin`",
+            "see which registries are saved and as whom: `fluxctl mac logins`; remove one with `fluxctl mac logout REGISTRY`",
+        ],
+        aliases: &["registry-login-failed", "login-failed", "registry-login"],
+        signatures: &["mac_registry_login_failed"],
+    },
+    MacCode {
+        code: "MAC_REGISTRY_CREDS_PERMISSIONS",
+        status: None,
+        summary: "The saved registry logins file can be read by other users, so fluxctl refuses to read or write it.",
+        causes: &[
+            "the file was copied, restored from a backup or edited with a tool that reset its permissions",
+            "a umask or a shared folder gave group or other access",
+        ],
+        fixes: &[
+            "tighten it: `chmod 600 ~/.config/fluxvm/mac-registry-auth.json` (the path is in the error message)",
+            "or start over: delete the file and run `fluxctl mac login REGISTRY -u USER` again",
+            "until then pulls and pushes go out anonymously; or use FLUXVM_REGISTRY_USER and FLUXVM_REGISTRY_PASSWORD",
+        ],
+        aliases: &[
+            "registry-creds-permissions",
+            "creds-permissions",
+            "login-file-permissions",
+        ],
+        signatures: &["mac_registry_creds_permissions"],
+    },
+    MacCode {
+        code: "MAC_FORK_SOURCE_RUNNING",
+        status: None,
+        summary: "`fluxctl mac fork` needs a stopped instance: a running disk is not consistent to clone.",
+        causes: &[
+            "the instance you named is running, paused or starting",
+            "a fork is a cold boot of a copy of the disk; nothing of a running VM (memory, processes) can be carried over on macOS",
+        ],
+        fixes: &[
+            "stop it: `fluxctl mac stop NAME`, then repeat `fluxctl mac fork NAME -n N`",
+            "list instances and their state: `fluxctl mac ps -a`",
+            "to keep the original running, fork a different stopped instance of the same image instead",
+        ],
+        aliases: &["fork-source-running", "fork-running"],
+        signatures: &["mac_fork_source_running"],
+    },
+    MacCode {
+        code: "MAC_FORK_SLOTS",
+        status: None,
+        summary: "`fluxctl mac fork --start` would run more macOS VMs than this Mac allows (2 at once).",
+        causes: &[
+            "other instances already hold macOS slots",
+            "you asked to start more forks than there are free slots",
+        ],
+        fixes: &[
+            "fork without --start (forks are created stopped, nothing is used up) and start them one at a time: `fluxctl mac start NAME`",
+            "free a slot: `fluxctl mac stop NAME` (see `fluxctl mac ps`)",
+            "for many VMs use several Macs: `fluxctl mac-fleet run -f hosts.yaml --template NAME:TAG -- CMD`",
+        ],
+        aliases: &["fork-slots", "fork-slot-limit"],
+        signatures: &["mac_fork_slots"],
+    },
 ];
 
 fn norm(s: &str) -> String {
