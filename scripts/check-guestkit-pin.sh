@@ -23,8 +23,8 @@ LOCK="${FLUXVM_DIR}/Cargo.lock"
 [[ -f "$LOCK" ]] || { echo "check-guestkit-pin: $LOCK is missing" >&2; exit 1; }
 
 ref="$(tr -d '[:space:]' <"$REF_FILE")"
-[[ "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "check-guestkit-pin: $REF_FILE must hold one release tag like v1.2.6, not '$ref'" >&2
+[[ "$ref" =~ ^v[0-9]+(\.[0-9]+\.[0-9]+)?$ ]] || {
+  echo "check-guestkit-pin: $REF_FILE must hold one tag like v1.2.6 (or a major tag like v1), not '$ref'" >&2
   exit 1
 }
 
@@ -34,7 +34,14 @@ lock_version="$(awk '
 ' "$LOCK")"
 [[ -n "$lock_version" ]] || { echo "check-guestkit-pin: no guestkit package in $LOCK" >&2; exit 1; }
 
-if [[ "v${lock_version}" != "$ref" ]]; then
+# A full tag (v1.2.6) must equal the lock version. A major tag (v1) is what guestkit publishes today: it only has to match the
+# lock's major version, and the checkout step below still verifies the tag points at the checked-out commit.
+if [[ "$ref" =~ ^v[0-9]+$ ]]; then
+  [[ "${lock_version%%.*}" == "${ref#v}" ]] || {
+    echo "check-guestkit-pin: packaging/guestkit.ref pins ${ref} but Cargo.lock records guestkit ${lock_version}." >&2
+    exit 1
+  }
+elif [[ "v${lock_version}" != "$ref" ]]; then
   echo "check-guestkit-pin: packaging/guestkit.ref pins ${ref} but Cargo.lock records guestkit ${lock_version}." >&2
   echo "check-guestkit-pin: bump both together (edit the ref, refresh Cargo.lock, commit both)." >&2
   exit 1
