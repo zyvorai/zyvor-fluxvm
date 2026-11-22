@@ -27,7 +27,8 @@ pub struct PsOpts {
     /// Include stopped and failed instances (by default only running, paused and starting ones are shown).
     #[arg(short = 'a', long)]
     pub all: bool,
-    /// Keep instances that match `KEY=VALUE`: name, id, status, image or label. Repeatable; all must match.
+    /// Keep instances that match `KEY=VALUE`: name, id, status, image, label, project, service, ip or publish (a port). Repeatable;
+    /// all must match.
     #[arg(short = 'f', long = "filter", value_name = "KEY=VALUE")]
     pub filter: Vec<String>,
     /// Print each instance with a template such as `{{.Name}} {{.Status}}`, or `table {{.Name}}\t{{.IP}}`.
@@ -110,20 +111,54 @@ pub enum SystemCommand {
         #[arg(short = 'f', long)]
         force: bool,
     },
+    /// Everything at a glance, like `docker info`: fluxctl and daemon versions, the Mac (macOS build, chip), instances
+    /// running out of 2, images and disk used, the store path and the `mac doctor` summary. Works without a daemon (that line
+    /// then says how to connect).
+    #[command(
+        after_help = "Examples:\n  fluxctl mac system info\n  fluxctl --server http://mac.local:7788 mac system info --json"
+    )]
+    Info {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The versions, like `docker version`: fluxctl (client) and the daemon (server), with OS and architecture. Works without a
+    /// daemon.
+    #[command(after_help = "Example:\n  fluxctl mac system version --json")]
+    Version {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum MacMore {
     /// Everything about an instance as JSON: state, ports, resources, mounts, labels, restart policy and the image's config.
-    #[command(after_help = "Example:\n  fluxctl mac inspect build-1 | jq '.[0].network.ip'")]
+    #[command(after_help = "Examples:
+  fluxctl mac inspect build-1 | jq '.[0].network.ip'
+  fluxctl mac inspect --format '{{.State.Status}}' build-1
+  fluxctl mac inspect -f '{{.Name}} {{.Network.IP}} {{index .Labels \"team\"}}' build-1 build-2
+  fluxctl mac inspect -f '{{range .Network.Ports}}{{.Host}}->{{.Guest}} {{end}}' build-1
+  fluxctl mac inspect -f '{{json .State}}' build-1
+
+--format understands a subset of Go templates: {{.Field.Path}}, {{json X}}, {{index X KEY}} and {{range X}}...{{end}}, plus
+\\n and \\t. Field names ignore case and underscores (.State.Status, .Resources.MemoryMiB). Anything else is refused and says
+so. The fields are the keys of the default JSON document (try it without --format).")]
     Inspect {
         #[arg(required = true)]
         names: Vec<String>,
+        /// Print each instance with a template instead of the JSON array, one line per instance.
+        #[arg(short = 'f', long, value_name = "TEMPLATE")]
+        format: Option<String>,
     },
     /// Show an instance's console log (the VM's serial output). `-f` follows it until Ctrl-C.
-    #[command(
-        after_help = "Examples:\n  fluxctl mac logs build-1 --tail 50\n  fluxctl mac logs -f build-1"
-    )]
+    #[command(after_help = "Examples:
+  fluxctl mac logs build-1 --tail 50
+  fluxctl mac logs -f build-1
+  fluxctl mac logs -f -t build-1     # stamp each line with when fluxctl received it
+
+The console log is the VM's raw serial output: the daemon records no time per line. So `-t` works only with `-f` and
+stamps lines as they arrive (lines already in the log show `-`), and `--since` is refused, because there is nothing to
+compare it with.")]
     Logs {
         name: String,
         #[arg(short = 'f', long)]
@@ -131,6 +166,13 @@ pub enum MacMore {
         /// Lines from the end to show first.
         #[arg(long, default_value_t = 100)]
         tail: usize,
+        /// Not available: the console log has no per-line times (the message says what to use instead). Accepts a duration such
+        /// as 10m or a timestamp, so the refusal is about the log, not your value.
+        #[arg(long, value_name = "DURATION|TIMESTAMP")]
+        since: Option<String>,
+        /// With `-f`: put the time fluxctl received each line in front of it. Lines already in the log show `-`.
+        #[arg(short = 't', long)]
+        timestamps: bool,
     },
     /// Copy between this Mac and an instance, either way: `NAME:/path` is the guest side. Uses scp -r over SSH.
     #[command(
@@ -252,10 +294,26 @@ pub enum MacMore {
     },
     /// Recorded lifecycle events of instances and `kube apple` nodes (`mac.*`, `kube.apple.*`) from the daemon's event log.
     /// `mac watch --record-to DIR` produces them. `-f` keeps printing new ones.
+    #[command(after_help = "Examples:
+  fluxctl mac events --since 1h
+  fluxctl mac events --since 2026-11-21 --filter type=mac --filter event=started
+  fluxctl mac events -f --filter name=ci-1
+  fluxctl mac events --since 30m --filter label=kairon.zyvor.dev/pool=ios --json
+
+--since takes a duration (30s, 10m, 2h, 1d, 1h30m), an RFC 3339 timestamp or a date. --filter keys: type (mac or kube), event (the
+whole name, its last part such as `started`, or a leading part such as `mac.instance`), name, image, project, status, cluster,
+label (KEY or KEY=VALUE; events carry only the kairon.zyvor.dev/* labels). All filters must match. `-f` (follow) applies the
+filters to new events; `--since` applies to the history that is printed first.")]
     Events {
         /// Newest N events.
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        /// Only events at or after this time: a duration back from now (10m, 2h, 1d), an RFC 3339 timestamp or a date.
+        #[arg(long, value_name = "DURATION|TIMESTAMP")]
+        since: Option<String>,
+        /// Keep events that match `KEY=VALUE` (type, event, name, image, project, status, cluster, label). Repeatable; all must match.
+        #[arg(long = "filter", value_name = "KEY=VALUE")]
+        filter: Vec<String>,
         #[arg(short = 'f', long)]
         follow: bool,
         /// One JSON object per line (the event log's own shape).
@@ -306,6 +364,9 @@ impl MacMore {
             MacMore::History { .. } | MacMore::Save { .. } | MacMore::Load { .. } => true,
             MacMore::Image { command } => !matches!(command, ImageCommand::Prune { all: true, .. }),
             MacMore::Compose { command } => command.is_client_side(),
+            MacMore::System {
+                command: SystemCommand::Info { .. } | SystemCommand::Version { .. },
+            } => true,
             _ => false,
         }
     }
@@ -348,7 +409,7 @@ async fn set_label(
     .map(|_| ())
 }
 
-async fn instances(r: &crate::remote::Remote) -> Result<Vec<Value>> {
+pub(crate) async fn instances(r: &crate::remote::Remote) -> Result<Vec<Value>> {
     let v = r
         .call(
             reqwest::Method::GET,
@@ -492,8 +553,76 @@ async fn lifecycle(
     Ok(())
 }
 
+/// The refusals of `mac logs --since` and `-t` without `-f`: the console log has no per-line times to use.
+pub fn logs_check(since: Option<&str>, timestamps: bool, follow: bool) -> Result<()> {
+    if let Some(s) = since {
+        crate::mac_since::parse_since(s, chrono::Utc::now())?;
+        bail!(
+            "--since cannot work for `mac logs`: the console log is the VM's raw serial output and has no time on its lines, \
+             so there is nothing to compare {s:?} with. Use `--tail N` for the last lines, or watch live with \
+             `fluxctl mac logs -f -t NAME`, which stamps lines as they arrive. More: fluxctl explain MAC_LOGS_NO_TIMESTAMPS"
+        );
+    }
+    ensure!(
+        !timestamps || follow,
+        "-t needs -f: the console log has no time on its lines, so fluxctl can only stamp a line with the moment it receives it, \
+         which means something only while following. Run `fluxctl mac logs -f -t NAME`. More: fluxctl explain MAC_LOGS_NO_TIMESTAMPS"
+    );
+    Ok(())
+}
+
+/// `mac logs -f -t`: the last `tail` lines first (time unknown, shown as `-`), then new lines stamped as they arrive.
+async fn follow_logs_stamped(r: &crate::remote::Remote, id: &str, tail: usize) -> Result<()> {
+    use std::io::Write;
+    let path = format!("/v1/vms/{id}/logs?lines={}&follow=false", tail.max(1));
+    let (st, body) = r.get_raw(&path).await?;
+    ensure!(
+        st.is_success(),
+        "GET {path}: {st}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let text = String::from_utf8_lossy(&body).into_owned();
+    let mut out = std::io::stdout();
+    if tail > 0 {
+        for l in text.lines() {
+            out.write_all(crate::mac_since::backlog_line(l).as_bytes())?;
+        }
+        out.flush()?;
+    }
+    let started = chrono::Utc::now();
+    let mut st =
+        crate::mac_since::LineStamper::new(text.lines().last().map(str::to_owned), started);
+    follow_logs_with(
+        r,
+        &format!("/v1/vms/{id}/logs?lines=1&follow=true"),
+        |chunk| {
+            let s = st.push(chunk, chrono::Utc::now());
+            out.write_all(s.as_bytes())?;
+            out.flush()?;
+            Ok(())
+        },
+    )
+    .await?;
+    out.write_all(st.finish(chrono::Utc::now()).as_bytes())?;
+    Ok(())
+}
+
 async fn follow_logs(r: &crate::remote::Remote, path: &str) -> Result<()> {
     use std::io::Write;
+    let mut out = std::io::stdout();
+    follow_logs_with(r, path, |c| {
+        out.write_all(c)?;
+        out.flush()?;
+        Ok(())
+    })
+    .await
+}
+
+async fn follow_logs_with(
+    r: &crate::remote::Remote,
+    path: &str,
+    mut on_chunk: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
     let url = format!("{}{path}", r.base());
     let mut req = reqwest::Client::new().get(&url);
     if let Some(t) = r.bearer() {
@@ -501,10 +630,8 @@ async fn follow_logs(r: &crate::remote::Remote, path: &str) -> Result<()> {
     }
     let mut resp = req.send().await.with_context(|| format!("GET {url}"))?;
     ensure!(resp.status().is_success(), "GET {path}: {}", resp.status());
-    let mut out = std::io::stdout();
     while let Some(chunk) = resp.chunk().await? {
-        out.write_all(&chunk)?;
-        out.flush()?;
+        on_chunk(&chunk)?;
     }
     Ok(())
 }
@@ -664,9 +791,17 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
     match cmd {
         MacMore::Events {
             limit,
+            since,
+            filter,
             follow,
             json,
-        } => crate::mac_events::run_events(r, limit, follow, json).await?,
+        } => {
+            let since = since
+                .map(|s| crate::mac_since::parse_since(&s, chrono::Utc::now()))
+                .transpose()?;
+            let filters = crate::mac_events::parse_event_filters(&filter)?;
+            crate::mac_events::run_events(r, limit, follow, json, since, &filters).await?
+        }
         MacMore::Watch {
             interval,
             polls,
@@ -688,7 +823,12 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
             kube,
             textfile,
         } => crate::mac_metrics::run(r, node, kube, textfile.as_deref()).await?,
-        MacMore::Inspect { names } => {
+        MacMore::Inspect { names, format } => {
+            // Parsed before the daemon is asked, so a bad template fails at once.
+            let tmpl = format
+                .as_deref()
+                .map(crate::mac_tmpl::Template::parse)
+                .transpose()?;
             let mut out = Vec::new();
             for n in &names {
                 let vm = crate::mac_cmd::find_instance(r, n).await?;
@@ -701,12 +841,28 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                     .transpose()?;
                 out.push(crate::mac_json::inspect_v1(view::inspect(&full, cfg)));
             }
-            println!("{}", serde_json::to_string_pretty(&out)?);
+            match tmpl {
+                Some(t) => {
+                    for doc in &out {
+                        println!("{}", t.render(doc)?);
+                    }
+                }
+                None => println!("{}", serde_json::to_string_pretty(&out)?),
+            }
         }
-        MacMore::Logs { name, follow, tail } => {
+        MacMore::Logs {
+            name,
+            follow,
+            tail,
+            since,
+            timestamps,
+        } => {
+            logs_check(since.as_deref(), timestamps, follow)?;
             let vm = crate::mac_cmd::find_instance(r, &name).await?;
             let path = format!("/v1/vms/{}/logs?lines={tail}&follow={follow}", id_of(&vm)?);
-            if follow {
+            if follow && timestamps {
+                follow_logs_stamped(r, id_of(&vm)?, tail).await?;
+            } else if follow {
                 follow_logs(r, &path).await?;
             } else {
                 let (st, body) = r.get_raw(&path).await?;
@@ -1262,5 +1418,154 @@ mod tests {
             run.contains("Examples") && run.contains("--restart"),
             "{run}"
         );
+    }
+
+    fn record() -> Value {
+        json!({
+            "id": "0b1c2d3e-0000-4000-8000-000000000001",
+            "name": "ci-1",
+            "status": "running",
+            "guest_ip": "192.168.64.7",
+            "labels": {"fluxvm.mac": "instance", "fluxvm.mac.image": "macos-xcode:15", "team": "ios"},
+            "request": {"vcpus": 4, "memory_mib": 8192, "network": {"forwards": [{"host_port": 2222, "guest_port": 22}]}}
+        })
+    }
+
+    #[test]
+    fn inspect_format_runs_on_the_real_inspect_document() {
+        let doc = crate::mac_json::inspect_v1(view::inspect(&record(), None));
+        let r = |f: &str| {
+            crate::mac_tmpl::Template::parse(f)
+                .unwrap()
+                .render(&doc)
+                .unwrap()
+        };
+        assert_eq!(r("{{.State.Status}}"), "running");
+        assert_eq!(
+            r("{{.Network.IP}} {{.Resources.MemoryMiB}}"),
+            "192.168.64.7 8192"
+        );
+        assert_eq!(r(r#"{{index .Labels "team"}}"#), "ios");
+        assert_eq!(
+            r("{{range .Network.Ports}}{{.Host}}->{{.Guest}} {{end}}"),
+            "2222->22 "
+        );
+        assert_eq!(r("{{.SchemaVersion}}"), "1");
+        assert_eq!(r("{{.State.RestartPolicy}}"), "no");
+    }
+
+    #[test]
+    fn inspect_and_images_and_events_options_parse() {
+        use crate::mac_cmd::MacCommand as C;
+        assert!(matches!(
+            parse(&["inspect", "-f", "{{.State.Status}}", "a"]),
+            C::More(MacMore::Inspect { format: Some(f), names }) if f == "{{.State.Status}}" && names == ["a"]
+        ));
+        assert!(matches!(
+            parse(&["inspect", "a"]),
+            C::More(MacMore::Inspect { format: None, .. })
+        ));
+        let C::More(MacMore::Events {
+            since,
+            filter,
+            follow,
+            json,
+            ..
+        }) = parse(&[
+            "events", "--since", "10m", "--filter", "type=mac", "--filter", "name=x", "-f",
+            "--json",
+        ])
+        else {
+            panic!()
+        };
+        assert_eq!(since.as_deref(), Some("10m"));
+        assert_eq!(filter, ["type=mac", "name=x"]);
+        assert!(follow && json);
+        let C::Images { extra, .. } = parse(&["images", "--format", "table {{.Reference}}"]) else {
+            panic!()
+        };
+        assert_eq!(extra.format.as_deref(), Some("table {{.Reference}}"));
+        assert!(
+            <T as Parser>::try_parse_from(["t", "images", "--format", "x", "--json"]).is_err(),
+            "--format and --json conflict"
+        );
+        assert!(matches!(
+            parse(&["logs", "-f", "-t", "a"]),
+            C::More(MacMore::Logs {
+                follow: true,
+                timestamps: true,
+                since: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["system", "info", "--json"]),
+            C::More(MacMore::System {
+                command: SystemCommand::Info { json: true }
+            })
+        ));
+        assert!(parse(&["system", "version"]).is_client_side());
+        assert!(parse(&["system", "info"]).is_client_side());
+        assert!(!parse(&["system", "df"]).is_client_side());
+    }
+
+    #[test]
+    fn logs_since_is_refused_and_timestamps_need_follow() {
+        let e = logs_check(Some("10m"), false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("no time on its lines") && e.contains("--tail") && e.contains("logs -f -t"),
+            "{e}"
+        );
+        assert!(e.contains("MAC_LOGS_NO_TIMESTAMPS"));
+        // A bad value is reported as a bad value, not as the log limitation.
+        let e = logs_check(Some("yesterday"), false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("is not a time") && e.contains("MAC_TIME_INVALID"),
+            "{e}"
+        );
+        let e = logs_check(None, true, false).unwrap_err().to_string();
+        assert!(
+            e.contains("-t needs -f") && e.contains("logs -f -t NAME"),
+            "{e}"
+        );
+        assert!(logs_check(None, true, true).is_ok());
+        assert!(logs_check(None, false, false).is_ok());
+    }
+
+    #[test]
+    fn new_options_are_in_the_help() {
+        use clap::CommandFactory;
+        let mut c = crate::Cli::command();
+        let mac = c.find_subcommand_mut("mac").unwrap();
+        for (sub, needle) in [
+            ("inspect", "--format '{{.State.Status}}'"),
+            ("events", "--since 1h"),
+            ("events", "--filter type=mac"),
+            ("logs", "logs -f -t build-1"),
+            ("images", "{{.Reference}}"),
+        ] {
+            let help = mac
+                .find_subcommand_mut(sub)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains(needle),
+                "{sub} help lacks {needle:?}:\n{help}"
+            );
+        }
+        let system = mac.find_subcommand_mut("system").unwrap();
+        for sub in ["info", "version"] {
+            let h = system
+                .find_subcommand_mut(sub)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            assert!(h.contains("Example"), "{sub}: {h}");
+        }
     }
 }

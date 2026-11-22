@@ -147,6 +147,71 @@ pub const CODES: &[MacCode] = &[
         ],
     },
     MacCode {
+        code: "MAC_TEMPLATE_SYNTAX",
+        status: None,
+        summary: "`--format` was given template syntax that fluxctl does not implement, or a template that is not well formed.",
+        causes: &[
+            "fluxctl implements a small subset of Go templates, not all of them: `if`, `with`, `printf`, `len`, `eq`, variables (`$x`), whitespace trimming (`{{-`) and functions other than `json` and `index` are refused",
+            "a `{{` without its `}}`, a `{{range}}` without `{{end}}`, or a quote that is not closed",
+            "`range` was used on a field that is text or a number, or `index` on a list with a position that does not exist",
+        ],
+        fixes: &[
+            "use only `{{.Field.Path}}`, `{{json X}}` (or `X | json`), `{{index X KEY}}` and `{{range X}}...{{end}}`; field names ignore case and underscores",
+            "see the fields you can use: run the command without `--format` (`fluxctl mac inspect NAME`, `fluxctl mac images --json`) and read the keys",
+            "need more logic? print JSON and filter it: `fluxctl mac inspect NAME | jq ...`",
+        ],
+        aliases: &["template-syntax", "format-syntax", "bad-format"],
+        signatures: &["unsupported template syntax"],
+    },
+    MacCode {
+        code: "MAC_FILTER_INVALID",
+        status: None,
+        summary: "A `--filter` was not `KEY=VALUE`, used a key the command does not know, or had a value it cannot use.",
+        causes: &[
+            "a typo in the key, or a key from another command (the keys differ between `mac ps`, `mac images` and `mac events`)",
+            "no `=`, an empty value, or a port or status that is not valid",
+        ],
+        fixes: &[
+            "`mac ps --filter`: name, id, status, image, label, project, service, ip, publish (a port)",
+            "`mac images --filter`: label, reference (with `*`), source",
+            "`mac events --filter`: type (mac or kube), event, name, image, project, status, cluster, label",
+            "repeat `--filter` to narrow further; every filter must match",
+        ],
+        aliases: &["filter-invalid", "bad-filter", "filter"],
+        signatures: &["unknown filter", "must be key=value", "has an empty value"],
+    },
+    MacCode {
+        code: "MAC_TIME_INVALID",
+        status: None,
+        summary: "A `--since` value was not a duration, a timestamp or a date.",
+        causes: &[
+            "words such as `yesterday`, a bare number, a negative duration, or a timestamp without a time zone",
+        ],
+        fixes: &[
+            "a duration back from now: `30s`, `10m`, `2h`, `1d`, `1h30m` (units s, m, h, d, w)",
+            "an RFC 3339 timestamp: `2026-11-21T10:00:00Z` or `2026-11-21T10:00:00+01:00`",
+            "a date, taken as midnight UTC: `2026-11-21`",
+        ],
+        aliases: &["time-invalid", "bad-since", "since"],
+        signatures: &["is not a time"],
+    },
+    MacCode {
+        code: "MAC_LOGS_NO_TIMESTAMPS",
+        status: None,
+        summary: "`mac logs --since`, or `-t` without `-f`, was refused because the VM console log has no time on its lines.",
+        causes: &[
+            "the log is the VM's raw serial output; the daemon does not record when each line was written, and fluxctl will not invent a time",
+        ],
+        fixes: &[
+            "last lines only: `fluxctl mac logs NAME --tail 200`",
+            "times as lines arrive: `fluxctl mac logs -f -t NAME` (the time is when fluxctl received the line; lines already in the log show `-`)",
+            "times of what happened to the instance: `fluxctl mac events --since 1h --filter name=NAME`",
+            "logs of programs inside the guest, with their own times: `fluxctl mac exec NAME -- log show --last 10m`",
+        ],
+        aliases: &["logs-no-timestamps", "no-timestamps", "logs-since"],
+        signatures: &["has no time on its lines", "no per-line times"],
+    },
+    MacCode {
         code: "DOCKER_CLI_MISSING",
         status: None,
         summary: "The docker command is not installed, so FluxVM did not make the `fluxvm` docker context.",

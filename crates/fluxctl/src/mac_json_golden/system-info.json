@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fluxctl": {
+    "version": "0.0.0"
+  },
+  "daemon": {
+    "state": "up",
+    "url": "http://127.0.0.1:7788",
+    "version": "0.4.14",
+    "next_step": null
+  },
+  "host": {
+    "macos": true,
+    "os": "macos",
+    "os_version": "27.2",
+    "os_build": "25C56",
+    "arch": "arm64"
+  },
+  "instances": {
+    "known": true,
+    "active": 1,
+    "total": 2,
+    "max": 2
+  },
+  "images": {
+    "count": 3,
+    "in_use": 1,
+    "bytes": 68719476736
+  },
+  "disk": {
+    "instance_bytes": 10737418240,
+    "reclaimable_bytes": 26843545600,
+    "free_gb": 400.0,
+    "error": null
+  },
+  "store": {
+    "path": "/Users/me/.fluxvm/mac-images"
+  },
+  "doctor": {
+    "ok": 11,
+    "warn": 0,
+    "fail": 0,
+    "problems": []
+  }
+}

@@ -61,6 +61,11 @@ pub struct ImagesExtra {
     /// Table of allocated and apparent size and when each image was last used by `mac run`.
     #[arg(long)]
     pub usage: bool,
+    /// Print each image with a template such as `{{.Reference}} {{.Size}}`, or `table {{.Reference}}\t{{.ID}}`; the Go-template
+    /// subset of `mac inspect --format`. Fields: Reference, Repository, Tag, ID, Digest, Size, SizeBytes, AllocatedBytes, Source,
+    /// Labels (use `{{index .Labels "key"}}`), AddedUnix, LastUsedUnix. `{{json .}}` prints the whole record.
+    #[arg(long, value_name = "TEMPLATE", conflicts_with_all = ["json", "usage", "fleet"])]
+    pub format: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -587,7 +592,9 @@ pub fn matches_filter(
     labels: &std::collections::BTreeMap<String, String>,
 ) -> Result<bool> {
     let (k, v) = f.split_once('=').with_context(|| {
-        format!("--filter {f:?}: expected KEY=VALUE (label=, reference=, source=)")
+        format!(
+            "--filter {f:?}: expected KEY=VALUE (label=, reference=, source=); see `fluxctl explain MAC_FILTER_INVALID`"
+        )
     })?;
     Ok(match k {
         "label" => match v.split_once('=') {
@@ -596,7 +603,34 @@ pub fn matches_filter(
         },
         "reference" => glob(v, name) || glob(v, name.strip_suffix(":latest").unwrap_or(name)),
         "source" => e.source.contains(v),
-        _ => bail!("--filter {f:?}: unknown key {k:?} (label, reference, source)"),
+        _ => bail!(
+            "--filter {f:?}: unknown filter {k:?} (label, reference, source); see `fluxctl explain MAC_FILTER_INVALID`"
+        ),
+    })
+}
+
+/// The document `mac images --format` renders: the `--json` row plus `repository`, `tag`, `id` (short digest) and `size`.
+pub fn image_format_doc(
+    store: &Store,
+    name: &str,
+    e: &Entry,
+    labels: &std::collections::BTreeMap<String, String>,
+    last_used: Option<u64>,
+) -> Value {
+    let dir = store.root().join(&e.dir);
+    let repo = crate::mac_imgstat::repo_of(name);
+    let tag = name
+        .strip_prefix(repo)
+        .and_then(|t| t.strip_prefix(':'))
+        .unwrap_or("");
+    let alloc = crate::mac_image_ops::dir_usage(&dir).1;
+    json!({
+        "reference": name, "repository": repo, "tag": tag,
+        "id": if e.digest.is_empty() { "-".to_owned() } else { e.digest.trim_start_matches("sha256:").chars().take(12).collect::<String>() },
+        "digest": e.digest, "source": e.source, "labels": labels,
+        "size": crate::mac_inspect::human_bytes(alloc),
+        "size_bytes": dir_size(&dir), "allocated_bytes": alloc,
+        "added_unix": e.added_unix, "last_used_unix": last_used,
     })
 }
 
@@ -617,7 +651,23 @@ pub fn images(store: &Store, json: bool, extra: &ImagesExtra) -> Result<()> {
             rows.push((n, e, labels));
         }
     }
-    if json {
+    if let Some(fmt) = &extra.format {
+        // Parsed first, so a bad template is reported even when no image matches.
+        crate::mac_tmpl::Template::parse(fmt.strip_prefix("table").unwrap_or(fmt))?;
+        let last_used = crate::mac_imgstat::load(store);
+        let docs: Vec<Value> = rows
+            .iter()
+            .map(|(n, e, l)| image_format_doc(store, n, e, l, last_used.get(n).copied()))
+            .collect();
+        print!(
+            "{}",
+            crate::mac_tmpl::render_rows(
+                &docs,
+                fmt,
+                r"{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}"
+            )?
+        );
+    } else if json {
         let last_used = crate::mac_imgstat::load(store);
         println!(
             "{}",

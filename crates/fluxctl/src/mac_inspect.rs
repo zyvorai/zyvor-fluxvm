@@ -102,12 +102,22 @@ pub enum Filter {
     Status(String),
     Image(String),
     Label(String, Option<String>),
+    Project(String),
+    Service(String),
+    Ip(String),
+    /// A published port, host or guest side.
+    Publish(u16),
 }
+
+/// The keys `mac ps --filter` accepts, for messages.
+pub const FILTER_KEYS: &str = "name, id, status, image, label, project, service, ip, publish";
 
 /// `--filter name=web`, `status=running`, `id=ab12`, `image=macos`, `label=k` or `label=k=v`.
 pub fn parse_filter(s: &str) -> Result<Filter> {
     let Some((k, v)) = s.split_once('=') else {
-        bail!("filter {s:?} must be KEY=VALUE (name, id, status, image, label)");
+        bail!(
+            "filter {s:?} must be KEY=VALUE ({FILTER_KEYS}); see `fluxctl explain MAC_FILTER_INVALID`"
+        );
     };
     ensure!(!v.is_empty(), "filter {s:?} has an empty value");
     Ok(match k {
@@ -125,7 +135,17 @@ pub fn parse_filter(s: &str) -> Result<Filter> {
             Some((lk, lv)) => Filter::Label(lk.into(), Some(lv.into())),
             None => Filter::Label(v.into(), None),
         },
-        _ => bail!("unknown filter {k:?} (name, id, status, image, label)"),
+        "project" => Filter::Project(v.into()),
+        "service" => Filter::Service(v.into()),
+        "ip" => Filter::Ip(v.into()),
+        "publish" | "port" => Filter::Publish(v.parse().map_err(|_| {
+            anyhow::anyhow!(
+                "filter {s:?}: {v:?} is not a port number (publish=8080); see `fluxctl explain MAC_FILTER_INVALID`"
+            )
+        })?),
+        _ => bail!(
+            "unknown filter {k:?}: use one of {FILTER_KEYS}; see `fluxctl explain MAC_FILTER_INVALID`"
+        ),
     })
 }
 
@@ -150,6 +170,12 @@ pub fn matches(vm: &Value, filters: &[Filter]) -> bool {
             (Some(_), None) => true,
             (None, _) => false,
         },
+        Filter::Project(p) => vm["labels"][PROJECT_LABEL].as_str() == Some(p.as_str()),
+        Filter::Service(p) => vm["labels"][SERVICE_LABEL].as_str() == Some(p.as_str()),
+        Filter::Ip(p) => vm["guest_ip"].as_str() == Some(p.as_str()),
+        Filter::Publish(port) => ports(vm)
+            .iter()
+            .any(|(h, g)| *h == u64::from(*port) || *g == u64::from(*port)),
     })
 }
 
@@ -274,6 +300,11 @@ pub fn render_format(rows: &[&Value], fmt: &str) -> Result<String> {
                 .collect(),
         );
     }
+    Ok(align_grid(&grid))
+}
+
+/// Left-aligned columns separated by two spaces; the last column is not padded.
+pub fn align_grid(grid: &[Vec<String>]) -> String {
     let cols = grid.iter().map(Vec::len).max().unwrap_or(0);
     let widths: Vec<usize> = (0..cols)
         .map(|c| {
@@ -285,7 +316,7 @@ pub fn render_format(rows: &[&Value], fmt: &str) -> Result<String> {
         })
         .collect();
     let mut out = String::new();
-    for r in &grid {
+    for r in grid {
         let line: Vec<String> = r
             .iter()
             .enumerate()
@@ -300,7 +331,7 @@ pub fn render_format(rows: &[&Value], fmt: &str) -> Result<String> {
         out.push_str(&line.join("  "));
         out.push('\n');
     }
-    Ok(out)
+    out
 }
 
 /// `ps -q`: one short id per line.
@@ -592,5 +623,29 @@ mod tests {
     fn top_command_defaults_and_passthrough() {
         assert!(top_command(&[]).contains("pid,user"));
         assert_eq!(top_command(&["aux".into()]), "ps aux");
+    }
+
+    #[test]
+    fn ps_filters_by_project_service_ip_and_published_port() {
+        let vm = json!({
+            "id": "0b1c2d3e-0000-4000-8000-000000000001", "name": "web-1", "status": "running", "guest_ip": "192.168.64.7",
+            "labels": {"fluxvm.mac.project": "shop", "fluxvm.mac.service": "web"},
+            "request": {"network": {"forwards": [{"host_port": 2222, "guest_port": 22}]}}
+        });
+        let m = |f: &str| matches(&vm, &[parse_filter(f).unwrap()]);
+        assert!(m("project=shop") && !m("project=other"));
+        assert!(m("service=web") && !m("service=db"));
+        assert!(m("ip=192.168.64.7") && !m("ip=192.168.64.8"));
+        assert!(m("publish=2222") && m("port=22") && !m("publish=80"));
+        for bad in ["publish=http", "colour=red", "nokey"] {
+            let e = parse_filter(bad).unwrap_err().to_string();
+            assert!(e.contains("MAC_FILTER_INVALID"), "{bad}: {e}");
+        }
+        assert!(
+            parse_filter("colour=red")
+                .unwrap_err()
+                .to_string()
+                .contains("project, service, ip, publish")
+        );
     }
 }

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "client": {
+    "name": "fluxctl",
+    "version": "0.0.0",
+    "os": "macos",
+    "arch": "aarch64"
+  },
+  "server": {
+    "state": "up",
+    "url": "http://127.0.0.1:7788",
+    "version": "0.4.14",
+    "next_step": null
+  }
+}

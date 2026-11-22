@@ -1718,8 +1718,17 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             let (project, _) = load_existing(t.file, t.project.as_deref())?;
             let vm = service_instance(r, &project, &service).await?;
             let name = vm["name"].as_str().unwrap_or_default().to_string();
-            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Logs { name, follow, tail })
-                .await
+            crate::mac_more::run_daemon(
+                r,
+                crate::mac_more::MacMore::Logs {
+                    name,
+                    follow,
+                    tail,
+                    since: None,
+                    timestamps: false,
+                },
+            )
+            .await
         }
         ComposeCommand::Exec {
             service,
