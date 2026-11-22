@@ -8,6 +8,9 @@ for x in ip bpftool clang cargo python3 pkg-config; do command -v "$x" >/dev/nul
 pkg-config --exists libbpf || { echo 'SKIP: libbpf-dev unavailable'; exit 0; }
 mountpoint -q /sys/fs/bpf || mount -t bpf bpf /sys/fs/bpf 2>/dev/null || { echo 'SKIP: cannot mount bpffs'; exit 0; }
 TMP="$(mktemp -d)"; PINS="/sys/fs/bpf/fluxvm-quiclb-test-$$"; NSC="fq-c-$$"; NSB="fq-b-$$"; IN="fqin$$"; CP="fqcp$$"; OUT="fqout$$"; BP="fqbp$$"; ID="11111111-2222-4333-8444-555555555555"
+# set -e alone exits silently, which left CI with "exit code 1" and no clue; name the failing line and show what we know.
+fail_report(){ rc=$?; echo "FAIL: scripts/test-quiclb-host.sh line ${BASH_LINENO[0]} exited $rc: $BASH_COMMAND" >&2; [[ -f "${TMP:-/nonexistent}/server.out" ]] && { echo "--- server.out (the UDP listener in the backend namespace; wants a line '3')" >&2; cat "$TMP/server.out" >&2; }; ip -n "${NSB:-x}" -brief addr 2>/dev/null >&2; ip -n "${NSC:-x}" -brief addr 2>/dev/null >&2; }
+trap fail_report ERR
 cleanup(){ set +e; FLUXVM_QUICLB_STATE_ROOT="$TMP/state" FLUXVM_QUICLB_PIN_ROOT="$PINS" "$ROOT/target/release/fluxvm-quiclb" remove "$ID" >/dev/null 2>&1; ip netns del "$NSC" 2>/dev/null; ip netns del "$NSB" 2>/dev/null; rm -rf "$TMP" "$PINS"; }; trap cleanup EXIT
 ip netns add "$NSC"; ip netns add "$NSB"; ip link add "$IN" type veth peer name "$CP"; ip link set "$CP" netns "$NSC"; ip link add "$OUT" type veth peer name "$BP"; ip link set "$BP" netns "$NSB"
 ip addr add 192.0.2.1/24 dev "$IN"; ip link set "$IN" up; ip link set "$OUT" up
@@ -37,7 +40,8 @@ p=bytes([0xc0])+bytes.fromhex('00000001')+bytes([8])+b'CIDTEST1'+bytes([0])+b'x'
 for port in (40001,40002,40003):
     s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('192.0.2.2',port));s.sendto(p,('198.51.100.100',443));s.close()
 PY
-wait "$SP"; grep -q '^3$' "$TMP/server.out"
+wait "$SP" || echo "the backend listener exited with $? (a timeout means fewer than 3 packets arrived)" >&2
+grep -q '^3$' "$TMP/server.out" || { echo "FAIL: the backend namespace did not receive all 3 QUIC packets via the DSR redirect" >&2; exit 1; }
 S="$(FLUXVM_QUICLB_LOADER="$TMP/bin/fluxvm-quiclb-loader" FLUXVM_QUICLB_STATE_ROOT="$TMP/state" "$ROOT/target/release/fluxvm-quiclb" status "$ID")"
 python3 - "$S" <<'PY'
 import json,sys
