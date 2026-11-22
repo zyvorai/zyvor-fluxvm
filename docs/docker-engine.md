@@ -20,6 +20,35 @@ managed by systemd, rootless where the kernel allows it, no Docker API. See [lin
 | Start-up | about a second per container | one VM, a few minutes the first time (it installs Docker) |
 | Isolation | strongest (VM per container) | the containers share one VM |
 
+## What the built-in `docker.sock` supports
+
+Every path also works with a version prefix (`/v1.43/containers/json`). Anything not listed answers `501` with a Docker-style
+`{"message": ...}` body that names `fluxctl docker up`, so the `docker` CLI prints a sentence you can act on.
+
+| Endpoint | `docker` command | Notes |
+|---|---|---|
+| `GET /_ping`, `/version`, `/info` | `docker version`, `docker info` | |
+| `GET /containers/json` | `docker ps` | |
+| `POST /containers/create` | `docker create`, `docker run` | no bind mounts |
+| `GET /containers/{id}/json` | `docker inspect` | |
+| `POST /containers/{id}/start`, `stop`, `wait` | `docker start`, `stop`, `wait` | |
+| `POST /containers/{id}/restart` | `docker restart` | stop, then start; `t` is ignored |
+| `POST /containers/{id}/kill` | `docker kill [-s SIG]` | only `KILL`/`9` (default, at once) and `TERM`/`15` (clean guest shutdown); other signals answer 501, a name that is no signal 400; a stopped container answers 409 |
+| `POST /containers/{id}/pause`, `unpause` | `docker pause`, `unpause` | if the host's VM backend cannot pause, 501 says so |
+| `GET /containers/{id}/top` | `docker top` | runs `ps` in the guest; `ps_args` is ignored; an image without `ps` answers 501 |
+| `GET /containers/{id}/stats` | `docker stats` | `stream=false` gives one sample, otherwise one per second. CPU is the VM's lifetime average; no per-container network counters. Hosts that cannot read VM metrics answer 501 |
+| `POST /containers/{id}/rename?name=` | `docker rename` | a name already in use answers 409 |
+| `GET /containers/{id}/logs`, `POST /containers/{id}/attach` | `docker logs`, `attach` | console is one combined stream |
+| `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` | `docker exec` | no stdin |
+| `DELETE /containers/{id}` | `docker rm [-f]` | |
+| `GET /events` | `docker events` | container `create`, `start`, `die`, `stop`, `pause`, `unpause`, `restart`, `destroy` from the daemon's event log; `since`/`until` in Unix seconds; `filters` are ignored |
+| `GET /images/json`, `POST /images/create`, `DELETE /images/{name}` | `docker images`, `pull`, `rmi` | |
+| `GET /networks`, `GET /networks/{id}` | `docker network ls`, `inspect` | one network, `fluxvm-nat` (every container is a microVM behind user-mode NAT; publish ports with `-p`). Create, connect and remove answer 501 |
+| `GET /volumes`, `GET /volumes/{name}` | `docker volume ls`, `inspect` | always empty: there are no named volumes (a container's disk lives and dies with it). Create answers 501 |
+| `POST /build` | `docker build` | always 501 with the two ways to build: `fluxctl mac build`, or `fluxctl docker up` for a real engine |
+
+Not run against the real `docker` CLI against a live daemon by the tests: they call the handlers in process with fakes.
+
 ## Use it
 
 ```bash

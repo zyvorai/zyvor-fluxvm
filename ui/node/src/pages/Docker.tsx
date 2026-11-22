@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useMemo, useState } from 'react';
-import { Copy, Play, RotateCw, ScrollText, Square } from 'lucide-react';
+import { Activity, Copy, Pause, Play, RotateCw, ScrollText, Skull, Square } from 'lucide-react';
 import type { Notify } from '../App';
 import { ContainerWindow } from './ContainerWindow';
 import { CopyCmd } from './Images';
 import { Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
-import { type DockerAction, type DockerContainer, type DockerContext, type DockerView, actionDone, contextCommand, contextLabel, contextTone, ageSince, containerTone, filterContainers, fmtSize, portsText, summarize } from '../lib/docker';
+import { type DockerAction, type DockerContainer, type DockerContext, type DockerStats, type DockerView, actionDone, actionLabel, actionsFor, builtinNote, FULL_ENGINE_COMMAND, statsText, contextCommand, contextLabel, contextTone, ageSince, containerTone, filterContainers, fmtSize, portsText, summarize } from '../lib/docker';
 
 /** The `fluxvm` docker CLI context: whether `docker --context fluxvm ps` works and whether `docker` uses it by default. Read-only; the command is copied. */
 function DockerContextCard({ notify }: { notify: Notify }) {
@@ -33,6 +33,8 @@ function DockerContextCard({ notify }: { notify: Notify }) {
   );
 }
 
+const ACTION_ICON: Record<DockerAction, typeof Play> = { start: Play, stop: Square, restart: RotateCw, kill: Skull, pause: Pause, unpause: Play };
+
 /** The Docker engine `fluxctl docker` runs in its own VM: containers and images, a container's log, and start, stop and restart. */
 export function DockerPage({ notify }: { notify: Notify }) {
   const view = usePoll(async () => await api.get<DockerView>('/v1/docker'), 5000);
@@ -42,6 +44,7 @@ export function DockerPage({ notify }: { notify: Notify }) {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<DockerContainer | null>(null);
   const [busy, setBusy] = useState('');
+  const [stats, setStats] = useState<Record<string, string>>({});
   const now = Date.now();
   const act = async (c: DockerContainer, action: DockerAction) => {
     setBusy(c.id + action);
@@ -55,13 +58,24 @@ export function DockerPage({ notify }: { notify: Notify }) {
       setBusy('');
     }
   };
+  const readStats = async (c: DockerContainer) => {
+    setBusy(c.id + 'stats');
+    try {
+      const r = await api.get<DockerStats>(`/v1/docker/containers/${encodeURIComponent(c.id)}/stats`);
+      setStats((m) => ({ ...m, [c.id]: statsText(r) || 'No reading yet' }));
+    } catch (e) {
+      notify(`${c.name}: ${(e as Error).message}`, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
   const shown = useMemo(() => filterContainers(d?.containers ?? [], q, group), [d, q, group]);
   const sum = useMemo(() => summarize(d?.containers ?? []), [d]);
   const forbidden = view.error?.message && /admin/i.test(view.error.message);
 
   return (
     <>
-      <Hero eyebrow="Docker" title="The engine on this host," accent="containers included." lede="The Docker engine fluxctl docker runs in its own VM. Start, stop and restart a container, read its log; use the docker CLI for the rest." />
+      <Hero eyebrow="Docker" title="The engine on this host," accent="containers included." lede="The Docker engine fluxctl docker runs in its own VM. Start, stop, restart, pause or kill a container, read its log and its resource use; use the docker CLI for the rest." />
       {forbidden ? null : <DockerContextCard notify={notify} />}
       {view.loading && !d ? (
         <Skeleton h={160} />
@@ -81,6 +95,10 @@ export function DockerPage({ notify }: { notify: Notify }) {
               {' '}· socket <span className="fx-mono">{d.engine.socket}</span>
             </p>
           </Card>
+          <Card title="Built-in engine">
+            <p className="fx-muted">Unsupported by the built-in engine (the daemon's own docker.sock): {builtinNote()}</p>
+            <CopyCmd notify={notify} cmd={FULL_ENGINE_COMMAND} />
+          </Card>
           <Tabs value={tab} onChange={setTab} tabs={[{ value: 'containers', label: `Containers · ${d.containers.length}` }, { value: 'images', label: `Images · ${d.images.length}` }]} />
           {tab === 'containers' ? (
             <Card title="Containers">
@@ -99,21 +117,18 @@ export function DockerPage({ notify }: { notify: Notify }) {
                 <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Name</th><th>Image</th><th>State</th><th>Status</th><th>Ports</th><th>Age</th><th /></tr></thead><tbody>
                   {shown.map((c) => (
                     <tr key={c.id}>
-                      <td className="vm-name">{c.name}<div className="fx-muted fx-mono">{c.id}</div></td>
+                      <td className="vm-name">{c.name}<div className="fx-muted fx-mono">{c.id}</div>{stats[c.id] ? <div className="fx-muted">{stats[c.id]}</div> : null}</td>
                       <td className="fx-mono">{c.image}</td>
                       <td><Pill tone={containerTone(c)}>{c.state}</Pill></td>
                       <td className="fx-muted">{c.status}</td>
                       <td className="fx-mono">{portsText(c.ports) || '—'}</td>
                       <td className="fx-muted">{ageSince(c.created, now)}</td>
                       <td><span className="fx-row-actions">
-                        {c.state === 'running' || c.state === 'restarting' ? (
-                          <>
-                            <Button size="sm" variant="ghost" aria-label={`Restart ${c.name}`} busy={busy === c.id + 'restart'} disabled={!!busy} onClick={() => void act(c, 'restart')}><RotateCw size={14} />Restart</Button>
-                            <Button size="sm" variant="ghost" aria-label={`Stop ${c.name}`} busy={busy === c.id + 'stop'} disabled={!!busy} onClick={() => void act(c, 'stop')}><Square size={14} />Stop</Button>
-                          </>
-                        ) : (
-                          <Button size="sm" variant="ghost" aria-label={`Start ${c.name}`} busy={busy === c.id + 'start'} disabled={!!busy} onClick={() => void act(c, 'start')}><Play size={14} />Start</Button>
-                        )}
+                        {actionsFor(c.state).map((a) => {
+                          const Icon = ACTION_ICON[a];
+                          return <Button key={a} size="sm" variant="ghost" aria-label={`${actionLabel(a)} ${c.name}`} busy={busy === c.id + a} disabled={!!busy} onClick={() => void act(c, a)}><Icon size={14} />{actionLabel(a)}</Button>;
+                        })}
+                        {c.state === 'running' ? <Button size="sm" variant="ghost" aria-label={`Stats of ${c.name}`} busy={busy === c.id + 'stats'} disabled={!!busy} onClick={() => void readStats(c)}><Activity size={14} />Stats</Button> : null}
                         <Button size="sm" variant="ghost" aria-label={`Logs of ${c.name}`} onClick={() => setOpen(c)}><ScrollText size={14} />Logs</Button>
                       </span></td>
                     </tr>

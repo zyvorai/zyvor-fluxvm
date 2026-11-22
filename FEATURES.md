@@ -159,6 +159,11 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Platform layer ([docs/apple-k3s-platform.md](docs/apple-k3s-platform.md)): `create --registries-file/--embedded-registry/--harden cis/--addons/--cilium`, `platform apply`, `doctor --cis`, `snapshot restore --rejoin-servers`, `upgrade --channel` (system-upgrade-controller), `platform gitops flux|argo`, `platform metallb|cert-manager|metrics-server` from pinned, checksum-verified manifests, and `platform netpol`; unit-tested, never run on a cluster
 - Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware. The HA, rotation, S3, kube-vip, LaunchAgent, removal and rebuild paths have never run on a real cluster
 
+### Built-in Docker engine coverage
+- The daemon's `docker.sock` now also answers `restart`, `kill` (KILL/TERM), `pause`/`unpause`, `top`, `stats`, `rename`, `events`, `network ls/inspect` and `volume ls/inspect` (honest minimal answers), and gives `build` and everything else a Docker-style error that says to use `fluxctl mac build` or `fluxctl docker up`; `/v1.43/...` prefixes now route
+- Studio Docker page: Pause/Unpause/Kill, a Stats readout and the "use a real engine" note
+- Unit-tested with fakes; not run against a real daemon, a Mac or the docker CLI
+
 ### Docker context
 - `fluxctl docker context install|uninstall|status`: a `fluxvm` Docker CLI context for the engine from `fluxctl docker up` (`docker --context fluxvm ps`); made automatically by `docker up`, never switches your current context without `--use`, never touches other contexts, keeps unrelated `config.json` keys
 - Studio Docker page shows the context state with a copy-the-command "Use FluxVM for docker" (read-only `GET /v1/docker/context`)

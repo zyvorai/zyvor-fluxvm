@@ -92,13 +92,54 @@ export const filterContainers = (list: DockerContainer[], q: string, group: 'all
   });
 };
 
-export type DockerAction = 'start' | 'stop' | 'restart';
+export type DockerAction = 'start' | 'stop' | 'restart' | 'kill' | 'pause' | 'unpause';
 
 /** What to tell the user once the engine has answered; `changed` is false when the container was already so. */
 export const actionDone = (name: string, action: DockerAction, changed: boolean): string => {
   if (!changed) return action === 'start' ? `${name} was already running` : `${name} was already stopped`;
-  return action === 'start' ? `${name} started` : action === 'stop' ? `${name} stopped` : `${name} restarted`;
+  switch (action) {
+    case 'start': return `${name} started`;
+    case 'stop': return `${name} stopped`;
+    case 'restart': return `${name} restarted`;
+    case 'kill': return `${name} killed`;
+    case 'pause': return `${name} paused`;
+    case 'unpause': return `${name} resumed`;
+  }
 };
+
+/** The actions that make sense for a container in this state, in the order the buttons are shown. */
+export const actionsFor = (state: string): DockerAction[] => {
+  switch (state) {
+    case 'running': return ['restart', 'pause', 'stop', 'kill'];
+    case 'restarting': return ['stop', 'kill'];
+    case 'paused': return ['unpause', 'stop', 'kill'];
+    default: return ['start'];
+  }
+};
+
+export const actionLabel = (a: DockerAction): string => a[0].toUpperCase() + a.slice(1);
+
+/** One reading of a container's resource use, as `GET /v1/docker/containers/{id}/stats` flattens it. */
+export type DockerStats = { cpu_percent: number; mem_usage: number; mem_limit: number; mem_percent: number; net_rx: number; net_tx: number; pids: number };
+
+/** `0.4% CPU · 12.3 MB of 512 MB (2.4%) · net 1.2 kB in, 800 B out`; a missing reading is left out, not shown as zero. */
+export const statsText = (s: DockerStats | null | undefined): string => {
+  if (!s) return '';
+  const parts: string[] = [];
+  if (Number.isFinite(s.cpu_percent)) parts.push(`${s.cpu_percent.toFixed(1)}% CPU`);
+  if (Number.isFinite(s.mem_usage)) parts.push(s.mem_limit > 0 ? `${fmtSize(s.mem_usage)} of ${fmtSize(s.mem_limit)} (${s.mem_percent.toFixed(1)}%)` : `${fmtSize(s.mem_usage)} memory`);
+  if (s.net_rx > 0 || s.net_tx > 0) parts.push(`net ${fmtSize(s.net_rx)} in, ${fmtSize(s.net_tx)} out`);
+  if (s.pids > 0) parts.push(`${s.pids} processes`);
+  return parts.join(' · ');
+};
+
+/** The one command that gives a full engine; the built-in `docker.sock` cannot build, compose, make networks or volumes. */
+export const FULL_ENGINE_COMMAND = 'fluxctl docker up';
+
+/** What the built-in engine (the daemon's own `docker.sock`, one microVM per container) does not do. */
+export const BUILTIN_UNSUPPORTED = ['docker build', 'Compose', 'user-defined networks', 'named volumes', 'signals other than KILL and TERM'];
+
+export const builtinNote = (): string => `The built-in engine does not support ${BUILTIN_UNSUPPORTED.join(', ')}. Use a real engine: run ${FULL_ENGINE_COMMAND}.`;
 
 export type DockerContextState = 'no-docker-cli' | 'not-installed' | 'stale' | 'socket-down' | 'ready' | 'current';
 

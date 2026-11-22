@@ -970,6 +970,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(docker_view::container_logs),
         )
         .route(
+            "/v1/docker/containers/{id}/stats",
+            get(docker_view::container_stats),
+        )
+        .route(
             "/v1/docker/containers/{id}/{action}",
             post(docker_view::container_action),
         )

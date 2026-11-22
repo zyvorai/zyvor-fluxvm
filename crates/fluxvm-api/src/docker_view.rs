@@ -391,16 +391,19 @@ fn check_action(role: Role, id: &str, action: &str) -> Result<(), ApiError> {
     if !id_ok(id) {
         return Err(err(StatusCode::BAD_REQUEST, "not a container id or name"));
     }
-    if !matches!(action, "start" | "stop" | "restart") {
+    if !matches!(
+        action,
+        "start" | "stop" | "restart" | "kill" | "pause" | "unpause"
+    ) {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "the action is start, stop or restart",
+            "the action is start, stop, restart, kill, pause or unpause",
         ));
     }
     Ok(())
 }
 
-/// `POST /v1/docker/containers/{id}/{action}` (admin) with `action` one of `start`, `stop`, `restart`. `changed: false` means
+/// `POST /v1/docker/containers/{id}/{action}` (admin) with `action` one of `start`, `stop`, `restart`, `kill`, `pause`, `unpause`. `changed: false` means
 /// the container was already started or stopped.
 pub(crate) async fn container_action(
     State(_m): State<Arc<VmManager>>,
@@ -409,6 +412,73 @@ pub(crate) async fn container_action(
 ) -> ApiResult<Json<Value>> {
     check_action(role, &id, &action)?;
     Ok(Json(act_on(&default_socket(), &id, &action).await?))
+}
+
+/// A byte count in a Docker stats object, or 0.
+fn u(v: &Value) -> u64 {
+    v.as_u64().unwrap_or(0)
+}
+
+/// Docker's own `docker stats` arithmetic over one `GET /containers/{id}/stats?stream=false` sample: CPU and memory percent,
+/// memory in use (cache excluded, as the CLI does), and the network bytes summed over every interface.
+fn stats_view(s: &Value) -> Value {
+    let cpu_delta = u(&s["cpu_stats"]["cpu_usage"]["total_usage"]) as f64
+        - u(&s["precpu_stats"]["cpu_usage"]["total_usage"]) as f64;
+    let sys_delta = u(&s["cpu_stats"]["system_cpu_usage"]) as f64
+        - u(&s["precpu_stats"]["system_cpu_usage"]) as f64;
+    let cpus = s["cpu_stats"]["online_cpus"]
+        .as_u64()
+        .filter(|c| *c > 0)
+        .unwrap_or(1) as f64;
+    let cpu = if cpu_delta > 0.0 && sys_delta > 0.0 {
+        cpu_delta / sys_delta * cpus * 100.0
+    } else {
+        0.0
+    };
+    let m = &s["memory_stats"];
+    let cache = u(&m["stats"]["inactive_file"]).max(u(&m["stats"]["cache"]));
+    let usage = u(&m["usage"]).saturating_sub(cache);
+    let limit = u(&m["limit"]);
+    let (mut rx, mut tx) = (0, 0);
+    if let Some(nets) = s["networks"].as_object() {
+        for n in nets.values() {
+            rx += u(&n["rx_bytes"]);
+            tx += u(&n["tx_bytes"]);
+        }
+    }
+    json!({
+        "cpu_percent": cpu,
+        "mem_usage": usage,
+        "mem_limit": limit,
+        "mem_percent": if limit > 0 { usage as f64 / limit as f64 * 100.0 } else { 0.0 },
+        "net_rx": rx,
+        "net_tx": tx,
+        "pids": u(&s["pids_stats"]["current"]),
+    })
+}
+
+/// `GET /v1/docker/containers/{id}/stats` (admin): one flattened resource reading of a container of the engine.
+pub(crate) async fn container_stats(
+    State(_m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    if !id_ok(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "not a container id or name"));
+    }
+    let (s, b) = engine_call(
+        &default_socket(),
+        Method::GET,
+        &format!("/containers/{id}/stats?stream=false"),
+        TIMEOUT,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_GATEWAY, e))?;
+    if s == StatusCode::NOT_FOUND {
+        return Err(err(StatusCode::NOT_FOUND, format!("no container '{id}'")));
+    }
+    Ok(Json(stats_view(&json_of(s, &b, "the stats")?)))
 }
 
 #[cfg(test)]
@@ -494,6 +564,9 @@ mod tests {
             .route("/containers/{id}/start", post(|Path(id): Path<String>| async move {
                 match id.as_str() { "web" => StatusCode::NO_CONTENT, "up" => StatusCode::NOT_MODIFIED, "bad" => StatusCode::INTERNAL_SERVER_ERROR, _ => StatusCode::NOT_FOUND }.into_response()
             }))
+            .route("/containers/{id}/stats", get(|Path(id): Path<String>| async move {
+                if id == "web" { Json(json!({"memory_stats": {"usage": 10, "limit": 100}})).into_response() } else { (StatusCode::NOT_FOUND, Json(json!({"message": "No such container"}))).into_response() }
+            }))
             .route("/containers/{id}/logs", get(|| async {
                 let mut v = frame(1, "2026-10-24T10:00:00Z hello\n");
                 v.extend(frame(2, "2026-10-24T10:00:01Z oops\n"));
@@ -551,12 +624,59 @@ mod tests {
     }
 
     #[test]
-    fn only_start_stop_and_restart_by_an_admin_pass_the_check() {
+    fn stats_are_flattened_like_docker_stats_does() {
+        let s = json!({
+            "cpu_stats": {"cpu_usage": {"total_usage": 300}, "system_cpu_usage": 2000, "online_cpus": 2},
+            "precpu_stats": {"cpu_usage": {"total_usage": 100}, "system_cpu_usage": 1000},
+            "memory_stats": {"usage": 600, "limit": 1000, "stats": {"inactive_file": 100}},
+            "networks": {"eth0": {"rx_bytes": 5, "tx_bytes": 7}, "eth1": {"rx_bytes": 1, "tx_bytes": 1}},
+            "pids_stats": {"current": 4}
+        });
+        let v = stats_view(&s);
+        assert!((v["cpu_percent"].as_f64().unwrap() - 40.0).abs() < 1e-9);
+        assert_eq!(v["mem_usage"], 500);
+        assert_eq!(v["mem_percent"].as_f64().unwrap(), 50.0);
+        assert_eq!(
+            (v["net_rx"].clone(), v["net_tx"].clone()),
+            (json!(6), json!(8))
+        );
+        assert_eq!(v["pids"], 4);
+        // An empty sample is zeros, not a crash.
+        assert_eq!(stats_view(&json!({}))["cpu_percent"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_container_that_is_gone_is_told_apart_for_stats() {
+        let dir = tempdir();
+        let sock = fake_engine(&dir).await;
+        let (s, _) = engine_call(
+            &sock,
+            Method::GET,
+            "/containers/nope/stats?stream=false",
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let (s, b) = engine_call(
+            &sock,
+            Method::GET,
+            "/containers/web/stats?stream=false",
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let v = stats_view(&json_of(s, &b, "the stats").unwrap());
+        assert_eq!(v["mem_usage"], 10);
+    }
+
+    #[test]
+    fn only_the_known_actions_by_an_admin_pass_the_check() {
         let status = |role, id, action| check_action(role, id, action).unwrap_err().status;
         assert_eq!(status(Role::ReadOnly, "web", "stop"), StatusCode::FORBIDDEN);
-        assert_eq!(status(Role::Admin, "web", "kill"), StatusCode::BAD_REQUEST);
+        assert_eq!(status(Role::Admin, "web", "prune"), StatusCode::BAD_REQUEST);
         assert_eq!(status(Role::Admin, "a b", "stop"), StatusCode::BAD_REQUEST);
-        for action in ["start", "stop", "restart"] {
+        for action in ["start", "stop", "restart", "kill", "pause", "unpause"] {
             assert!(check_action(Role::Admin, "web", action).is_ok());
         }
     }
