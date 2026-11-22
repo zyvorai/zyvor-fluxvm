@@ -956,23 +956,23 @@ fn assess_node(f: &NodeFacts, now: u64) -> MachineHealth {
     }
 
     // capacity, in human terms
-    if let Some(used) = f.macos_in_use {
-        if f.platform == Platform::Mac {
-            if used >= MACOS_SLOT_LIMIT {
-                items.push(item(
-                    m,
-                    "capacity",
-                    Severity::Warn,
-                    "MACOS_SLOTS_FULL",
-                    format!("{used} of {MACOS_SLOT_LIMIT} macOS slots are in use on {m}"),
-                    Some("Apple's licence allows two macOS VMs per Mac at a time".into()),
-                    Some(Fix::steps(
-                        "stop one macOS VM, or run the job on another Mac",
-                    )),
-                ));
-            } else {
-                passed += 1;
-            }
+    if let Some(used) = f.macos_in_use
+        && f.platform == Platform::Mac
+    {
+        if used >= MACOS_SLOT_LIMIT {
+            items.push(item(
+                m,
+                "capacity",
+                Severity::Warn,
+                "MACOS_SLOTS_FULL",
+                format!("{used} of {MACOS_SLOT_LIMIT} macOS slots are in use on {m}"),
+                Some("Apple's licence allows two macOS VMs per Mac at a time".into()),
+                Some(Fix::steps(
+                    "stop one macOS VM, or run the job on another Mac",
+                )),
+            ));
+        } else {
+            passed += 1;
         }
     }
     if !has_disk {
