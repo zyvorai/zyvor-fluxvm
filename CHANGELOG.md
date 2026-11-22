@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Saving a macOS VM now asks the runner (`save-support`) first and refuses with the framework reason before any snapshot directory is made; an old runner never blocks a save. The `fluxctl mac` template store records the macOS build each template was added on (`Store::host_build`), not yet read by any command. Unit-tested; not run on a real Mac.
 - **`kube apple platform` extras:** `prometheus-stack NAME [--retention]` (a k3s `HelmChart`, chart 93.6.1, contents fetched by the cluster, not hash-checked), `storage-local-path NAME [--class --retain --default --apply]`, `storage-longhorn` (guidance text only, installs nothing) and `kairon-label NAME --label KEY=VALUE [--node N]` (adds the `kairon.zyvor.dev/` prefix). Not applied to a real cluster; generators are unit-tested with a fake remote.
 
 Mac compose gaps filled ([docs/macos-containers.md](docs/macos-containers.md#compose)). Unit-tested with fixtures; **not run against a daemon or a real macOS VM**.
