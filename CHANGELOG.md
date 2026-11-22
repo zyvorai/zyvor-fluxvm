@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+Live run on a Linux host (single-node k3s v1.37.2 in a QEMU/KVM guest, Envoy Gateway v1.10.0) found and fixed two bugs ([docs/gateway.md](docs/gateway.md#what-the-live-run-found)):
+
+- `kube cluster create` on Linux failed with `no address on the private network card`: the unit script required the macOS-only `10.89.x.y` card. A guest without it now uses its default-route address and card for `--node-ip` and flannel (`UnitOpts.private_net`, set from the backend).
+- `platform envoy-gateway` failed on k3s 1.37, which ships the standard Gateway API CRDs and an admission policy against experimental ones: the pinned manifest is applied (after its digest check) without its `*.gateway.networking.k8s.io` CRDs when the cluster already has them.
+
 Gateway API built in ([docs/gateway.md](docs/gateway.md)), ported from Zyvor Setura 0.1.0. Unit-tested with loopback servers and a fake kubectl; **not compiled or run on a live cluster, and Envoy Gateway has not been run, when this entry was written**.
 
 - New `fluxctl gateway publish GATEWAY --listener NAME [--dry-run]` (finds the one Envoy Service for the listener's port and runs `kubectl port-forward` on 127.0.0.1), `gateway explain URL` (one direct HTTP/1.1 GET reported as dns, tcp, tls, http and backend; `--address`, `--backend`, `--ca`, `--status`, `--timeout`, `--json`; the Host header and TLS name stay the URL's hostname; proxy environment variables are never read), `gateway check FILE` (JSON probes; exit 0 pass, 1 observed failure, 2 usage) and `gateway inspect ROUTE` (HTTPRoute conditions per parent with whether each is current, backend ports and ready EndpointSlice counts). Cluster selection: `--cluster NAME` (`~/.kube/fluxvm-NAME.yaml`) or `--kube-context`.

@@ -123,10 +123,27 @@ pub fn apply_script(pin: &Pin, source: Source, sha256: &str) -> String {
     if let Some(ns) = pin.namespace {
         flags.push_str(&format!(" -n {ns}"));
     }
+    // Derived from the verified file, after the digest check: see [`reuses_installed_gateway_api_crds`].
+    let filter = if reuses_installed_gateway_api_crds(pin) { gateway_api_crd_filter() } else { String::new() };
     format!(
         ": fluxvm-op pin-apply; set -eu; T=$(mktemp); trap 'rm -f \"$T\"' EXIT; {get}; \
-         echo '{sha256}  '\"$T\" | sha256sum -c - >&2; \
+         echo '{sha256}  '\"$T\" | sha256sum -c - >&2; {filter}\
          sudo -n {K3S_BIN} kubectl apply{flags} -f \"$T\""
+    )
+}
+
+/// Envoy Gateway's `install.yaml` carries the Gateway API CRDs (experimental channel). k3s 1.37 installs the standard-channel
+/// set itself, with a ValidatingAdmissionPolicy that refuses experimental CRDs on top of them (found on a live cluster), so when
+/// the cluster already has them the manifest is applied without its own `*.gateway.networking.k8s.io` CRDs. Envoy's CRDs
+/// (`*.gateway.envoyproxy.io`) and the `x-k8s.io` extension CRDs stay.
+pub fn reuses_installed_gateway_api_crds(pin: &Pin) -> bool {
+    pin.key == "envoy-gateway"
+}
+
+fn gateway_api_crd_filter() -> String {
+    format!(
+        "if sudo -n {K3S_BIN} kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then \
+         awk 'BEGIN{{RS=\"\\n---\\n\"; ORS=\"\\n---\\n\"}} !($0 ~ /kind: CustomResourceDefinition/ && $0 ~ /name: [a-z]+\\.gateway\\.networking\\.k8s\\.io/) {{print}}' \"$T\" > \"$T.f\" && mv \"$T.f\" \"$T\"; fi; "
     )
 }
 
@@ -149,6 +166,17 @@ pub fn verify_bytes(data: &[u8], sha256: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envoy_skips_the_gateway_api_crds_k3s_already_has_after_the_digest_check() {
+        let sc = apply_script(&ENVOY_GATEWAY, Source::Download, ENVOY_GATEWAY.sha256);
+        let (sum, filter) = (sc.find("sha256sum -c").unwrap(), sc.find("awk ").unwrap());
+        assert!(sum < filter, "the digest is checked before the manifest is changed: {sc}");
+        assert!(sc.contains("get crd gateways.gateway.networking.k8s.io"), "{sc}");
+        assert!(sc.contains("networking\\.k8s\\.io"), "{sc}");
+        let other = apply_script(&METALLB, Source::Download, METALLB.sha256);
+        assert!(!other.contains("awk "), "only Envoy's manifest is filtered: {other}");
+    }
 
     #[test]
     fn pins_are_well_formed_and_unique() {

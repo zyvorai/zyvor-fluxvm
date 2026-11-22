@@ -1634,6 +1634,7 @@ fn script_helpers_used_by_the_fake_stay_in_sync() {
         token_file: false,
         agent_token_file: false,
         flags: None,
+        private_net: true,
     };
     use script::*;
     assert_eq!(tag(&preflight_script()), "preflight");
