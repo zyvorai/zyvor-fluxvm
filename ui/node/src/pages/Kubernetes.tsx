@@ -9,6 +9,7 @@ import { KubeCheckpoints } from './KubeCheckpoints';
 import { KubeEvents } from './KubeEvents';
 import { KubeGraph } from './KubeGraph';
 import { KubeWorkloads } from './KubeWorkloads';
+import { KubeGateways } from './KubeGateways';
 import { PodWindow, type PodTab } from './PodWindow';
 import { Button, Card, EmptyState, Hero, Meter, Pill, Sheet, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
 import { type KubeClusterItem, type KubeDetail, type KubePod, actionPath, ageOf, filterPods, fmtCpu, fmtMem, kubeProblem, namespacesOf, podTone, summarize } from '../lib/kube';
@@ -21,7 +22,7 @@ export function KubernetesPage({ notify }: { notify: Notify }) {
   const [picked, setPicked] = useState('');
   const current = items.find((c) => c.name === picked)?.name ?? items[0]?.name ?? '';
   const detail = usePoll(async () => (current ? await api.get<KubeDetail>(`/v1/kube/${enc(current)}`) : null), 5000, [current]);
-  const [view, setView] = useState<'overview' | 'workloads' | 'events' | 'traffic' | 'checkpoints'>('overview');
+  const [view, setView] = useState<'overview' | 'workloads' | 'gateways' | 'events' | 'traffic' | 'checkpoints'>('overview');
   const [ns, setNs] = useState('');
   const [q, setQ] = useState('');
   const [now, setNow] = useState(Date.now());
@@ -58,13 +59,15 @@ export function KubernetesPage({ notify }: { notify: Notify }) {
             onChange={(v) => (setPicked(v), setNs(''), setQ(''))}
             tabs={items.map((c) => ({ value: c.name, label: `${c.name} · ${c.nodes.filter((n) => n.status === 'running').length}/${c.nodes.length} machines up` }))}
           />
-          <Tabs value={view} onChange={setView} tabs={[{ value: 'overview', label: 'Nodes and pods' }, { value: 'workloads', label: 'Workloads' }, { value: 'events', label: 'Events' }, { value: 'traffic', label: 'Traffic' }, { value: 'checkpoints', label: 'Checkpoints' }]} />
+          <Tabs value={view} onChange={setView} tabs={[{ value: 'overview', label: 'Nodes and pods' }, { value: 'workloads', label: 'Workloads' }, { value: 'gateways', label: 'Gateways' }, { value: 'events', label: 'Events' }, { value: 'traffic', label: 'Traffic' }, { value: 'checkpoints', label: 'Checkpoints' }]} />
           {problem ? (
             <Card><EmptyState title={problem.title} body={problem.body} /></Card>
           ) : view === 'traffic' ? (
             <KubeGraph cluster={current} />
           ) : view === 'workloads' ? (
             <KubeWorkloads cluster={current} notify={notify} />
+          ) : view === 'gateways' ? (
+            <KubeGateways cluster={current} notify={notify} />
           ) : view === 'events' ? (
             <KubeEvents cluster={current} />
           ) : view === 'checkpoints' ? (

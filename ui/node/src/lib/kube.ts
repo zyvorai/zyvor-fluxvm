@@ -213,3 +213,43 @@ export const checkpointLabelNow = (now: Date): string => `studio-${now.toISOStri
 /** Where a NodePort or LoadBalancer service answers on this Mac once `fluxctl kube supervise` has published it (loopback only). */
 export const serviceUrls = (s: Pick<KubeService, 'type' | 'ports'>): string[] =>
   s.type === 'NodePort' || s.type === 'LoadBalancer' ? s.ports.filter((p) => p.node_port != null && p.node_port >= 1024).map((p) => `http://127.0.0.1:${p.node_port}`) : [];
+
+// ---- gateways --------------------------------------------------------------------------------------------------------------------
+
+export type GwCondition = { status: string; reason: string | null; message: string | null; current: boolean } | null;
+export type GwState = 'ready' | 'waiting' | 'problem';
+export type GwRoute = {
+  namespace: string;
+  name: string;
+  hostnames: string[];
+  matches: string[];
+  state: GwState;
+  summary: string;
+  backends: { namespace: string; name: string; port: number | null; ready_endpoints: number }[];
+  inspect: string;
+};
+export type Gw = {
+  namespace: string;
+  name: string;
+  class: string | null;
+  listeners: { name: string; port: number; protocol: string; hostname: string | null }[];
+  state: GwState;
+  summary: string;
+  routes: GwRoute[];
+};
+export type Gateways = {
+  schema: number;
+  gateway_api_installed: boolean | null;
+  envoy_gateway: { installed: boolean; ready: boolean };
+  gateways: Gw[];
+  error: { message: string; next: string } | null;
+};
+
+export const gatewayTone = (s: GwState): Tone => (s === 'ready' ? 'ok' : s === 'waiting' ? 'warn' : 'bad');
+
+/** The command a person would run for a Gateway row (a route's inspect command, or expose for a Service backend). */
+export const routeCommand = (r: GwRoute): string => r.inspect;
+export const exposeCommand = (service: string): string => `fluxctl gateway expose ${service}`;
+
+/** A route's backends in words: `api:8080 (2 ready)`, or a warning when none is ready. */
+export const backendText = (b: GwRoute['backends'][number]): string => `${b.name}${b.port != null ? `:${b.port}` : ''} (${b.ready_endpoints ? `${b.ready_endpoints} ready` : 'none ready'})`;
