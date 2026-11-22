@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-//! Friendly explanations for the failures people hit most on `fluxctl mac`, `mac-fleet` and `kube` on a Mac. `fluxctl explain`
+//! Friendly explanations for the failures people hit most on `fluxctl mac`, `mac-fleet`, `kube` and `docker context`. `fluxctl explain`
 //! looks here after the API and cluster-health tables. [`hint_for`] maps the text of a failure to the code that explains it.
 
 /// One explained failure. Same shape as the other `explain` tables.
@@ -139,6 +139,51 @@ pub const CODES: &[MacCode] = &[
             "enospc",
             "out of disk",
         ],
+    },
+    MacCode {
+        code: "DOCKER_CLI_MISSING",
+        status: None,
+        summary: "The docker command is not installed, so FluxVM did not make the `fluxvm` docker context.",
+        causes: &[
+            "only the engine runs in FluxVM; the `docker` client is a separate program that must be on this machine",
+        ],
+        fixes: &[
+            "macOS: `brew install docker`; Linux: `sudo apt install docker.io` or see https://docs.docker.com/engine/install/ (the client alone is enough)",
+            "then run `fluxctl docker context install`",
+        ],
+        aliases: &["docker-cli-missing", "no-docker-cli"],
+        signatures: &["docker command is not installed"],
+    },
+    MacCode {
+        code: "DOCKER_CONTEXT_UNWRITABLE",
+        status: None,
+        summary: "FluxVM could not write the `fluxvm` docker context into the Docker CLI's settings folder.",
+        causes: &[
+            "the folder (~/.docker, or DOCKER_CONFIG) belongs to another user, for example after a `sudo docker` run",
+            "the disk is full or read-only, or neither HOME nor DOCKER_CONFIG is set",
+        ],
+        fixes: &[
+            "check the owner: `ls -ld ~/.docker`; fix it with `sudo chown -R $USER ~/.docker`",
+            "or use a folder you own: `export DOCKER_CONFIG=$HOME/.docker`",
+            "then run `fluxctl docker context install` again",
+        ],
+        aliases: &["docker-context-unwritable"],
+        signatures: &[
+            "could not write the context",
+            "cannot tell where the docker cli keeps",
+        ],
+    },
+    MacCode {
+        code: "DOCKER_CONFIG_INVALID",
+        status: None,
+        summary: "The Docker CLI's config.json is not valid JSON, so FluxVM left it alone instead of overwriting it.",
+        causes: &["the file was edited by hand or cut short; `docker` will complain about it too"],
+        fixes: &[
+            "look at it: `cat ~/.docker/config.json` and fix the JSON, or move it aside: `mv ~/.docker/config.json ~/.docker/config.json.bak`",
+            "then run `fluxctl docker context install --use` again",
+        ],
+        aliases: &["docker-config-invalid"],
+        signatures: &["config.json is not a json object"],
     },
 ];
 

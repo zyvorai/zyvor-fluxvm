@@ -34,6 +34,7 @@ use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+pub mod docker_context;
 pub mod docker_engine;
 pub mod event_sinks;
 mod grants;
@@ -962,6 +963,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
         .route("/v1/vznets", get(list_vznets))
         .route("/v1/docker", get(docker_view::get_docker))
+        .route("/v1/docker/context", get(docker_view::get_context))
         .route(
             "/v1/docker/containers/{id}/logs",
             get(docker_view::container_logs),

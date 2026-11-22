@@ -35,6 +35,30 @@ fluxctl docker down --purge                      # delete the VM and everything 
 
 `up` is idempotent: run it again to restart the VM or the socket forward. It prints the `export DOCKER_HOST=…` line.
 
+### Docker context (`docker --context fluxvm`)
+
+`up` also creates a Docker CLI **context** named `fluxvm` that points at the engine socket, so you do not need `DOCKER_HOST`:
+
+```bash
+docker context ls                 # lists fluxvm next to default
+docker --context fluxvm ps        # one command against FluxVM's engine
+fluxctl docker context install --use   # make it the default for `docker` (docker context use fluxvm)
+fluxctl docker context status     # exists? current? does the socket answer? what to run next
+fluxctl docker context uninstall  # remove it; if it was current, docker returns to its default context
+```
+
+Without `--use` your current context is not changed. FluxVM writes only `~/.docker/contexts/meta/<sha256 of "fluxvm">/meta.json`
+(and `currentContext` in `config.json` for `--use`; `$DOCKER_CONFIG` replaces `~/.docker` when set). It never reads, changes or
+removes a context with another name, keeps every other key in `config.json`, and writes through a temp file and a rename. If
+`config.json` is not valid JSON it is left alone and the error says how to fix it (`fluxctl explain DOCKER_CONFIG_INVALID`).
+If the `docker` command is not installed, nothing is written and the message gives the install hint (`brew install docker` on a Mac,
+`sudo apt install docker.io` on Debian-family Linux); run `context install` once it is. `DOCKER_HOST` and `DOCKER_CONTEXT` in your
+environment override the current context; `status` says so. `--socket PATH` points the context at a different socket.
+
+In Studio, the Docker page has a Docker context card with the same state and a button that copies
+`fluxctl docker context install --use`; Studio only shows the state, the command is run in a terminal. The daemon reports on the
+config directory of the user it runs as.
+
 ### Bind mounts
 
 `--share HOST[:GUEST][:ro]` shares a Mac folder into the VM with virtiofs. **The guest path defaults to the host path**, so a

@@ -38,6 +38,7 @@ mod compose;
 mod config_check;
 mod contexts;
 mod create;
+mod docker_context_cmd;
 mod docker_host;
 mod doctor;
 mod exec_policy_check;
@@ -320,6 +321,11 @@ enum DockerCommand {
         /// Seconds between health checks.
         #[arg(long, default_value_t = 30)]
         every: u64,
+    },
+    /// The `fluxvm` docker CLI context (`docker --context fluxvm ps`): install, uninstall, status. `up` makes it for you.
+    Context {
+        #[command(subcommand)]
+        command: docker_context_cmd::ContextCommand,
     },
     /// Run `supervise` as a LaunchAgent of the logged-in user: starts at login, restarts if it exits.
     Agent {
@@ -6183,6 +6189,13 @@ async fn main() -> Result<()> {
     if let Command::Explain(args) = &cli.command {
         std::process::exit(explain::run(args)?);
     }
+    // The docker context is a few files in the Docker CLI's config directory: no daemon, no VM manager, no root.
+    if let Command::Docker {
+        command: DockerCommand::Context { command },
+    } = &cli.command
+    {
+        return docker_context_cmd::run(command.clone());
+    }
     if let Command::VmSpec { command } = &cli.command {
         std::process::exit(vm_spec::run(command)?);
     }
@@ -8731,6 +8744,7 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
             )
             .await?;
         }
+        DockerCommand::Context { command } => docker_context_cmd::run(command)?,
         DockerCommand::Agent { command } => match command {
             DockerAgentCommand::Install(a) => {
                 let plist = docker_host::agent_install(&a.options())?;
@@ -11004,6 +11018,19 @@ mod backlog_tier1_cli_tests {
             cli(&["explain", "NOT_FOUND"]).command,
             Command::Explain(_)
         ));
+        for args in [
+            &["docker", "context", "install"][..],
+            &["docker", "context", "install", "--use", "--socket", "/s"],
+            &["docker", "context", "uninstall"],
+            &["docker", "context", "status", "--json"],
+        ] {
+            assert!(matches!(
+                cli(args).command,
+                Command::Docker {
+                    command: DockerCommand::Context { .. }
+                }
+            ));
+        }
         assert!(matches!(
             cli(&["vm-spec", "check", "vm.json", "--offline", "--strict"]).command,
             Command::VmSpec { .. }

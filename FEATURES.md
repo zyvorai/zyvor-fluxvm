@@ -159,6 +159,11 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Platform layer ([docs/apple-k3s-platform.md](docs/apple-k3s-platform.md)): `create --registries-file/--embedded-registry/--harden cis/--addons/--cilium`, `platform apply`, `doctor --cis`, `snapshot restore --rejoin-servers`, `upgrade --channel` (system-upgrade-controller), `platform gitops flux|argo`, `platform metallb|cert-manager|metrics-server` from pinned, checksum-verified manifests, and `platform netpol`; unit-tested, never run on a cluster
 - Unit-tested with a fake host (ordering, cleanup, redaction); not yet run against real Apple hardware. The HA, rotation, S3, kube-vip, LaunchAgent, removal and rebuild paths have never run on a real cluster
 
+### Docker context
+- `fluxctl docker context install|uninstall|status`: a `fluxvm` Docker CLI context for the engine from `fluxctl docker up` (`docker --context fluxvm ps`); made automatically by `docker up`, never switches your current context without `--use`, never touches other contexts, keeps unrelated `config.json` keys
+- Studio Docker page shows the context state with a copy-the-command "Use FluxVM for docker" (read-only `GET /v1/docker/context`)
+- Unit-tested; read by the real docker CLI in a temp config directory; not run against a live engine
+
 ### Kubernetes on Apple VZ (macOS LaunchAgents)
 - `fluxctl kube agent install|uninstall|status` runs `kube supervise` (k3s in a Virtualization.framework VM) as a per-user LaunchAgent; `docker agent` does the same for the Docker engine VM
 - Plist uses the Homebrew `opt/` path (survives `brew upgrade`), `ProcessType=Interactive`, and `--restart`/`--throttle-secs`; install is refused beside a supervisor that launchd does not own
