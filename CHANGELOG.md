@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`kube apple platform` extras:** `prometheus-stack NAME [--retention]` (a k3s `HelmChart`, chart 93.6.1, contents fetched by the cluster, not hash-checked), `storage-local-path NAME [--class --retain --default --apply]`, `storage-longhorn` (guidance text only, installs nothing) and `kairon-label NAME --label KEY=VALUE [--node N]` (adds the `kairon.zyvor.dev/` prefix). Not applied to a real cluster; generators are unit-tested with a fake remote.
+
 Mac compose gaps filled ([docs/macos-containers.md](docs/macos-containers.md#compose)). Unit-tested with fixtures; **not run against a daemon or a real macOS VM**.
 
 - `mac compose up --no-build` (a `build:` service with no image in the store is an error), `up --wait-healthy` (after the last service started, wait until every service whose image has a HEALTHCHECK is healthy) and `up --health-timeout SECS` (also bounds the `service_healthy` waits, which were fixed at 600 s).
