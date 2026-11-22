@@ -65,6 +65,7 @@ mod kube_workloads;
 mod macos_pool_api;
 mod speculate_api;
 mod studio;
+mod support_bundle;
 mod tunnel_api;
 mod volumes_api;
 mod vz_api;
@@ -1026,6 +1027,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .merge(macos_pool_api::routes())
         .merge(cluster_health::routes())
+        .merge(support_bundle::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
         .merge(guest_ops::routes())
@@ -7017,6 +7019,86 @@ mod tests {
                 status_for(app, "GET", "/v1/vms", None).await,
                 StatusCode::OK
             );
+        }
+
+        #[tokio::test]
+        async fn the_support_bundle_is_admin_only_and_comes_back_clean() {
+            let tok = |t: &str, role, tenant: Option<&str>| ApiToken {
+                token: t.into(),
+                role,
+                name: None,
+                tenant: tenant.map(str::to_owned),
+            };
+            let auth = AuthConfig {
+                tokens: vec![
+                    tok("tok-admin-0123456789abcdef", Role::Admin, None),
+                    tok("tok-reader-0123456789abcdef", Role::ReadOnly, None),
+                    tok("tok-tenant-0123456789abcdef", Role::Admin, Some("acme")),
+                ],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let url = "/v1/support-bundle?log_lines=20";
+            assert_eq!(
+                status_for(router(m.clone()), "POST", url, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                status_for(
+                    router(m.clone()),
+                    "POST",
+                    url,
+                    Some("tok-reader-0123456789abcdef")
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(
+                status_for(
+                    router(m.clone()),
+                    "POST",
+                    url,
+                    Some("tok-tenant-0123456789abcdef")
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            let resp = router(m.clone())
+                .oneshot(
+                    Request::post(url)
+                        .header(header::AUTHORIZATION, "Bearer tok-admin-0123456789abcdef")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], "application/gzip");
+            assert!(
+                resp.headers()[header::CONTENT_DISPOSITION]
+                    .to_str()
+                    .unwrap()
+                    .contains("fluxvm-support-")
+            );
+            assert!(resp.headers().contains_key("x-fluxvm-support-skipped"));
+            let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(fluxvm_core::support_bundle::verify_archive(&bytes).unwrap() >= 4);
+            let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+            let mut names = vec![];
+            for e in ar.entries().unwrap() {
+                let mut e = e.unwrap();
+                names.push(e.path().unwrap().to_string_lossy().into_owned());
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut e, &mut text).unwrap();
+                assert!(
+                    !text.contains("0123456789abcdef"),
+                    "a token is in {names:?}"
+                );
+            }
+            assert!(names.iter().any(|n| n.ends_with("cluster-health.json")));
+            assert!(names.iter().any(|n| n.ends_with("config-effective.json")));
         }
 
         #[tokio::test]

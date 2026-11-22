@@ -185,6 +185,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 - Image trust and housekeeping: `mac keys|push --sign|sign|pull --verify|verify` (Ed25519 over the manifest digest, OCI referrer, local trust store; not cosign), a licence guard that refuses public registries unless overridden, a `mac build` step cache (`--no-cache`, `mac cache ls|prune`, size budget), chunk reuse on `mac pull` from other local tags (format unchanged), labels and `mac images --filter`, `mac search` over `/v2/_catalog`, `mac sbom` (bundle file list with sha256); unit-tested with fakes, not run against a real registry or macOS template ([docs/macos-containers.md](docs/macos-containers.md))
 
+### Support bundle (`fluxctl support-bundle`, Studio Home)
+
+- One `.tar.gz` for a maintainer (versions, cluster health, recent daemon and VM logs, instance and cluster lists, effective config, disk/RAM/network) with secrets removed by a pure, tested redaction and a fail-closed final scan; works with the daemon down and lists what it skipped and why; Studio **Home** has Download support bundle (`POST /v1/support-bundle`) and Copy as fluxctl ([docs/support-bundle.md](docs/support-bundle.md)); unit-tested, not run against a live daemon.
+
 ### Cluster home (`fluxctl cluster status`, `fluxctl fix`, Studio Home)
 
 - Gateway from the cluster flow: `kube cluster create` asks "Install the Envoy gateway so you can reach apps by name? [Y/n]" on a terminal (`--gateway` / `--no-gateway` for scripts; no terminal and no flag means no gateway, as before); the missing-controller health code and the Studio Gateways tab point at `fluxctl kube cluster platform envoy-gateway NAME` ([docs/gateway.md](docs/gateway.md#install-envoy-gateway-on-a-fluxvm-k3s-cluster)).

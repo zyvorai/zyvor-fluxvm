@@ -28,6 +28,8 @@ pub mod process;
 pub mod security;
 pub mod signing;
 pub mod spec_lint;
+pub mod support_bundle;
+pub mod support_collect;
 pub mod topology;
 pub mod virtiofs;
 pub mod vmm_seccomp;

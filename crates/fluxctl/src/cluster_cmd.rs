@@ -359,7 +359,7 @@ pub fn gateway_items_for_known_clusters(home: &Path) -> Vec<Item> {
     items
 }
 
-async fn gateway_items_now() -> Vec<Item> {
+pub async fn gateway_items_now() -> Vec<Item> {
     let Ok(home) = crate::docker_host::home() else {
         return vec![];
     };
