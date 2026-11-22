@@ -299,6 +299,37 @@ pub async fn gather(env: &Env, inventory: Option<&Path>, no_local: bool, conn: &
     Ok(nodes)
 }
 
+/// Gateway API problems of the FluxVM clusters this user has a kubeconfig for (`~/.kube/fluxvm-NAME.yaml`, written by
+/// `fluxctl kube up`). Reads only, with that kubeconfig and never the default one; a cluster that cannot be reached, or
+/// has no Gateway API, adds nothing. Blocking (kubectl), so call it from `spawn_blocking`.
+pub fn gateway_items_for_known_clusters(home: &Path) -> Vec<Item> {
+    use crate::gateway::kube::{Cluster, Selection, SystemKubectl};
+    let mut names: Vec<String> = std::fs::read_dir(home.join(".kube"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            f.strip_prefix("fluxvm-")?.strip_suffix(".yaml").map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    let mut items = vec![];
+    for name in names.into_iter().take(5) {
+        let sel = Selection { cluster: Some(name.clone()), kube_context: None };
+        let Ok(prefix) = sel.prefix(Some(home)) else { continue };
+        if let Some(facts) = Cluster::new(prefix, &SystemKubectl).facts(&name) {
+            items.extend(health::gateway_items(&facts));
+        }
+    }
+    items
+}
+
+async fn gateway_items_now() -> Vec<Item> {
+    let Ok(home) = crate::docker_host::home() else { return vec![] };
+    tokio::task::spawn_blocking(move || gateway_items_for_known_clusters(&home)).await.unwrap_or_default()
+}
+
 // ---- rendering --------------------------------------------------------------------------------------------------------
 
 fn color_on() -> bool {
@@ -639,7 +670,7 @@ pub async fn run_status(a: &StatusArgs, env: &Env) -> Result<i32> {
         bail!("`cluster status` only reads; there is nothing to dry-run");
     }
     let nodes = gather(env, a.inventory.as_deref(), a.no_local, &a.conn).await?;
-    let h = health::assess(&nodes, now());
+    let h = health::assess_with(&nodes, gateway_items_now().await, now());
     if a.conn.json {
         println!("{}", serde_json::to_string_pretty(&h)?);
     } else {
@@ -660,7 +691,7 @@ pub async fn run_fix(a: &FixArgs, env: &Env, state_dir: &Path) -> Result<i32> {
         step_timeout: 1800,
     };
     let nodes = gather(env, a.inventory.as_deref(), false, &conn).await?;
-    let h = health::assess(&nodes, now());
+    let h = health::assess_with(&nodes, gateway_items_now().await, now());
     let p = plan(&h);
     let will_change = p
         .iter()
@@ -695,7 +726,7 @@ pub async fn run_fix(a: &FixArgs, env: &Env, state_dir: &Path) -> Result<i32> {
         eprintln!("warning: could not write the change log {}: {e:#}", log.display());
     }
     // Look again, so the answer is the state the user is left with.
-    let after = health::assess(&gather(env, a.inventory.as_deref(), false, &conn).await?, now());
+    let after = health::assess_with(&gather(env, a.inventory.as_deref(), false, &conn).await?, gateway_items_now().await, now());
     if a.json {
         println!(
             "{}",
@@ -956,5 +987,17 @@ mod tests {
         let h = health::assess(&[probe_fleet_host(&tr, &t, None)], 1);
         let p = plan(&h);
         assert!(p.iter().any(|x| x.item.contains("daemon_down") && x.disposition == Disposition::Manual));
+    }
+
+    #[test]
+    fn no_kubeconfig_means_no_gateway_look_at_any_cluster() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-gw-health-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".kube")).unwrap();
+        // the default kubeconfig and unrelated files are never used
+        std::fs::write(dir.join(".kube").join("config"), "x").unwrap();
+        std::fs::write(dir.join(".kube").join("other.yaml"), "x").unwrap();
+        assert!(gateway_items_for_known_clusters(&dir).is_empty());
+        assert!(gateway_items_for_known_clusters(&dir.join("missing")).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
