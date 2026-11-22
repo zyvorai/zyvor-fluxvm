@@ -28,6 +28,7 @@
 <meta name="twitter:image" content="https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/social/og.png">
 <meta name="twitter:image:alt" content="FluxVM: Real VMs on your Mac, from the menu bar. The window shows a Debian 13 guest running on Virtualization.framework.">
 <link rel="stylesheet" href="assets/landing.css">
+<link rel="stylesheet" href="assets/zyvor-buyer.css">
 <style>:root{--accent-btn:#0071e3;--accent-ink:#0071e3;--accent-grad-a:#0071e3;--accent-grad-b:#bf5af2}@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--accent-ink:#2997ff}}:root[data-theme="dark"]{--accent-ink:#2997ff}</style>
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"FluxVM for Mac","applicationCategory":"DeveloperApplication","operatingSystem":"macOS 27 (Apple silicon)","softwareVersion":"0.1.0","downloadUrl":"https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0","url":"https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/","description":"FluxVM for Mac: a notarized menu-bar app that bundles the FluxVM engine for Apple silicon. Start and stop the daemon, manage VMs and snapshots, open Studio. 30-day trial. Linux install and the engine are unchanged.","image":"https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/social/og.png","publisher":{"@type":"Organization","name":"Zyvor AI Labs Private Limited","url":"https://zyvor.dev"},"offers":[{"@type":"Offer","name":"FluxVM for Mac per Mac per year (India, incl. 18% GST)","price":"2999","priceCurrency":"INR","url":"https://zyvor.dev/buy"},{"@type":"Offer","name":"FluxVM for Mac per Mac per year (outside India, excl. tax)","price":"30","priceCurrency":"USD","url":"https://zyvor.dev/buy"}]}</script>
 </head>
@@ -45,9 +46,22 @@
   <h1 id="top">FluxVM</h1>
   <p class="tagline">Real VMs on your Mac, from the menu bar.</p>
   <p class="promise"><strong>FluxVM for Mac is a native menu-bar app that bundles the FluxVM engine.</strong> Start and stop the FluxVM daemon, list your VMs, start, stop and restart them, take and restore snapshots, and open the Studio console. Signed, notarized, with a 30-day trial. The FluxVM engine and CLI are source-available under the Zyvor Production License v1.0.</p>
-  <p class="cta"><a class="btn primary" href="#start">Download the 30-day trial</a><a class="textlink" href="#more-h">Learn more</a></p>
-  <p class="fine">macOS 27 · Apple silicon · notarized · The app runs without a key. For a 30-day trial key, email sales@zyvor.dev. The trial is soft: nothing is disabled and no data is lost. · engine: Zyvor Production License v1.0</p>
+  <div class="buyer" role="group" aria-label="Get FluxVM">
+    <div class="actions">
+      <a class="btn primary" href="https://github.com/zyvorai/zyvor-fluxvm/releases/download/mac-v0.1.0/FluxVM-Mac-0.1.0.dmg">Download FluxVM 0.1.0 for Mac</a>
+      <a class="btn ghost" href="https://zyvor.dev/contact?intent=trial&amp;product=fluxvm" rel="noopener">Ask for a 30-day trial</a>
+      <a class="btn ghost" href="https://zyvor.dev/buy" rel="noopener">Buy a license</a>
+    </div>
+    <p class="sub">FluxVM-Mac-0.1.0.dmg · 36 MB · <a href="https://zyvor.dev/pricing" rel="noopener">See current prices</a></p>
+    <p class="trust"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg><span><strong>Verified by Apple:</strong> Developer ID signed and notarized. This covers the Mac download, FluxVM-Mac-0.1.0.dmg, which is signed, notarized by Apple and stapled. The Linux engine and install script are not part of this notarization.</span></p>
+    <ul class="reqs"><li>Mac app for Apple silicon, macOS 27. It starts with a 30-day soft trial: nothing is disabled and no data is lost when it ends. The FluxVM engine is source-available under the Zyvor Production License.</li><li>This download is the FluxVM for Mac menu-bar app. Linux servers use the FluxVM engine and its install script, unchanged: see the <a href="https://github.com/zyvorai/zyvor-fluxvm#quickstart">Quickstart</a>.</li></ul>
+  </div>
   <figure class="shot hero-shot"><picture><img src="assets/img/hero-img-light-1200.webp" srcset="assets/img/hero-img-light-1200.webp 1200w, assets/img/hero-img-light-1800.webp 1800w" sizes="(min-width:1080px) 1040px, 100vw" width="2464" height="1664" alt="A macOS window with a Machines sidebar listing a Debian 13 guest that is running, and the guest&#x27;s console showing its boot log and login prompt." fetchpriority="high" decoding="async"></picture><figcaption>A Debian 13 guest on Virtualization.framework, captured on an Apple M4 running macOS 27. Not a window of the FluxVM for Mac menu-bar app.</figcaption></figure>
+</section>
+
+<section class="outcomes" aria-labelledby="outcomes-h">
+  <h2 id="outcomes-h">What FluxVM for Mac gives you.</h2>
+  <ul class="tiles"><li class="tile"><h3>No terminal needed</h3><p>Start and stop the FluxVM daemon from the menu bar. It is bundled with the app.</p></li><li class="tile"><h3>Your VMs, one click away</h3><p>List VMs, start, stop or restart them, and take and restore snapshots.</p></li><li class="tile"><h3>Quiet by design</h3><p>The app never locks anything and makes no network calls of its own.</p></li></ul>
 </section>
 
 <section class="band" aria-label="Overview">
@@ -83,14 +97,10 @@
   <p class="cta"><a class="btn primary" href="https://github.com/zyvorai/zyvor-fluxvm/releases/download/mac-v0.1.0/FluxVM-Mac-0.1.0.dmg">Download FluxVM-Mac-0.1.0.dmg</a><a class="textlink" href="https://github.com/zyvorai/zyvor-fluxvm/releases/tag/mac-v0.1.0">Release page</a><a class="textlink" href="https://zyvorai.github.io/zyvor-fluxvm/mac">Install guide</a></p>
 </section>
 
-<section class="pricing" id="pricing" aria-labelledby="pricing-h">
-  <div class="inner">
-  <h2 id="pricing-h" style="text-align:left">Licence and pricing.</h2>
-  <p class="lead">The FluxVM engine is source-available under the Zyvor Production License v1.0: non-production use is permitted, production use requires a commercial license. <b>FluxVM for Mac</b>, the notarized app, starts with a 30-day trial. The trial is soft: nothing is disabled and no data is lost when it ends. After the trial: <b>INR 2,999 per Mac per year</b> incl. GST in India (about <b>US$30</b> excl. tax outside India) for an individual, or <b>INR 2,549 per Mac per year</b> (about <b>US$26</b> excl. tax) for teams of 5 or more Macs (minimum 5 Macs, INR 12,745 or about US$129, by invoice).</p>
-<p class="fine">Prices: INR incl. 18% GST in India; US dollars excl. tax elsewhere (VAT, GST or sales tax added where applicable). Pay online by UPI, card or netbanking; international cards work (charged in rupees); or request a US-dollar invoice by bank transfer. Custom pricing: contact sales@zyvor.dev. To get a trial key or a licence, contact <a href="mailto:sales@zyvor.dev">sales@zyvor.dev</a>.</p>
-<p class="cta"><a class="btn primary" href="https://zyvor.dev/buy" rel="noopener">Buy FluxVM for Mac</a><a class="btn ghost" href="mailto:sales@zyvor.dev?subject=FluxVM%20for%20Mac%2030-day%20trial%20key">Start 30-day trial</a></p>
-<p class="fine"> Linux servers use the engine and its install script, unchanged.</p>
-  </div>
+<section class="buy-pointer" id="pricing" aria-labelledby="pricing-h">
+  <h2 id="pricing-h">Prices and licenses</h2>
+  <p>Current prices, in your currency where available, are on zyvor.dev. The FluxVM engine is source-available under the Zyvor Production License: non-production use is permitted and production use needs a commercial license. The Mac app starts with a 30-day soft trial. You can ask for a 30-day trial before you decide.</p>
+  <p class="cta"><a class="btn primary" href="https://zyvor.dev/buy" rel="noopener">Buy a license</a><a class="btn ghost" href="https://zyvor.dev/contact?intent=trial&amp;product=fluxvm" rel="noopener">Ask for a 30-day trial</a><a class="textlink" href="https://zyvor.dev/pricing" rel="noopener">See current prices</a></p>
 </section>
 
 <section class="faq" id="faq" aria-labelledby="faq-h">
@@ -106,7 +116,7 @@
 </main>
 <footer class="footer">
   <p><strong>FluxVM for Mac</strong> · FluxVM engine: Zyvor Production License v1.0. FluxVM for Mac: proprietary.</p>
-  <p class="links"><a href="https://zyvorai.github.io/zyvor-fluxvm/docs/">Docs</a><a href="https://zyvorai.github.io/zyvor-fluxvm/">FluxVM site</a><a href="https://github.com/zyvorai/zyvor-fluxvm">GitHub</a><a href="https://github.com/zyvorai/zyvor-fluxvm/releases">Releases</a><a href="https://github.com/zyvorai/zyvor-fluxvm/blob/main/LICENSE">LICENSE</a><a href="https://github.com/zyvorai/zyvor-fluxvm/blob/main/SECURITY.md">SECURITY</a><a href="mailto:sales@zyvor.dev">sales@zyvor.dev</a></p>
+  <p class="links"><a href="https://zyvorai.github.io/zyvor-fluxvm/docs/">Docs</a><a href="https://zyvorai.github.io/zyvor-fluxvm/">FluxVM site</a><a href="https://github.com/zyvorai/zyvor-fluxvm">GitHub</a><a href="https://github.com/zyvorai/zyvor-fluxvm/releases">Releases</a><a href="https://github.com/zyvorai/zyvor-fluxvm/blob/main/LICENSE">LICENSE</a><a href="https://github.com/zyvorai/zyvor-fluxvm/blob/main/SECURITY.md">SECURITY</a><a href="https://zyvor.dev/pricing">Prices</a><a href="mailto:sales@zyvor.dev">Support: sales@zyvor.dev</a></p>
   <p>© 2026 Zyvor AI Labs Private Limited · <a href="https://zyvor.dev">zyvor.dev</a></p>
 </footer>
 </body>
