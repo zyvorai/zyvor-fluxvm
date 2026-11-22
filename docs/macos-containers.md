@@ -220,6 +220,15 @@ at that service, naming what it already started).
   `PROJECT-SERVICE:latest`. Paths are relative to the compose file.
 - `profiles: [debug]` makes a service optional: `up --profile debug` (repeatable) or `COMPOSE_PROFILES=debug,x` selects it. The 2-VM
   refusal counts the **selected** services and says so; `down`, `ps`, `logs`, `exec` and `restart` consider every profile.
+- `up --no-build` never builds: a `build:` service whose image is missing is an error (`--build` and `--no-build` conflict).
+  `up --wait-healthy` waits after the last service started until every service whose image has a HEALTHCHECK is healthy (services
+  without one count as up once SSH answered). `--health-timeout SECS` (default 600, 0 = forever) bounds that wait and the
+  `service_healthy` dependency waits.
+- `depends_on` conditions are checked when the file is read: only `service_started` and `service_healthy` exist.
+  `service_completed_successfully` is refused (a macOS service is a VM that keeps running), as is any unknown condition, and a
+  dependency on a service in a profile that is not enabled says which `--profile` to pass.
+- Each instance `up` creates carries `fluxvm.mac.owner` and `fluxvm.mac.created` (never an expiry), so `mac reap --owner NAME` and
+  `mac ps` can tell whose project it is.
 - `mac compose logs SERVICE [--tail N] [-F]` (the VM's console log), `mac compose exec SERVICE [--user U] -- CMD` (over SSH) and
   `mac compose restart [SERVICE...]` act on the project's instances. `-f FILE` and `-p/--project-name NAME` work on every subcommand.
 

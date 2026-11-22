@@ -54,6 +54,15 @@ pub enum ComposeCommand {
         /// are built).
         #[arg(long)]
         build: bool,
+        /// Never build: fail when a service with `build:` has no image in the store.
+        #[arg(long, conflicts_with = "build")]
+        no_build: bool,
+        /// After everything started, wait until every service whose image has a HEALTHCHECK is healthy.
+        #[arg(long)]
+        wait_healthy: bool,
+        /// Seconds to wait for a `condition: service_healthy` dependency or for `--wait-healthy` (0 = forever).
+        #[arg(long, default_value_t = 600, value_name = "SECS")]
+        health_timeout: u64,
         /// Also start services with this profile (repeatable; also `COMPOSE_PROFILES=a,b`).
         #[arg(long = "profile", value_name = "NAME")]
         profile: Vec<String>,
@@ -392,6 +401,18 @@ pub fn resolve_with(
             Some(DependsOn::List(l)) => l.clone(),
             Some(DependsOn::Map(m)) => m.keys().cloned().collect(),
         };
+        check_conditions(name, svc)?;
+        for dep in &d {
+            if !active.iter().any(|(n, _)| *n == dep)
+                && let Some(p) = file.services.get(dep)
+            {
+                bail!(
+                    "service {name:?} depends_on {dep:?}, which is in the profile(s) {} that are not enabled: pass --profile {}",
+                    p.profiles.join(", "),
+                    p.profiles.first().map_or("NAME", String::as_str)
+                );
+            }
+        }
         deps.insert(name.clone(), d);
     }
     let order = start_order(&deps).map_err(|e| {
@@ -530,6 +551,40 @@ fn build_plan(b: &BuildSpec, base: &Path) -> BuildPlan {
             }
         }
     }
+}
+
+/// Whether a service's image must be built now: `--build` always, otherwise only when the image is missing; `--no-build` turns a
+/// missing image into an error.
+fn needs_build(build_flag: bool, no_build: bool, image_in_store: bool) -> Result<bool> {
+    Ok(match (build_flag, no_build, image_in_store) {
+        (true, _, _) => true,
+        (false, true, false) => bail!("the image is not in the store and --no-build was given"),
+        (false, false, false) => true,
+        (false, _, true) => false,
+    })
+}
+
+/// Refuse `depends_on` conditions that cannot mean anything here: a macOS service is a VM that keeps running, so
+/// `service_completed_successfully` is refused, as is any unknown condition (or key) instead of treating it as "started".
+fn check_conditions(service: &str, svc: &Service) -> Result<()> {
+    let Some(DependsOn::Map(m)) = &svc.depends_on else {
+        return Ok(());
+    };
+    for (dep, v) in m {
+        let ctx = || format!("service {service:?}: depends_on {dep:?}");
+        match v["condition"].as_str() {
+            None | Some("service_started" | "service_healthy") => {}
+            Some("service_completed_successfully") => bail!(
+                "{}: condition service_completed_successfully is not supported (a macOS service is a VM that keeps running; use service_started or service_healthy)",
+                ctx()
+            ),
+            Some(other) => bail!(
+                "{}: unknown condition {other:?} (service_started or service_healthy)",
+                ctx()
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// The `depends_on` entries asking for `condition: service_healthy`.
@@ -742,6 +797,9 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             wait,
             dry_run,
             build,
+            no_build,
+            wait_healthy,
+            health_timeout,
             profile,
         } => {
             let plan = load_with(file, project.as_deref(), &profiles_from_env(&profile))?;
@@ -763,7 +821,10 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
                 for s in &plan.services {
                     let Some(b) = &s.build else { continue };
-                    if !build && store.resolve(&s.spec.image).is_ok() {
+                    let present = store.resolve(&s.spec.image).is_ok();
+                    if !needs_build(build, no_build, present).with_context(|| {
+                        format!("service {:?}: image {}", s.service, s.spec.image)
+                    })? {
                         continue;
                     }
                     eprintln!("building {} from {} ...", s.spec.image, b.context.display());
@@ -783,7 +844,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 for dep in &s.healthy_deps {
                     let dep_name = format!("{}-{dep}", plan.project);
                     eprintln!("waiting for {dep_name} to be healthy ...");
-                    crate::mac_health::wait_instance_healthy(r, &dep_name, 600)
+                    crate::mac_health::wait_instance_healthy(r, &dep_name, health_timeout)
                         .await
                         .with_context(|| format!("service {:?} depends_on {dep:?} being healthy (started instances stay: `fluxctl mac compose down`)", s.service))?;
                 }
@@ -804,6 +865,19 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                     }
                 };
                 started.push(s.spec.name.clone());
+                // Ownership for `mac reap --owner`: who brought the project up and when (never an expiry).
+                let owner = crate::mac_reap::stamp(
+                    Some(&crate::mac_reap::current_user()),
+                    None,
+                    crate::mac_health::now_unix(),
+                );
+                r.call(
+                    reqwest::Method::PATCH,
+                    &format!("/v1/vms/{id}"),
+                    Some(owner),
+                )
+                .await
+                .with_context(|| format!("could not record the owner of {}", s.spec.name))?;
                 if command.is_some() || s.has_dependents || !s.spec.mounts.is_empty() {
                     let job = GuestJob {
                         user: s
@@ -821,6 +895,23 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                         .with_context(|| format!("service {:?} did not come up (instances left running: `fluxctl mac compose down`)", s.service))?;
                 }
                 println!("{}", s.spec.name);
+            }
+            if wait_healthy {
+                for s in &plan.services {
+                    // Only an image with a HEALTHCHECK can be waited for; the others are up once SSH answered.
+                    if mac_config::load(&store.resolve(&s.spec.image)?)?
+                        .healthcheck
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    eprintln!("waiting for {} to be healthy ...", s.spec.name);
+                    let waited =
+                        crate::mac_health::wait_instance_healthy(r, &s.spec.name, health_timeout)
+                            .await
+                            .with_context(|| format!("service {:?} did not become healthy (instances stay: `fluxctl mac compose down`)", s.service))?;
+                    eprintln!("{} is healthy (after {}s)", s.spec.name, waited.as_secs());
+                }
             }
             Ok(())
         }
@@ -1027,6 +1118,24 @@ mod tests {
             p(&["up", "--build", "--profile", "debug"]).unwrap().c,
             ComposeCommand::Up { build: true, .. }
         ));
+        assert!(matches!(
+            p(&[
+                "up",
+                "--no-build",
+                "--wait-healthy",
+                "--health-timeout",
+                "5"
+            ])
+            .unwrap()
+            .c,
+            ComposeCommand::Up {
+                no_build: true,
+                wait_healthy: true,
+                health_timeout: 5,
+                ..
+            }
+        ));
+        assert!(p(&["up", "--build", "--no-build"]).is_err());
         assert!(p(&["exec", "db"]).is_err());
     }
 
@@ -1167,6 +1276,29 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_conditions_and_dependencies_on_disabled_profiles_are_refused_with_a_reason() {
+        let e = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: service_completed_successfully\n  db:\n    image: d:1\n").unwrap_err().to_string();
+        assert!(
+            e.contains("service_completed_successfully") && e.contains("keeps running"),
+            "{e}"
+        );
+        let e = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: nope\n  db:\n    image: d:1\n").unwrap_err().to_string();
+        assert!(e.contains("unknown condition"), "{e}");
+        let e = res("services:\n  web:\n    image: w:1\n    depends_on: [dbg]\n  dbg:\n    image: d:1\n    profiles: [debug]\n").unwrap_err().to_string();
+        assert!(e.contains("--profile debug"), "{e}");
+    }
+
+    #[test]
+    fn needs_build_follows_the_flags_and_the_store() {
+        assert!(needs_build(true, false, true).unwrap());
+        assert!(needs_build(false, false, false).unwrap());
+        assert!(!needs_build(false, false, true).unwrap());
+        assert!(!needs_build(false, true, true).unwrap());
+        let e = needs_build(false, true, false).unwrap_err().to_string();
+        assert!(e.contains("--no-build"), "{e}");
+    }
+
+    #[test]
     fn only_dry_run_is_client_side() {
         let up = |dry_run| ComposeCommand::Up {
             file: None,
@@ -1174,6 +1306,9 @@ mod tests {
             wait: 1,
             dry_run,
             build: false,
+            no_build: false,
+            wait_healthy: false,
+            health_timeout: 600,
             profile: vec![],
         };
         assert!(up(true).is_client_side());
