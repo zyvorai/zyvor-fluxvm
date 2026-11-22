@@ -844,7 +844,8 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Rm { .. }
         | MacCommand::Exec { .. }
         | MacCommand::Host { .. }
-        | MacCommand::WaitReady { .. } => unreachable!("rejected above"),
+        | MacCommand::WaitReady { .. }
+        | MacCommand::Ops(_) => unreachable!("rejected above"),
     }
     Ok(())
 }

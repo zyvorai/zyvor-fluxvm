@@ -744,7 +744,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                         continue;
                     }
                     eprintln!("building {} from {} ...", s.spec.image, b.context.display());
-                    crate::mac_cmd::run_daemon(r, build_command(&s.spec.image, b, wait))
+                    Box::pin(crate::mac_cmd::run_daemon(r, build_command(&s.spec.image, b, wait)))
                         .await
                         .with_context(|| format!("service {:?}: build", s.service))?;
                 }

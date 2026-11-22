@@ -983,7 +983,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
             let unused = ops::unused_images(&store, &used)?;
             prune_store(&store, &unused, dry_run, force)?;
         }
-        MacMore::Compose { command } => crate::mac_compose::run_daemon(r, command).await?,
+        MacMore::Compose { command } => Box::pin(crate::mac_compose::run_daemon(r, command)).await?,
         _ => bail!("not an instance command"),
     }
     Ok(())
