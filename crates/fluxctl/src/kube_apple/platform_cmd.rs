@@ -109,6 +109,12 @@ pub enum PlatformCommand {
         #[command(flatten)]
         manifest: ManifestArgs,
     },
+    /// Envoy Gateway (pinned): the Gateway API CRDs and the controller. Then use `fluxctl gateway ...` from this Mac.
+    EnvoyGateway {
+        name: String,
+        #[command(flatten)]
+        manifest: ManifestArgs,
+    },
     /// A stock metrics-server (pinned), for a cluster created with metrics-server disabled (`--addons minimal`).
     MetricsServer {
         name: String,
@@ -177,7 +183,7 @@ pub fn run_offline(cmd: PlatformCommand) -> Result<()> {
 fn dry_run_json(plan: &platform::PlatformPlan) -> serde_json::Value {
     serde_json::json!({
         "dropin": plan.dropin, "all_nodes": plan.all_files.iter().map(|f| &f.path).collect::<Vec<_>>(),
-        "servers": plan.server_files.iter().map(|f| &f.path).collect::<Vec<_>>(), "notes": plan.notes,
+        "servers": plan.server_files.iter().map(|f| &f.path).collect::<Vec<_>>(), "install": plan.install, "notes": plan.notes,
     })
 }
 
@@ -231,6 +237,13 @@ pub async fn run<H: Host>(h: &H, store: &Store, cmd: PlatformCommand) -> Result<
             let _lock = store.lock(&name)?;
             json(&recipes::cert_manager(&HostRemote { h, st: &st }, src).await?)
         }
+        PlatformCommand::EnvoyGateway { name, manifest } => {
+            let st = store.require(&name)?;
+            local(&st)?;
+            let src = manifest.src(&pins::ENVOY_GATEWAY)?;
+            let _lock = store.lock(&name)?;
+            json(&recipes::envoy_gateway(&HostRemote { h, st: &st }, src).await?)
+        }
         PlatformCommand::MetricsServer { name, kubelet_insecure_tls, manifest } => {
             let st = store.require(&name)?;
             local(&st)?;
@@ -279,12 +292,28 @@ pub async fn run<H: Host>(h: &H, store: &Store, cmd: PlatformCommand) -> Result<
 
 // ---------------------------------------------------------------- hooks for the other commands
 
-/// `create` with platform flags: after the cluster is up, applies the plan to every node and restarts them.
+/// `create` with platform flags: after the cluster is up, applies the plan to every node and restarts them, then installs
+/// the pinned add-ons the plan names (Envoy Gateway).
 pub async fn after_create<H: Host>(h: &H, store: &Store, name: &str, plan: &platform::PlatformPlan) -> Result<platform::ApplyReport> {
     let st = store.require(name)?;
-    platform::apply(&HostRemote { h, st: &st }, plan, true).await.map_err(|e| {
+    let r = HostRemote { h, st: &st };
+    let retry = |e: anyhow::Error| {
         anyhow::anyhow!("{name} was created, but the platform settings were not all applied: {e:#}; re-run `fluxctl kube apple platform apply {name} --restart` with the same flags")
-    })
+    };
+    let mut rep = if plan.dropin.is_some() || !plan.all_files.is_empty() || !plan.server_files.is_empty() {
+        platform::apply(&r, plan, true).await.map_err(retry)?
+    } else {
+        platform::ApplyReport { notes: plan.notes.clone(), ..Default::default() }
+    };
+    for add in &plan.install {
+        // Only "envoy-gateway" exists; the plan builder never produces another name.
+        let done = recipes::envoy_gateway(&r, PinSrc::Download).await.map_err(|e| {
+            anyhow::anyhow!("{name} was created, but Envoy Gateway was not installed: {e:#}; run `fluxctl kube apple platform envoy-gateway {name}`")
+        })?;
+        rep.installed.push(format!("{add} {}", done.version));
+        rep.notes.extend(done.notes);
+    }
+    Ok(rep)
 }
 
 pub async fn upgrade_channel<H: Host>(h: &H, store: &Store, name: &str, channel: String, allow_downgrade: bool, no_backup: bool, drain: bool) -> Result<()> {

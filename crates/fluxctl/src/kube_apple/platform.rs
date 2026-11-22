@@ -119,7 +119,10 @@ pub async fn wait_up<R: Remote>(r: &R, node: &str, role: Role) -> Result<()> {
 // ---------------------------------------------------------------- the plan
 
 /// Bundled-component profiles for `--addons`.
-pub const ADDON_PROFILES: [&str; 3] = ["default", "minimal", "metallb"];
+pub const ADDON_PROFILES: [&str; 4] = ["default", "minimal", "metallb", "envoy-gateway"];
+
+/// The profile that also installs Envoy Gateway (pinned) once the cluster is up.
+pub const ENVOY_GATEWAY_PROFILE: &str = "envoy-gateway";
 
 /// The components a profile turns off (Traefik is always off in `kube apple`).
 pub fn profile_disables(profile: &str) -> Result<Vec<String>> {
@@ -129,6 +132,9 @@ pub fn profile_disables(profile: &str) -> Result<Vec<String>> {
         "minimal" => vec!["servicelb".into(), "local-storage".into(), "metrics-server".into()],
         // MetalLB replaces ServiceLB.
         "metallb" => vec!["servicelb".into()],
+        // Nothing is turned off: Envoy's LoadBalancer Services are answered by ServiceLB. Envoy Gateway itself is installed
+        // after create (see `PlatformPlan::install`).
+        "envoy-gateway" => vec![],
         other => bail!("--addons {other:?} must be one of: {}", ADDON_PROFILES.join(", ")),
     })
 }
@@ -148,7 +154,7 @@ pub struct PlatformArgs {
     /// With --harden cis: the cluster-wide Pod Security level (default restricted; kube-system is exempt).
     #[arg(long, value_parser = ["baseline", "restricted"], requires = "harden")]
     pub psa_level: Option<String>,
-    /// Bundled add-on profile: default (k3s as shipped), minimal (no ServiceLB, local-storage or metrics-server), metallb (no ServiceLB).
+    /// Bundled add-on profile: default (k3s as shipped), minimal (no ServiceLB, local-storage or metrics-server), metallb (no ServiceLB), envoy-gateway (as shipped, and Envoy Gateway installed from a pinned manifest after create).
     #[arg(long, value_parser = ADDON_PROFILES)]
     pub addons: Option<String>,
     /// Make room for Cilium: no flannel, no k3s network policy. Cilium is installed by you afterwards (a command is printed).
@@ -182,6 +188,8 @@ pub struct PlatformPlan {
     pub server_files: Vec<GuestFile>,
     /// Components the profile disables: merged into the cluster's shared flags by `create`, and checked by `apply`.
     pub disable: Vec<String>,
+    /// Pinned add-ons to install once the cluster is up (`create` only): `envoy-gateway`.
+    pub install: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -221,6 +229,9 @@ pub fn plan(a: &PlatformArgs, registries: Option<&str>) -> Result<PlatformPlan> 
     let mut c = K3sConfig::default();
     if let Some(prof) = &a.addons {
         p.disable = profile_disables(prof)?;
+        if prof == ENVOY_GATEWAY_PROFILE {
+            p.install.push("envoy-gateway".into());
+        }
     }
     if a.cilium {
         c.merge(&kube_addons::cilium(a.cilium_kube_proxy_replacement)?)?;
@@ -279,6 +290,8 @@ fn kube_registry_embedded_all() -> Result<String> {
 pub struct ApplyReport {
     pub wrote: Vec<String>,
     pub restarted: Vec<String>,
+    /// Pinned add-ons installed after the settings were applied.
+    pub installed: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -424,7 +437,16 @@ mod tests {
         assert_eq!(profile_disables("minimal").unwrap(), ["servicelb", "local-storage", "metrics-server"]);
         assert_eq!(profile_disables("metallb").unwrap(), ["servicelb"]);
         assert!(profile_disables("default").unwrap().is_empty());
+        assert!(profile_disables("envoy-gateway").unwrap().is_empty());
         assert!(profile_disables("fancy").is_err());
+    }
+
+    #[test]
+    fn envoy_gateway_profile_installs_and_disables_nothing() {
+        let p = plan(&PlatformArgs { addons: Some("envoy-gateway".into()), ..args() }, None).unwrap();
+        assert_eq!(p.install, ["envoy-gateway"]);
+        assert!(p.disable.is_empty() && p.dropin.is_none());
+        assert!(plan(&PlatformArgs { addons: Some("metallb".into()), ..args() }, None).unwrap().install.is_empty());
     }
 
     #[test]

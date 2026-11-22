@@ -167,6 +167,23 @@ pub async fn metrics_server<R: Remote>(r: &R, src: PinSrc, kubelet_insecure_tls:
     Ok(rep)
 }
 
+// ---------------------------------------------------------------- Envoy Gateway
+
+/// Envoy Gateway (pinned `install.yaml`), then waits for its controller. It brings the Gateway API CRDs with it. Use
+/// `fluxctl gateway demo` and `fluxctl gateway publish` from the Mac afterwards (docs/gateway.md).
+pub async fn envoy_gateway<R: Remote>(r: &R, src: PinSrc) -> Result<RecipeReport> {
+    let mut rep = RecipeReport { recipe: "envoy-gateway".into(), version: pins::ENVOY_GATEWAY.version.into(), ..Default::default() };
+    apply_pin(r, &pins::ENVOY_GATEWAY, src).await?;
+    rep.applied.push(format!("envoy-gateway {}", pins::ENVOY_GATEWAY.version));
+    r.run_server(
+        &kubectl("envoy-gateway-rollout", "-n envoy-gateway-system wait deployment/envoy-gateway --for=condition=Available --timeout=300s"),
+        None,
+    )
+    .await?;
+    rep.notes.push("no GatewayClass or Gateway exists yet; create your own, or try `fluxctl gateway demo apply` (see docs/gateway.md). Envoy Services of type LoadBalancer are answered by ServiceLB or MetalLB".into());
+    Ok(rep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::platform::fake::FakeRemote;
@@ -251,5 +268,16 @@ spec:\n  ipAddressPools:\n  - lan\n"
         let r = FakeRemote::cluster(1, 0);
         metrics_server(&r, PinSrc::Download, true, &d).await.unwrap();
         assert!(r.log.borrow().iter().any(|(_, s, _)| s.contains("--kubelet-insecure-tls") && s.contains("patch deployment metrics-server")));
+    }
+
+    #[tokio::test]
+    async fn envoy_gateway_installs_pinned_manifest_then_waits_for_the_controller() {
+        let r = FakeRemote::cluster(1, 0);
+        let rep = envoy_gateway(&r, PinSrc::Download).await.unwrap();
+        assert_eq!(r.ops(), ["c-s1:pin-apply", "c-s1:envoy-gateway-rollout"]);
+        let log = r.log.borrow();
+        assert!(log[0].1.contains(pins::ENVOY_GATEWAY.sha256) && log[0].1.contains("--server-side"));
+        assert!(log[1].1.contains("deployment/envoy-gateway") && log[1].1.contains("envoy-gateway-system"));
+        assert_eq!(rep.version, "v1.10.0");
     }
 }

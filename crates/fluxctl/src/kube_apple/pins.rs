@@ -81,7 +81,19 @@ pub const METRICS_SERVER: Pin = Pin {
     namespace: None,
 };
 
-pub const ALL: [Pin; 7] = [SUC_CRD, SUC, FLUX, ARGOCD, METALLB, CERT_MANAGER, METRICS_SERVER];
+/// Envoy Gateway's release `install.yaml` (Gateway API CRDs, Envoy Gateway CRDs, the controller in `envoy-gateway-system`).
+/// The SHA-256 was computed from a download of this URL and matches the digest GitHub publishes for the release asset.
+/// About 4 MiB, so it needs server-side apply.
+pub const ENVOY_GATEWAY: Pin = Pin {
+    key: "envoy-gateway",
+    version: "v1.10.0",
+    url: "https://github.com/envoyproxy/gateway/releases/download/v1.10.0/install.yaml",
+    sha256: "f87f4d59b983aa760da52a2a0002c612028106fe69beefdf3d30cfb03905944e",
+    server_side: true,
+    namespace: None,
+};
+
+pub const ALL: [Pin; 8] = [SUC_CRD, SUC, FLUX, ARGOCD, METALLB, CERT_MANAGER, METRICS_SERVER, ENVOY_GATEWAY];
 
 /// Where the manifest comes from in [`apply_script`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
