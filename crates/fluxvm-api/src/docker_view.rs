@@ -282,6 +282,31 @@ pub(crate) async fn get_docker(
     Ok(Json(view(vm, &default_socket()).await?))
 }
 
+/// `GET /v1/docker/context` (admin): whether the `fluxvm` Docker CLI context exists for the user the daemon runs as, is current,
+/// and whether the engine socket answers. Read-only; `fluxctl docker context install` creates it.
+pub(crate) async fn get_context(Extension(role): Extension<Role>) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let socket = default_socket();
+    let dir = crate::docker_context::config_dir_from_env();
+    let answers = matches!(engine_get(&socket, "/_ping").await, Ok((s, b)) if s.is_success() && b.starts_with(b"OK"));
+    let path = std::env::var_os("PATH");
+    let cli = crate::docker_context::docker_cli_in(path.as_deref()).is_some();
+    let (env_context, env_host) = (
+        std::env::var("DOCKER_CONTEXT").ok(),
+        std::env::var("DOCKER_HOST").ok(),
+    );
+    Ok(Json(crate::docker_context::status(
+        &crate::docker_context::StatusInput {
+            dir: dir.as_deref(),
+            socket: &socket,
+            socket_answers: answers,
+            docker_cli: cli,
+            env_context: env_context.as_deref(),
+            env_host: env_host.as_deref(),
+        },
+    )))
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct LogQuery {
     tail: Option<u32>,

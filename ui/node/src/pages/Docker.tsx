@@ -2,11 +2,36 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useMemo, useState } from 'react';
-import { Play, RotateCw, ScrollText, Square } from 'lucide-react';
+import { Copy, Play, RotateCw, ScrollText, Square } from 'lucide-react';
 import type { Notify } from '../App';
 import { ContainerWindow } from './ContainerWindow';
+import { CopyCmd } from './Images';
 import { Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
-import { type DockerAction, type DockerContainer, type DockerView, actionDone, ageSince, containerTone, filterContainers, fmtSize, portsText, summarize } from '../lib/docker';
+import { type DockerAction, type DockerContainer, type DockerContext, type DockerView, actionDone, contextCommand, contextLabel, contextTone, ageSince, containerTone, filterContainers, fmtSize, portsText, summarize } from '../lib/docker';
+
+/** The `fluxvm` docker CLI context: whether `docker --context fluxvm ps` works and whether `docker` uses it by default. Read-only; the command is copied. */
+function DockerContextCard({ notify }: { notify: Notify }) {
+  const ctx = usePoll(async () => await api.get<DockerContext>('/v1/docker/context'), 10000);
+  const c = ctx.data;
+  if (!c) return ctx.error && !/admin/i.test(ctx.error.message) ? <Card title="Docker context"><p className="fx-muted">Could not read the docker context: {ctx.error.message}. An older FluxVM daemon does not have it; run <code className="fx-mono">fluxctl docker context status</code> instead.</p></Card> : null;
+  const act = contextCommand(c);
+  const copy = (cmd: string) => navigator.clipboard.writeText(cmd).then(() => notify('Copied: ' + cmd), () => notify('Copy blocked by the browser', 'bad'));
+  return (
+    <Card title="Docker context" action={<CopyCmd notify={notify} cmd="fluxctl docker context status" />}>
+      <p className="fx-muted">
+        <Pill tone={contextTone(c.state)}>{contextLabel(c.state)}</Pill> {c.summary}
+      </p>
+      {c.docker_cli_hint ? <p className="fx-muted">{c.docker_cli_hint}</p> : null}
+      {c.state === 'ready' || c.state === 'current' ? <p className="fx-muted">Try <code className="fx-mono">{c.try}</code></p> : null}
+      {act ? (
+        <div className="fx-actions">
+          <Button onClick={() => void copy(act.command)}><Copy size={14} /> {act.label}</Button>
+          <span className="fx-muted">Studio only shows this. Run <code className="fx-mono">{act.command}</code> in a terminal on this machine (the button copies it).</span>
+        </div>
+      ) : null}
+    </Card>
+  );
+}
 
 /** The Docker engine `fluxctl docker` runs in its own VM: containers and images, a container's log, and start, stop and restart. */
 export function DockerPage({ notify }: { notify: Notify }) {
@@ -37,6 +62,7 @@ export function DockerPage({ notify }: { notify: Notify }) {
   return (
     <>
       <Hero eyebrow="Docker" title="The engine on this host," accent="containers included." lede="The Docker engine fluxctl docker runs in its own VM. Start, stop and restart a container, read its log; use the docker CLI for the rest." />
+      {forbidden ? null : <DockerContextCard notify={notify} />}
       {view.loading && !d ? (
         <Skeleton h={160} />
       ) : forbidden ? (

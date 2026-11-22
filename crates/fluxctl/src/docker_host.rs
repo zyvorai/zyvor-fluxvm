@@ -425,6 +425,7 @@ pub async fn up<A: VmApi>(api: &A, o: &EngineOptions) -> Result<PathBuf> {
         Some(pid) => eprintln!("forwarding the guest's Docker socket (pid {pid})"),
         None => eprintln!("the socket already answers"),
     }
+    crate::docker_context_cmd::auto_install(&engine.socket);
     Ok(engine.socket)
 }
 

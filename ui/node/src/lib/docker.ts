@@ -99,3 +99,38 @@ export const actionDone = (name: string, action: DockerAction, changed: boolean)
   if (!changed) return action === 'start' ? `${name} was already running` : `${name} was already stopped`;
   return action === 'start' ? `${name} started` : action === 'stop' ? `${name} stopped` : `${name} restarted`;
 };
+
+export type DockerContextState = 'no-docker-cli' | 'not-installed' | 'stale' | 'socket-down' | 'ready' | 'current';
+
+/** What `GET /v1/docker/context` answers: the `fluxvm` docker CLI context, read-only. */
+export type DockerContext = {
+  name: string;
+  state: DockerContextState;
+  summary: string;
+  /** The fluxctl command that fixes or advances the state; null when there is nothing to do. */
+  next: string | null;
+  docker_cli: boolean;
+  docker_cli_hint: string | null;
+  exists: boolean;
+  current: boolean;
+  overridden_by: string | null;
+  socket: string;
+  socket_answers: boolean;
+  try: string;
+};
+
+/** The command to switch `docker` to FluxVM's engine: install the context if it is missing, then make it current. */
+export const USE_COMMAND = 'fluxctl docker context install --use';
+
+export const contextTone = (s: DockerContextState): Tone => (s === 'current' ? 'ok' : s === 'ready' ? 'info' : s === 'socket-down' || s === 'stale' ? 'warn' : 'idle');
+
+export const contextLabel = (s: DockerContextState): string =>
+  ({ current: 'in use', ready: 'ready', 'socket-down': 'engine not answering', stale: 'out of date', 'not-installed': 'not created', 'no-docker-cli': 'no docker command' })[s];
+
+/** The one command the page offers for a state: `Use FluxVM for docker` unless it is already current, or the engine must be started first. */
+export const contextCommand = (c: Pick<DockerContext, 'state' | 'next'>): { label: string; command: string } | null => {
+  if (c.state === 'current') return null;
+  if (c.state === 'socket-down') return { label: 'Start the engine', command: c.next ?? 'fluxctl docker up' };
+  if (c.state === 'no-docker-cli') return null;
+  return { label: 'Use FluxVM for docker', command: USE_COMMAND };
+};

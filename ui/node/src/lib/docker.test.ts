@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type DockerContainer, actionDone, containerTone, filterContainers, fmtSize, portsText, summarize } from './docker';
+import { type DockerContainer, USE_COMMAND, actionDone, contextCommand, contextLabel, contextTone, containerTone, filterContainers, fmtSize, portsText, summarize } from './docker';
 
 const c = (name: string, state: string, status: string, image = 'nginx'): DockerContainer => ({ id: name + '0000', name, image, command: '', state, status, created: 0, ports: [] });
 
@@ -53,5 +53,26 @@ describe('actionDone', () => {
     expect(actionDone('web', 'restart', true)).toBe('web restarted');
     expect(actionDone('web', 'start', false)).toBe('web was already running');
     expect(actionDone('web', 'stop', false)).toBe('web was already stopped');
+  });
+});
+
+describe('docker context', () => {
+  it('offers Use FluxVM for docker unless it is current, and the engine start when the socket is down', () => {
+    expect(contextCommand({ state: 'not-installed', next: 'fluxctl docker context install' })).toEqual({ label: 'Use FluxVM for docker', command: USE_COMMAND });
+    expect(contextCommand({ state: 'ready', next: null })?.command).toBe('fluxctl docker context install --use');
+    expect(contextCommand({ state: 'stale', next: null })?.label).toBe('Use FluxVM for docker');
+    expect(contextCommand({ state: 'socket-down', next: 'fluxctl docker up' })).toEqual({ label: 'Start the engine', command: 'fluxctl docker up' });
+    expect(contextCommand({ state: 'socket-down', next: null })?.command).toBe('fluxctl docker up');
+    expect(contextCommand({ state: 'current', next: null })).toBeNull();
+    expect(contextCommand({ state: 'no-docker-cli', next: null })).toBeNull();
+  });
+  it('colours and words each state', () => {
+    expect(contextTone('current')).toBe('ok');
+    expect(contextTone('ready')).toBe('info');
+    expect(contextTone('socket-down')).toBe('warn');
+    expect(contextTone('stale')).toBe('warn');
+    expect(contextTone('not-installed')).toBe('idle');
+    expect(contextLabel('current')).toBe('in use');
+    expect(contextLabel('no-docker-cli')).toBe('no docker command');
   });
 });
