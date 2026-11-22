@@ -18,6 +18,12 @@ pub struct MacCode {
     pub signatures: &'static [&'static str],
 }
 
+/// An error that ends with the command that explains it: `fluxctl explain CODE`.
+pub fn coded(message: impl Into<String>, code: &str) -> anyhow::Error {
+    debug_assert!(CODES.iter().any(|c| c.code == code), "unknown code {code}");
+    anyhow::anyhow!("{}\n  more: fluxctl explain {code}", message.into())
+}
+
 pub const CODES: &[MacCode] = &[
     MacCode {
         code: "MAC_SLOT_LIMIT",
@@ -371,6 +377,115 @@ pub const CODES: &[MacCode] = &[
             "no instance of project",
             "no instances for project",
         ],
+    },
+    MacCode {
+        code: "MAC_FLAG_NOT_APPLICABLE",
+        status: None,
+        summary: "A Docker flag (`--network`, `--platform`) that has no meaning for a macOS guest was used.",
+        causes: &[
+            "a macOS VM has one NAT network from Virtualization.framework, so there is no network to choose",
+            "every `fluxctl mac` image is macOS on Apple silicon, so there is no platform to choose",
+        ],
+        fixes: &[
+            "leave the flag out",
+            "to reach a service in the guest publish a port: `fluxctl mac run -p HOST:GUEST ...`, and find the guest address with `fluxctl mac ps`",
+        ],
+        aliases: &["no-network-flag", "no-platform-flag"],
+        signatures: &["mac_flag_not_applicable"],
+    },
+    MacCode {
+        code: "MAC_PULL_POLICY",
+        status: None,
+        summary: "`--pull` could not be followed: the image is missing and cannot be pulled, or the pull failed.",
+        causes: &[
+            "`--pull never` and the image is not in the local store",
+            "the name is a local name (no registry host), so there is nowhere to pull it from",
+            "the registry refused the login, or the name or tag does not exist there, or the network is down",
+        ],
+        fixes: &[
+            "see what you have: `fluxctl mac images`",
+            "pull it yourself to see the registry's answer: `fluxctl mac pull REGISTRY/REPO:TAG` (credentials: FLUXVM_REGISTRY_USER and FLUXVM_REGISTRY_PASSWORD)",
+            "run the local copy: `--pull missing` (the default) or `--pull never`",
+            "add a local template: `fluxctl mac import DIR NAME:TAG`",
+        ],
+        aliases: &["pull-policy", "pull-failed"],
+        signatures: &["mac_pull_policy"],
+    },
+    MacCode {
+        code: "MAC_HEALTHCHECK_FLAGS",
+        status: None,
+        summary: "The `--health-*` or `--entrypoint` flags are inconsistent or malformed.",
+        causes: &[
+            "`--health-interval` and the like were given for an image that has no HEALTHCHECK and without `--health-cmd`",
+            "`--no-healthcheck` was combined with `--health-cmd`",
+            "a duration is not `30s`/`2m`/`1h`, or an interval, timeout or retry count is 0",
+            "`--entrypoint` is an empty array or not valid JSON",
+        ],
+        fixes: &[
+            "say what to run: `--health-cmd \"curl -f http://localhost:8080/health\"`",
+            "use either `--no-healthcheck` or the `--health-*` flags, not both",
+            "write durations like `30s`, `2m`; retries at least 1",
+            "check the result with `fluxctl mac health NAME` once the instance runs",
+        ],
+        aliases: &["healthcheck-flags", "health-flags"],
+        signatures: &["mac_healthcheck_flags"],
+    },
+    MacCode {
+        code: "MAC_CREATE_RUN_ONLY",
+        status: None,
+        summary: "`mac create` was given a command, environment or other option that only `mac run` can use.",
+        causes: &[
+            "a macOS VM stores no command or environment: `mac run` sends them over SSH when it starts the VM",
+            "`CMD`, `-e`, `--env-file`, `-w`, `-d`, `--entrypoint` or `--rm` were passed to `mac create`",
+        ],
+        fixes: &[
+            "create the VM without them, start it, and run the command: `fluxctl mac create --name ci IMG`, `fluxctl mac start ci`, `fluxctl mac exec ci -e K=V -- CMD`",
+            "or do it all at once with `fluxctl mac run ...`",
+        ],
+        aliases: &["create-run-only", "create-flags"],
+        signatures: &["mac_create_run_only"],
+    },
+    MacCode {
+        code: "MAC_UPDATE_NOT_SUPPORTED",
+        status: None,
+        summary: "The CPU count or memory of an existing macOS VM cannot be changed.",
+        causes: &[
+            "they are fixed when the VM is created, and the daemon only lets you change an instance's name and labels",
+            "this holds for a running and for a stopped instance",
+        ],
+        fixes: &[
+            "keep the disk and make a new instance: `fluxctl mac stop NAME`, `fluxctl mac commit NAME NAME-img:1`, `fluxctl mac rm NAME`, `fluxctl mac create --name NAME --cpus N --memory SIZE NAME-img:1`",
+            "what `mac update` can change: `--restart POLICY` and `--label KEY=VALUE`",
+        ],
+        aliases: &["update-not-supported", "resize", "update-resources"],
+        signatures: &["mac_update_not_supported"],
+    },
+    MacCode {
+        code: "MAC_KILL_SIGNAL",
+        status: None,
+        summary: "`mac kill --signal` was given a signal other than KILL.",
+        causes: &[
+            "a macOS VM is not a process you can signal: `mac kill` ends its runner process at once, which is KILL",
+        ],
+        fixes: &[
+            "leave `--signal` out, or use `-s KILL`",
+            "to ask the guest to shut down cleanly: `fluxctl mac stop NAME`",
+            "to signal a process inside the guest: `fluxctl mac exec NAME -- kill -TERM PID`",
+        ],
+        aliases: &["kill-signal"],
+        signatures: &["mac_kill_signal"],
+    },
+    MacCode {
+        code: "MAC_KILL_UNAVAILABLE",
+        status: Some(404),
+        summary: "The daemon you are talking to has no kill call.",
+        causes: &["the daemon is older than this fluxctl (the call is `POST /v1/vms/{id}/kill`)"],
+        fixes: &[
+            "stop the instance cleanly instead: `fluxctl mac stop NAME`",
+            "update the daemon to the same version as fluxctl, then retry",
+        ],
+        aliases: &["kill-unavailable"],
+        signatures: &["mac_kill_unavailable"],
     },
 ];
 

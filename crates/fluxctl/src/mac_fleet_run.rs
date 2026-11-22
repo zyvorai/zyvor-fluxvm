@@ -180,6 +180,7 @@ pub fn mac_run_fleet(
             unsupported.push(flag);
         }
     }
+    unsupported.extend(opts.life.used_flags());
     if !unsupported.is_empty() {
         bail!(
             "{} cannot be used with --fleet (the guest is created on another Mac, runs CMD and is deleted); use `fluxctl mac run` on that Mac",

@@ -20,6 +20,11 @@ use std::time::{Duration, Instant};
 pub const HEALTH_LABEL: &str = "fluxvm.mac.health";
 pub const HEALTH_STREAK_LABEL: &str = "fluxvm.mac.health.streak";
 pub const HEALTH_AT_LABEL: &str = "fluxvm.mac.health.checked";
+/// The healthcheck this instance was made with (`mac run|create --health-cmd ...`): the JSON of a [`Healthcheck`], or `none` for
+/// `--no-healthcheck`. It wins over the image's HEALTHCHECK.
+pub const HEALTHCHECK_LABEL: &str = "fluxvm.mac.healthcheck";
+/// Unix seconds of the last start, for `--health-start-period`.
+pub const HEALTH_START_LABEL: &str = "fluxvm.mac.health.start";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -186,11 +191,53 @@ pub(crate) async fn probe_vm<P: Prober>(
             Duration::from_secs(hc.timeout_secs.max(1)),
         )
         .await;
-    Some(next(from_labels(vm).as_ref(), hc, ok, now))
+    let prev = from_labels(vm);
+    if !ok && in_start_period(vm, hc, prev.as_ref(), now) {
+        // Docker's start period: a failure while the instance is still booting does not count against `retries`.
+        return Some(Health {
+            status: Status::Starting,
+            streak: 0,
+            checked_unix: now,
+        });
+    }
+    Some(next(prev.as_ref(), hc, ok, now))
 }
 
-/// The healthcheck of the image an instance was made from, when the image is still in the store.
+/// True while `hc.start_period_secs` has not passed since the instance last started, and it has not been healthy yet.
+pub fn in_start_period(vm: &Value, hc: &Healthcheck, prev: Option<&Health>, now: u64) -> bool {
+    if hc.start_period_secs == 0 || prev.is_some_and(|p| p.status == Status::Healthy) {
+        return false;
+    }
+    vm["labels"][HEALTH_START_LABEL]
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+        .is_some_and(|start| now < start.saturating_add(hc.start_period_secs))
+}
+
+/// What the label says about this instance's healthcheck: `None` when it has no override, `Some(None)` for
+/// `--no-healthcheck`, `Some(Some(hc))` for `--health-cmd`.
+pub fn override_of(vm: &Value) -> Option<Option<Healthcheck>> {
+    let v = vm["labels"][HEALTHCHECK_LABEL].as_str()?;
+    if v == "none" {
+        return Some(None);
+    }
+    serde_json::from_str(v).ok().map(Some)
+}
+
+/// The label value for an override (see [`HEALTHCHECK_LABEL`]).
+pub fn override_label(hc: Option<&Healthcheck>) -> String {
+    match hc {
+        None => "none".into(),
+        Some(h) => serde_json::to_string(h).unwrap_or_else(|_| "none".into()),
+    }
+}
+
+/// The healthcheck of an instance: the one it was made with (`--health-cmd`, or none with `--no-healthcheck`), else the one
+/// of the image it was made from, when the image is still in the store.
 pub fn healthcheck_of(vm: &Value) -> Option<Healthcheck> {
+    if let Some(o) = override_of(vm) {
+        return o;
+    }
     let image = vm["labels"][crate::mac_inspect::IMAGE_LABEL].as_str()?;
     let store = crate::mac_store::Store::open(crate::mac_store::default_root().ok()?).ok()?;
     crate::mac_config::load(&store.resolve(image).ok()?)
@@ -308,7 +355,7 @@ pub async fn wait_instance_healthy(
     let vm = crate::mac_cmd::find_instance(r, name).await?;
     let Some(hc) = healthcheck_of(&vm) else {
         bail!(
-            "{name}: its image has no HEALTHCHECK (or is no longer in the store), so there is nothing to wait for. Add `HEALTHCHECK CMD ...` to the Macfile"
+            "{name} has no healthcheck, so there is nothing to wait for: its image has no HEALTHCHECK (or is no longer in the store), or it was made with --no-healthcheck. Add `HEALTHCHECK CMD ...` to the Macfile, or make the instance with `fluxctl mac run --health-cmd \"CMD\" ...`"
         );
     };
     let mut src = DaemonSource {
@@ -334,7 +381,9 @@ pub async fn wait_instance_healthy(
 pub async fn health_once(r: &crate::remote::Remote, name: &str, json_out: bool) -> Result<()> {
     let vm = crate::mac_cmd::find_instance(r, name).await?;
     let Some(hc) = healthcheck_of(&vm) else {
-        bail!("{name}: its image has no HEALTHCHECK (or is no longer in the store)");
+        bail!(
+            "{name} has no healthcheck: its image has no HEALTHCHECK (or is no longer in the store), or it was made with --no-healthcheck. Add `HEALTHCHECK CMD ...` to the Macfile, or make the instance with `fluxctl mac run --health-cmd \"CMD\" ...`"
+        );
     };
     let id = vm["id"].as_str().unwrap_or_default();
     let Some(h) = probe_vm(&mut SshProber, &vm, &hc, &user_of(&vm), now_unix()).await else {
@@ -378,6 +427,7 @@ mod tests {
             interval_secs: 30,
             timeout_secs: 5,
             retries,
+            start_period_secs: 0,
         }
     }
 

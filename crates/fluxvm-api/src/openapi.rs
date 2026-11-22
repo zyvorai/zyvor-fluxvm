@@ -96,6 +96,7 @@ fn ops() -> Vec<Op> {
         op("delete", "/v1/vms/{id}", "Delete a VM", VMS).status("204"),
         op("post", "/v1/vms/{id}/start", "Start a VM", VMS).returns("VmRecord"),
         op("post", "/v1/vms/{id}/stop", "Stop a VM", VMS).returns("VmRecord"),
+        op("post", "/v1/vms/{id}/kill", "Kill a VM at once, with no guest shutdown (admin; prefer stop)", VMS).returns("VmRecord"),
         op(
             "post",
             "/v1/vms/{id}/hibernate",

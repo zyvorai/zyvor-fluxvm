@@ -671,6 +671,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(download_vm_memory_dump),
         )
         .route("/v1/vms/{id}/stop", post(stop_vm))
+        .route("/v1/vms/{id}/kill", post(kill_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
         .route("/v1/vms/{id}/resources", post(set_vm_resources))
@@ -3092,6 +3093,16 @@ async fn stop_vm(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(m.stop(id).await?)))
+}
+
+/// End the VM's runner process at once, with no guest shutdown (`fluxctl mac kill`; machinectl `kill`). Prefer `stop`.
+async fn kill_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.kill(id).await?)))
 }
 
 /// Save RAM/CPU/device state to the hibernation directory and stop QEMU; the

@@ -181,6 +181,9 @@ pub enum MacCommand {
     /// Registry login (`login`, `logout`, `logins`) and `fork`.
     #[command(flatten)]
     Dp(crate::mac_dp::MacDp),
+    /// `create`, `kill`, `update`: the rest of the Docker container lifecycle.
+    #[command(flatten)]
+    Life(crate::mac_lifecycle::MacLife),
 }
 
 impl MacCommand {
@@ -189,7 +192,11 @@ impl MacCommand {
         match self {
             Self::Build { dry_run, .. } => *dry_run,
             // The fleet scheduler talks to the Macs over ssh, not to a daemon from here.
-            Self::Run { sched, .. } => sched.fleet.is_some(),
+            // A flag the macOS guest cannot use is refused without a daemon.
+            Self::Run { sched, opts, .. } => {
+                sched.fleet.is_some() || opts.life.check_supported().is_err()
+            }
+            Self::Life(l) => l.is_client_side(),
             Self::Ps { opts, .. } => opts.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) | Self::Ux(_) => true,
@@ -388,6 +395,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             ..
         } => {
             xrun.check(rm)?;
+            opts.life.check_supported()?;
+            crate::mac_lifecycle::ensure_image(&image, opts.life.pull).await?;
             crate::mac_ops::preflight(&image, &xrun)?;
             let started = crate::mac_health::now_unix();
             let outcome = crate::mac_queue::run_queued(r, &queue, || {
@@ -437,6 +446,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
         } => crate::mac_more::exec(r, name, user, cmd, opts).await,
         MacCommand::More(m) => crate::mac_more::run_daemon(r, m).await,
         MacCommand::Dp(d) => crate::mac_dp::run_daemon(r, d).await,
+        MacCommand::Life(l) => crate::mac_lifecycle::run_daemon(r, l).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
         MacCommand::Build {
             file,
@@ -737,6 +747,12 @@ pub async fn run(command: MacCommand) -> Result<()> {
     );
     let command = match command {
         MacCommand::Host { command } => return crate::mac_host::run(command),
+        // A refusal that needs no daemon (a flag with no meaning for a macOS guest) is shown without one.
+        MacCommand::Run { opts, sched, .. } if sched.fleet.is_none() => {
+            opts.life.check_supported()?;
+            bail!("internal: mac run needs the daemon");
+        }
+        MacCommand::Life(l) => return l.run_client(),
         c => c,
     };
     match command {
@@ -860,6 +876,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Host { .. }
         | MacCommand::WaitReady { .. }
         | MacCommand::Dp(_)
+        | MacCommand::Life(_)
         | MacCommand::Ops(_) => unreachable!("rejected above"),
     }
     Ok(())
