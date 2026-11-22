@@ -205,7 +205,7 @@ That's the default dataplane.
 `.deb` and `.rpm` packages are no longer built. The tarball needs glibc 2.35 or newer (Rocky/Alma 9 is not supported yet).
 
 **From source:** needs a Linux host with KVM, a Rust toolchain, and a sibling `guestkit` checkout at the tag in
-`packaging/guestkit.ref` (v1.2.9 for 0.4.21; `scripts/check-guestkit-pin.sh . ../guestkit` checks the pin, `Cargo.lock` and the checkout, see
+`packaging/guestkit.ref` (v1 now; v1.2.9 for 0.4.21; `scripts/check-guestkit-pin.sh . ../guestkit` checks the pin, `Cargo.lock` and the checkout, see
 [the pin](docs/linux-package.md#releasing-the-guestkit-pin)).
 
 ```bash

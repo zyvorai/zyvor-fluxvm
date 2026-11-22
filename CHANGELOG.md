@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **guestkit pin repointed to the `v1` tag.** `packaging/guestkit.ref` and every workflow checkout named `v1.2.9`, a tag guestkit never published (its only tag is `v1`, on a commit whose `Cargo.toml` says 1.3.1, the version `Cargo.lock` records), so every CI job that checks guestkit out failed at checkout. `scripts/check-guestkit-pin.sh` now also accepts a major tag like `v1` (it must match the lock's major version; the checkout is still verified against the tag).
+
 Gateway API from one command ([docs/gateway.md](docs/gateway.md#quick-start-one-command)). Unit-tested with a fake kubectl and loopback sockets; **not compiled by the author and not run on a live cluster when this entry was written**.
 
 - New `fluxctl gateway expose SERVICE [-n NS] [--port N] [--host NAME] [--local-port N] [--cluster NAME | --kube-context CTX] [--yes] [--dry-run]`: installs Envoy Gateway if missing (one yes/no question; `--yes` skips it; no terminal and no `--yes` fails with the command to run), creates a GatewayClass if needed, an EnvoyProxy, a Gateway and an HTTPRoute labelled `app.kubernetes.io/managed-by=fluxctl-gateway`, waits for Programmed, forwards a free local port and prints the URL (`SERVICE.localhost`) with a `curl --resolve` fallback.

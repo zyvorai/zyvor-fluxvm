@@ -34,6 +34,12 @@ mk "$T/skew2" v1.2.5 1.2.6
 expect "lock ahead of ref is rejected" fail "$CHECK" "$T/skew2"
 mk "$T/branch" main 1.2.6
 expect "a branch name is not a pin" fail "$CHECK" "$T/branch"
+mk "$T/major" v1 1.3.1
+expect "a major tag matches a lock with the same major version" pass "$CHECK" "$T/major"
+mk "$T/major2" v2 1.3.1
+expect "a major tag for a different major version is rejected" fail "$CHECK" "$T/major2"
+mk "$T/bad" v1.2 1.3.1
+expect "a half-specified tag is rejected" fail "$CHECK" "$T/bad"
 mkdir -p "$T/nofile"
 expect "missing pin file is rejected" fail "$CHECK" "$T/nofile"
 printf '[[package]]\nname = "other"\nversion = "1.0.0"\n' >"$T/match2.lock"
