@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "name": "ci-1",
+  "id": "0b1c2d3e-0000-4000-8000-000000000001",
+  "image": "macos-xcode:15",
+  "status": "created",
+  "started": false
+}

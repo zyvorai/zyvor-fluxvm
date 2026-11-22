@@ -86,6 +86,45 @@ pub fn run_document(o: &crate::mac_instance::RunOutcome) -> Value {
     })
 }
 
+/// The line `mac create --json` prints: the instance exists and has not been started.
+pub fn create_document(name: &str, id: &str, image: &str) -> Value {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "name": name,
+        "id": id,
+        "image": image,
+        "status": "created",
+        "started": false,
+    })
+}
+
+/// The line `mac update --json` prints: what was applied. `labels` holds the user labels set; `restart_policy` is the new policy
+/// (`no` when it was cleared) or null when `--restart` was not given.
+pub fn update_document(name: &str, id: &str, patch: &Value) -> Value {
+    let l = &patch["labels"];
+    let user: serde_json::Map<String, Value> = l
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter(|(k, _)| !is_internal_label(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let restart = match l.get(RESTART_LABEL) {
+        None => Value::Null,
+        Some(Value::Null) => json!("no"),
+        Some(v) => v.clone(),
+    };
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "name": name,
+        "id": id,
+        "restart_policy": restart,
+        "labels": user,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +254,35 @@ mod tests {
         ));
         assert_eq!(doc["schema_version"], 1);
         golden("inspect.json", &without_vm(doc));
+    }
+
+    #[test]
+    fn create_and_update_json_match_golden() {
+        golden(
+            "create.json",
+            &create_document(
+                "ci-1",
+                "0b1c2d3e-0000-4000-8000-000000000001",
+                "macos-xcode:15",
+            ),
+        );
+        let patch =
+            crate::mac_lifecycle::update_patch(Some("always"), &["team=ios".into()]).unwrap();
+        golden(
+            "update.json",
+            &update_document("ci-1", "0b1c2d3e-0000-4000-8000-000000000001", &patch),
+        );
+        let cleared = crate::mac_lifecycle::update_patch(Some("no"), &[]).unwrap();
+        let d = update_document("ci-1", "x", &cleared);
+        assert_eq!(
+            (&d["restart_policy"], &d["labels"]),
+            (&json!("no"), &json!({}))
+        );
+        let only_labels = crate::mac_lifecycle::update_patch(None, &["a=b".into()]).unwrap();
+        assert_eq!(
+            update_document("n", "i", &only_labels)["restart_policy"],
+            Value::Null
+        );
     }
 
     #[test]

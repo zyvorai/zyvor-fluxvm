@@ -125,6 +125,7 @@ mod mac_inspect;
 mod mac_instance;
 mod mac_ipsw;
 mod mac_json;
+mod mac_lifecycle;
 mod mac_login;
 mod mac_mcp;
 mod mac_metrics;

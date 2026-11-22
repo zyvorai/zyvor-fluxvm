@@ -60,6 +60,8 @@ pub struct RunOpts {
     /// instance already runs detached.
     #[arg(short = 'd', long)]
     pub detach: bool,
+    #[command(flatten)]
+    pub life: crate::mac_lifecycle::LifeOpts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +187,8 @@ pub struct LaunchSpec {
     pub restart: Option<Restart>,
     /// `(project, service)` for compose.
     pub project: Option<(String, String)>,
+    /// `--health-cmd` / `--no-healthcheck`: this instance's own healthcheck, recorded in a label.
+    pub healthcheck: Option<crate::mac_lifecycle::HcSetting>,
 }
 
 /// POST /v1/vms body: [`crate::mac_cmd::build_create_body`] plus CPU, memory and shares.
@@ -228,6 +232,10 @@ pub fn labels_patch(spec: &LaunchSpec) -> Result<Value> {
     }
     if let Some(r) = spec.restart.filter(|r| *r != Restart::No) {
         labels.insert(RESTART_LABEL.into(), json!(r.as_str()));
+    }
+    if let Some(h) = &spec.healthcheck {
+        let (k, v) = crate::mac_lifecycle::healthcheck_label(h);
+        labels.insert(k.into(), json!(v));
     }
     if let Some((p, s)) = &spec.project {
         labels.insert(PROJECT_LABEL.into(), json!(p));
@@ -310,12 +318,21 @@ pub fn explain(e: anyhow::Error, action: &str) -> anyhow::Error {
     }
 }
 
-/// Create the VM, label it, start it. On failure after creation the VM is deleted. Returns the VM id.
-pub async fn launch(r: &crate::remote::Remote, store: &Store, spec: &LaunchSpec) -> Result<String> {
+/// Create the VM and label it, without starting it (`mac create`). `extra` are more labels to record. On failure after creation
+/// the VM is deleted. Returns the VM id.
+pub async fn create_instance(
+    r: &crate::remote::Remote,
+    store: &Store,
+    spec: &LaunchSpec,
+    extra: serde_json::Map<String, Value>,
+) -> Result<String> {
     use reqwest::Method;
     let disk = store.resolve(&spec.image)?.join("disk.raw");
     let body = create_body(spec, &disk)?;
-    let patch = labels_patch(spec)?;
+    let mut patch = labels_patch(spec)?;
+    if let Some(l) = patch["labels"].as_object_mut() {
+        l.extend(extra);
+    }
     let vm = r
         .call(Method::POST, "/v1/vms", Some(body))
         .await
@@ -324,14 +341,30 @@ pub async fn launch(r: &crate::remote::Remote, store: &Store, spec: &LaunchSpec)
         .as_str()
         .context("the daemon returned no id")?
         .to_string();
-    let started = async {
-        r.call(Method::PATCH, &format!("/v1/vms/{id}"), Some(patch))
-            .await?;
-        r.call(Method::POST, &format!("/v1/vms/{id}/start"), None)
-            .await
-            .map_err(|e| explain(e, &format!("start {}", spec.name)))
+    if let Err(e) = r
+        .call(Method::PATCH, &format!("/v1/vms/{id}"), Some(patch))
+        .await
+    {
+        crate::mac_cmd::delete_instance(r, &id).await.ok();
+        return Err(e);
     }
-    .await;
+    Ok(id)
+}
+
+/// Create the VM, label it, start it. On failure after creation the VM is deleted. Returns the VM id.
+pub async fn launch(r: &crate::remote::Remote, store: &Store, spec: &LaunchSpec) -> Result<String> {
+    use reqwest::Method;
+    let mut start = serde_json::Map::new();
+    // The start period of a healthcheck counts from here.
+    start.insert(
+        crate::mac_health::HEALTH_START_LABEL.into(),
+        json!(crate::mac_health::now_unix().to_string()),
+    );
+    let id = create_instance(r, store, spec, start).await?;
+    let started = r
+        .call(Method::POST, &format!("/v1/vms/{id}/start"), None)
+        .await
+        .map_err(|e| explain(e, &format!("start {}", spec.name)));
     if let Err(e) = started {
         crate::mac_cmd::delete_instance(r, &id).await.ok();
         return Err(e);
@@ -421,7 +454,9 @@ pub async fn run_outcome(
 ) -> Result<RunOutcome> {
     let store = Store::open(mac_store::default_root()?)?;
     let dir = store.resolve(&image)?;
-    let cfg: ImageConfig = mac_config::load(&dir)?;
+    let mut cfg: ImageConfig = mac_config::load(&dir)?;
+    crate::mac_lifecycle::apply_entrypoint(&mut cfg, opts.life.entrypoint.as_deref())?;
+    let health = opts.life.resolve_healthcheck(cfg.healthcheck.as_ref())?;
     let env = collect_env(&opts.env, &opts.env_file, host_env)?;
     let command = mac_config::effective_command(&cfg, &cmd, &env, opts.workdir.as_deref());
     ensure!(
@@ -459,6 +494,7 @@ pub async fn run_outcome(
         labels,
         restart: Some(Restart::parse(&opts.restart)?),
         project: None,
+        healthcheck: health,
     };
     let id = launch(r, &store, &spec).await?;
     let outcome = |ip: Option<String>, removed: bool, print_name: bool| RunOutcome {

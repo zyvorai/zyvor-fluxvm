@@ -133,6 +133,7 @@ pub fn launch_spec(args: &Value) -> Result<LaunchSpec> {
         labels,
         restart: str_arg(args, "restart").map(Restart::parse).transpose()?,
         project: None,
+        healthcheck: None,
     })
 }
 

@@ -259,7 +259,7 @@ fn parse_healthcheck(line: usize, rest: &str) -> Result<Option<Healthcheck>, Par
     if rest.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
-    let (mut interval, mut timeout, mut retries) = (30u64, 30u64, 3u32);
+    let (mut interval, mut timeout, mut retries, mut start_period) = (30u64, 30u64, 3u32, 0u64);
     while let Some(opt) = rest.strip_prefix("--") {
         let (word, tail) = opt.split_once(char::is_whitespace).unwrap_or((opt, ""));
         let Some((k, v)) = word.split_once('=') else {
@@ -274,6 +274,7 @@ fn parse_healthcheck(line: usize, rest: &str) -> Result<Option<Healthcheck>, Par
         match k {
             "interval" => interval = dur(v)?,
             "timeout" => timeout = dur(v)?,
+            "start-period" => start_period = dur(v)?,
             "retries" => {
                 retries = v.parse().map_err(|_| ParseError {
                     line,
@@ -300,6 +301,7 @@ fn parse_healthcheck(line: usize, rest: &str) -> Result<Option<Healthcheck>, Par
         interval_secs: interval,
         timeout_secs: timeout,
         retries,
+        start_period_secs: start_period,
     }))
 }
 

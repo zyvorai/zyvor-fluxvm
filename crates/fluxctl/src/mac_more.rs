@@ -370,6 +370,10 @@ pub fn should_restart(vm: &Value) -> bool {
     let policy = vm["labels"][view::RESTART_LABEL].as_str().unwrap_or("no");
     let st = view::status(vm);
     let manual = vm["labels"][STOPPED_LABEL].as_str() == Some("true");
+    // Made by `mac create` and never started: no policy starts it by itself, only `mac start`.
+    if vm["labels"][crate::mac_lifecycle::NOT_STARTED_LABEL].is_string() {
+        return false;
+    }
     match policy {
         "always" => matches!(st, "stopped" | "failed"),
         "unless-stopped" => matches!(st, "stopped" | "failed") && !manual,
@@ -768,19 +772,13 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
         }
         MacMore::Start { names } => {
             lifecycle(r, &names, "start", "start", async |r, id, vm| {
-                if vm["labels"][STOPPED_LABEL].is_string() {
-                    set_label(r, id, STOPPED_LABEL, None).await?;
-                }
-                Ok(())
+                crate::mac_lifecycle::after_start(r, id, vm).await
             })
             .await?
         }
         MacMore::Restart { names } => {
             lifecycle(r, &names, "restart", "restart", async |r, id, vm| {
-                if vm["labels"][STOPPED_LABEL].is_string() {
-                    set_label(r, id, STOPPED_LABEL, None).await?;
-                }
-                Ok(())
+                crate::mac_lifecycle::after_start(r, id, vm).await
             })
             .await?
         }

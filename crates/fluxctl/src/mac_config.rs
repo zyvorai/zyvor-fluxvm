@@ -54,6 +54,13 @@ pub struct Healthcheck {
     pub interval_secs: u64,
     pub timeout_secs: u64,
     pub retries: u32,
+    /// Failed probes in this many seconds after the instance started do not count towards `retries` (Docker `--start-period`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub start_period_secs: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

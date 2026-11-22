@@ -794,6 +794,7 @@ pub fn resolve_with(
                 labels,
                 restart,
                 project: Some((project.clone(), name.clone())),
+                healthcheck: None,
             },
             command,
             env: env_pairs,

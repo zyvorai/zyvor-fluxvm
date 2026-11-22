@@ -113,6 +113,57 @@ and `CMD` (from its Macfile) run; with neither, the instance just stays up.
 `mac exec NAME [-e NAME=V] [-w DIR] [--user U] -- CMD` applies the image's `ENV` and `WORKDIR` (while the image is still in the
 store) and then its own flags; it does not use `ENTRYPOINT`.
 
+## Create, kill, update and the run flags (Docker parity)
+
+Unit-tested with fakes (argument parsing, request bodies, label patches, refusal texts, golden JSON). **Not run against a real daemon or a macOS VM.**
+Every refusal ends with `fluxctl explain CODE` (codes below). Studio has no page for macOS instances, so these are CLI only.
+
+### Extra `mac run` and `mac create` flags
+
+| Flag | Effect |
+|---|---|
+| `--entrypoint CMD` | Replaces the image's `ENTRYPOINT` and, like Docker, drops its `CMD`; `CMD` after `--` still applies. Shell form or a JSON array; `""` clears both. |
+| `--pull always\|missing\|never` | Default `missing`: a registry reference (`host/repo:tag`) that is not in the local store is pulled for you (it prints that it does; macOS images are tens of GB). `always` pulls first even when present. `never` uses the local store or fails. A local name (no registry host) cannot be pulled: `always` refuses it and `missing` says so. Not available with `--fleet`. |
+| `--health-cmd CMD` | The instance's own healthcheck (run over SSH in the guest, exit 0 = healthy). It is stored on the VM in the label `fluxvm.mac.healthcheck` and wins over the image's `HEALTHCHECK`, so `mac health`, `run --wait-healthy`, compose `service_healthy` and `mac supervise` all use it. |
+| `--health-interval D`, `--health-probe-timeout D`, `--health-retries N`, `--health-start-period D` | Tuning (defaults 30s, 30s, 3, 0s). With no `--health-cmd` they tune the image's HEALTHCHECK. Failures within the start period (counted from the last `mac start`/`run`, until the first success) do not count towards the retries. **`--health-probe-timeout` is not Docker's `--health-timeout`**: that name was already taken by `--wait-healthy`'s wait in seconds, so the per-probe timeout has its own name. A Macfile `HEALTHCHECK` now also accepts `--start-period=`. |
+| `--no-healthcheck` | No healthcheck for this instance even if the image has one (label value `none`). Cannot be combined with the other `--health-*` flags. |
+| `--network`, `--platform` | Not meaningful for a macOS guest (one NAT network; always darwin/arm64). Hidden from `--help`; using them says why and what to do instead (`MAC_FLAG_NOT_APPLICABLE`). |
+
+### `fluxctl mac create [OPTIONS] IMAGE`
+
+Makes the VM and labels it (owner, created time, `--label`, `--restart`, healthcheck) **without starting it**; it prints the name (or
+`--json`, see below). `mac start NAME` boots it; until then no restart policy starts it (the label `fluxvm.mac.notstarted`, cleared by
+`mac start`). Takes `--name`, `-p`, `-v`, `--label`, `--restart`, `--cpus`, `--memory`, `--pull` and the `--health-*` flags. A macOS VM stores
+no command or environment (`mac run` sends them over SSH), so `CMD`, `-e`, `--env-file`, `-w`, `-d`, `--entrypoint` and `--rm` are refused
+with a pointer to `mac exec` (`MAC_CREATE_RUN_ONLY`). With `-v` the share is attached at boot and appears under
+`/Volumes/My Shared Files`; only `mac run` makes the GUEST symlink. The 2-VM limit applies when it starts, not when it is created.
+
+### `fluxctl mac kill [-s KILL] NAME...`
+
+Ends the VM's runner process at once, with no guest shutdown (`POST /v1/vms/{id}/kill`, a new daemon route over the scheduler's existing
+`kill`); the guest may check its disk on the next boot. It marks the instance like `mac stop` does so `unless-stopped` leaves it alone.
+Only `KILL`/`SIGKILL`/`9` is accepted for `--signal`: a VM cannot be sent other signals, so `TERM`, `HUP`, ... are refused with the
+alternatives (`mac stop`, or `mac exec NAME -- kill -TERM PID` inside the guest) (`MAC_KILL_SIGNAL`). A daemon without the route gives
+`MAC_KILL_UNAVAILABLE`. Needs a running instance. **Whether the vz runner exits cleanly and the daemon records `stopped` after a kill is unverified.**
+
+### `fluxctl mac update NAME [--restart POLICY] [--label KEY=VALUE]... [--json]`
+
+The daemon's `PATCH /v1/vms/{id}` edits only the name and labels, so that is what `update` can change, on a running or a stopped instance:
+`--restart` (`no` removes the policy) and `--label`. **`--cpus` and `--memory` are accepted only to be refused**: there is no daemon call
+that resizes an existing macOS VM, running or stopped, so nothing is changed and the message gives the way that works (`mac stop`,
+`mac commit NAME NAME-img:1`, `mac rm`, `mac create --cpus N --memory SIZE NAME-img:1`) (`MAC_UPDATE_NOT_SUPPORTED`).
+
+### JSON
+
+`mac create --json` prints `{"schema_version":1,"name","id","image","status":"created","started":false}`; `mac update --json` prints
+`{"schema_version":1,"name","id","restart_policy" (new policy, "no" when cleared, null when not given),"labels" (the user labels set)}`.
+Both are pinned by golden files in `crates/fluxctl/src/mac_json_golden/`.
+
+### Explain codes
+
+`MAC_FLAG_NOT_APPLICABLE`, `MAC_PULL_POLICY`, `MAC_HEALTHCHECK_FLAGS`, `MAC_CREATE_RUN_ONLY`, `MAC_UPDATE_NOT_SUPPORTED`, `MAC_KILL_SIGNAL`,
+`MAC_KILL_UNAVAILABLE`: `fluxctl explain CODE`.
+
 ## Instance commands
 
 All need the daemon (`--server` or a context). `NAME` is the instance name from `mac ps`.
@@ -124,7 +175,7 @@ All need the daemon (`--server` or a context). `NAME` is the instance name from 
 | `mac logs [-f] [--tail N] NAME` | The VM's console log (`GET /v1/vms/{id}/logs`; serial output, not the guest's own logs). `-f` streams until Ctrl-C. |
 | `mac cp SRC DST` | `NAME:/path` is the guest side; either direction; `scp -r`. Between two instances is refused. |
 | `mac stats [NAME...] [--json]` | One reading of CPU, memory, disk I/O (`GET /v1/vms/{id}/stats`). CPU is averaged over the VM's life, and there is no live stream. |
-| `mac stop`, `start`, `restart NAME...` | `stop` keeps the disk. `start` needs a free macOS slot. |
+| `mac stop`, `start`, `restart NAME...` | `stop` keeps the disk. `start` needs a free macOS slot, and boots an instance made by `mac create`. See also `mac kill` and `mac update` below. |
 | `mac pause`, `unpause NAME...` | The daemon supports this for `vz` guests (`/pause`, `/resume`): vCPUs freeze, memory and the macOS slot are kept. |
 | `mac rename OLD NEW` | `PATCH /v1/vms/{id}`. |
 | `mac wait NAME [--timeout S]` | Blocks until the instance is `stopped` or `failed` and prints which. There is no exit code to report; `failed` exits non-zero. |
