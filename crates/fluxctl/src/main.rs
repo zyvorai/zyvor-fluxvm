@@ -121,6 +121,7 @@ mod mac_host;
 mod mac_ignore;
 mod mac_image_ops;
 mod mac_imgstat;
+mod mac_imgx;
 mod mac_inspect;
 mod mac_instance;
 mod mac_ipsw;

@@ -44,7 +44,7 @@ pub enum MacCommand {
     /// Remove a name; the files go with the last name that uses them.
     Rmi { reference: String },
     /// Add a template directory (disk.raw, hardware.bin, auxiliary.bin) to the store as `name:tag`; an APFS clone, so it is instant
-    /// on the same volume.
+    /// on the same volume. Given a tar file from `mac save` or `mac export` instead, unpacks it (like `mac load`).
     Import { dir: PathBuf, reference: String },
     /// Build an image from a Macfile (FROM, USER, RUN, COPY): the steps run over SSH in a throwaway instance cloned from the FROM
     /// template, which is then stopped and stored as `-t name:tag`. `--dry-run` only prints the plan. Needs the daemon unless
@@ -184,6 +184,9 @@ pub enum MacCommand {
     /// `create`, `kill`, `update`: the rest of the Docker container lifecycle.
     #[command(flatten)]
     Life(crate::mac_lifecycle::MacLife),
+    /// `export`, `manifest inspect`: instance export and registry manifests.
+    #[command(flatten)]
+    Imgx(crate::mac_imgx::MacImgx),
 }
 
 impl MacCommand {
@@ -197,6 +200,7 @@ impl MacCommand {
                 sched.fleet.is_some() || opts.life.check_supported().is_err()
             }
             Self::Life(l) => l.is_client_side(),
+            Self::Imgx(i) => i.is_client_side(),
             Self::Ps { opts, .. } => opts.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) | Self::Ux(_) => true,
@@ -447,6 +451,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
         MacCommand::More(m) => crate::mac_more::run_daemon(r, m).await,
         MacCommand::Dp(d) => crate::mac_dp::run_daemon(r, d).await,
         MacCommand::Life(l) => crate::mac_lifecycle::run_daemon(r, l).await,
+        MacCommand::Imgx(i) => crate::mac_imgx::run_daemon(r, i).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
         MacCommand::Build {
             file,
@@ -753,6 +758,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
             bail!("internal: mac run needs the daemon");
         }
         MacCommand::Life(l) => return l.run_client(),
+        MacCommand::Imgx(i) => return crate::mac_imgx::run_client(i).await,
         c => c,
     };
     match command {
@@ -847,6 +853,11 @@ pub async fn run(command: MacCommand) -> Result<()> {
         MacCommand::More(m) => return crate::mac_more::run_client(m),
         MacCommand::Plus(p) => return crate::mac_plus::run(&store, p).await,
         MacCommand::Ux(u) => return crate::mac_ux::run(u).await,
+        MacCommand::Import { dir, reference } if dir.is_file() => {
+            // A `mac save` / `mac export` tar (checked against its .sha256 when present).
+            let key = crate::mac_image_ops::load(&store, &dir, Some(&reference))?;
+            println!("imported {} as {key}", dir.display());
+        }
         MacCommand::Import { dir, reference } => {
             check_template(&dir)?;
             let key = mac_store::normalize(&reference)?;
@@ -883,6 +894,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::WaitReady { .. }
         | MacCommand::Dp(_)
         | MacCommand::Life(_)
+        | MacCommand::Imgx(_)
         | MacCommand::Ops(_) => unreachable!("rejected above"),
     }
     Ok(())

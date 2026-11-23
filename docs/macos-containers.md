@@ -650,6 +650,17 @@ same repository as seeds: a chunk whose raw sha256 already matches the bytes at 
 Lists repositories from `GET /v2/_catalog` (follows pagination), filtered by substring; `--tags` adds each repository's tags, `--limit N`. Many
 registries, including Docker Hub and GHCR, do not serve the catalog; the error says so. It lists names, not whether an image is a macOS image.
 
+### Archives, export and registry manifests (Docker image parity)
+
+Already present before this change: `mac tag`, `mac history`, `mac save`/`mac load`, `mac wait`, `mac stats`, `mac port`, `mac commit`, `mac image prune`, `mac search`.
+
+- `mac save IMAGE --output FILE` now also writes `FILE.sha256` (`shasum -a 256 -c` format). `mac load` and `mac import FILE NAME:TAG` check it when it exists and refuse a mismatch (`fluxctl explain MAC_ARCHIVE_CHECKSUM`); an archive without the file still loads.
+- `mac import` accepts a template directory (as before) or a tar from `save`/`export`.
+- `mac export NAME --output FILE` (stopped instance, daemon on this Mac): the instance's disk, hardware and auxiliary files as a `save` archive plus checksum. It is not a filesystem export: a macOS disk alone does not boot. A running instance is refused (`MAC_EXPORT_RUNNING`).
+- `mac manifest inspect REF [--json]`: digest, platforms, config and layers from the registry, with your `mac login` credentials (`MAC_MANIFEST_UNREADABLE` on failure).
+- `mac stats --no-stream` (accepted; stats is always one reading) and `--format` (the `mac inspect --format` template subset; fields Name, CPUPerc, CPUPercent, MemUsage, MemBytes, DiskRead, DiskWrite, DiskReadBytes, DiskWriteBytes; `table ...` supported).
+- Studio: Images, OCI tab (on a Mac node) has Copy-as-fluxctl buttons for save, import, export and manifest inspect. These are local-store commands with no daemon API.
+
 ### `mac sbom REF` (also `mac image sbom REF`)
 
 A JSON contents manifest of the template bundle: every file (`disk.raw`, `hardware.bin`, `auxiliary.bin`, `config.json`) with size and sha256, plus the registry digest, labels and

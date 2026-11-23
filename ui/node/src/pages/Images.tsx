@@ -125,6 +125,17 @@ function OciTab({ notify, macos }: { notify: Notify; macos: boolean }) {
           <CopyCmd notify={notify} cmd={fluxctlFor('oci pull', image.trim() || 'IMAGE')} />
         </div>
       </Card>
+      {macos ? (
+        <Card title="macOS images: move and inspect">
+          <p className="fx-muted">Run these in a terminal on the Mac. Archives get a <code>.sha256</code> file that <code>load</code> and <code>import</code> check.</p>
+          <div className="fx-actions">
+            <CopyCmd notify={notify} cmd={fluxctlFor('mac save', image.trim() || 'IMAGE', '--output', 'image.tar')} />
+            <CopyCmd notify={notify} cmd={fluxctlFor('mac import', 'image.tar', image.trim() || 'NAME:TAG')} />
+            <CopyCmd notify={notify} cmd={fluxctlFor('mac export', 'INSTANCE', '--output', 'instance.tar')} />
+            <CopyCmd notify={notify} cmd={fluxctlFor('mac manifest inspect', image.trim() || 'REGISTRY/IMAGE:TAG')} />
+          </div>
+        </Card>
+      ) : null}
       <div className="fx-section">
         <Card title="Cached images" action={<Button size="sm" busy={busy === 'prune'} onClick={() => run('prune', () => api.post('/v1/oci/prune', {}), 'Unused images pruned', list.refresh)}>Prune unused</Button>}>
           {list.loading && !rows.length ? <Skeleton h={100} /> : (
