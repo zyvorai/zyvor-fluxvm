@@ -83,15 +83,20 @@ max_advisory_age_days = 30
 
 impl Policy {
     pub fn parse(text: &str) -> Result<Self> {
-        let raw: RawPolicy = toml::from_str(text).map_err(|e| {
-            anyhow::anyhow!("the image policy file does not parse: {e}")
-        })?;
+        let raw: RawPolicy = toml::from_str(text)
+            .map_err(|e| anyhow::anyhow!("the image policy file does not parse: {e}"))?;
         let block_severity = match raw.block_severity.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(s) if s.eq_ignore_ascii_case("none") => None,
-            Some(s) => Some(Severity::parse(s).filter(|v| *v != Severity::Unknown).with_context(|| {
-                format!("block_severity {s:?} is not one of critical, high, medium, low, none")
-            })?),
+            Some(s) => Some(
+                Severity::parse(s)
+                    .filter(|v| *v != Severity::Unknown)
+                    .with_context(|| {
+                        format!(
+                            "block_severity {s:?} is not one of critical, high, medium, low, none"
+                        )
+                    })?,
+            ),
         };
         Ok(Self {
             block_unsigned: raw.block_unsigned,
@@ -138,12 +143,16 @@ pub fn glob(pattern: &str, text: &str) -> bool {
     let mut rest = text;
     for (i, part) in parts.iter().enumerate() {
         if i == 0 {
-            let Some(r) = rest.strip_prefix(part) else { return false };
+            let Some(r) = rest.strip_prefix(part) else {
+                return false;
+            };
             rest = r;
         } else if i == parts.len() - 1 {
             return rest.ends_with(part) && rest.len() >= part.len();
         } else {
-            let Some(at) = rest.find(part) else { return false };
+            let Some(at) = rest.find(part) else {
+                return false;
+            };
             rest = &rest[at + part.len()..];
         }
     }
@@ -172,7 +181,12 @@ fn hex_of(digest: &str) -> Option<&str> {
 }
 
 fn verify_path(state_dir: &Path, digest: &str) -> Option<PathBuf> {
-    hex_of(digest).map(|h| state_dir.join("oci").join("verify").join(format!("{h}.json")))
+    hex_of(digest).map(|h| {
+        state_dir
+            .join("oci")
+            .join("verify")
+            .join(format!("{h}.json"))
+    })
 }
 
 pub fn save_verify(state_dir: &Path, rec: &VerifyRecord) -> Result<()> {
@@ -207,7 +221,9 @@ pub struct Decision {
 }
 
 fn matches_any(patterns: &[String], reference: &str, digest: &str) -> bool {
-    patterns.iter().any(|p| glob(p, reference) || glob(p, digest))
+    patterns
+        .iter()
+        .any(|p| glob(p, reference) || glob(p, digest))
 }
 
 /// Judge one image. Pure: the caller supplies what is known about it.
@@ -230,9 +246,13 @@ pub fn decide(
             let trusted = verify.is_some_and(|v| v.verdict == "trusted" && v.digest == d);
             if !trusted {
                 let why = match verify.map(|v| v.verdict.as_str()) {
-                    None => "it has not been verified: run `fluxctl image verify` on it".to_string(),
+                    None => {
+                        "it has not been verified: run `fluxctl image verify` on it".to_string()
+                    }
                     Some("unsigned") => "it has no signature".to_string(),
-                    Some("untrusted-signer") => "it is signed, but not by a key you trust".to_string(),
+                    Some("untrusted-signer") => {
+                        "it is signed, but not by a key you trust".to_string()
+                    }
                     Some("invalid") => "its signature does not match it".to_string(),
                     Some(other) => format!("its last verification said {other:?}"),
                 };
@@ -270,7 +290,12 @@ pub fn decide(
             }
         }
     }
-    Decision { allowed: violations.is_empty(), violations, warnings, overridden: false }
+    Decision {
+        allowed: violations.is_empty(),
+        violations,
+        warnings,
+        overridden: false,
+    }
 }
 
 // ---- assessment (what Studio and `image policy check` show) ----
@@ -302,7 +327,9 @@ pub struct Assessment {
 
 pub fn assess(state_dir: &Path, subject: &Subject, now: u64) -> Assessment {
     let verify = load_verify(state_dir, &subject.manifest_digest);
-    let signature = verify.as_ref().map_or("unchecked".to_string(), |v| v.verdict.clone());
+    let signature = verify
+        .as_ref()
+        .map_or("unchecked".to_string(), |v| v.verdict.clone());
     let mut a = Assessment {
         reference: subject.reference.clone(),
         manifest_digest: subject.manifest_digest.clone(),
@@ -342,9 +369,23 @@ pub fn assess(state_dir: &Path, subject: &Subject, now: u64) -> Assessment {
     let trusted = a.signature == "trusted";
     let (badge, summary) = if a.decision.as_ref().is_some_and(|d| !d.allowed) {
         let d = a.decision.as_ref().unwrap();
-        ("blocked", format!("The policy blocks this image: {}.", d.violations.first().map_or("", |v| v.message.as_str())))
+        (
+            "blocked",
+            format!(
+                "The policy blocks this image: {}.",
+                d.violations.first().map_or("", |v| v.message.as_str())
+            ),
+        )
     } else if worst.is_some_and(|w| w >= Severity::High) {
-        ("risk", format!("{} known problem(s), the worst {}; {}.", scan.findings.len(), worst.unwrap().as_str(), scan.advisory.describe()))
+        (
+            "risk",
+            format!(
+                "{} known problem(s), the worst {}; {}.",
+                scan.findings.len(),
+                worst.unwrap().as_str(),
+                scan.advisory.describe()
+            ),
+        )
     } else if !trusted {
         (
             "unsigned",
@@ -356,9 +397,19 @@ pub fn assess(state_dir: &Path, subject: &Subject, now: u64) -> Assessment {
             },
         )
     } else if !scan.advisory.present {
-        ("unscanned", "Signed by a trusted key, but there is no advisory data to scan it against.".to_string())
+        (
+            "unscanned",
+            "Signed by a trusted key, but there is no advisory data to scan it against."
+                .to_string(),
+        )
     } else {
-        ("ok", format!("Signed by a trusted key; no high or critical findings; {}.", scan.advisory.describe()))
+        (
+            "ok",
+            format!(
+                "Signed by a trusted key; no high or critical findings; {}.",
+                scan.advisory.describe()
+            ),
+        )
     };
     a.badge = badge.into();
     a.summary = summary;
@@ -377,11 +428,17 @@ pub fn enforce(
     actor: &str,
     now: u64,
 ) -> Result<Option<Decision>> {
-    let Some(policy) = load_policy(state_dir)? else { return Ok(None) };
+    let Some(policy) = load_policy(state_dir)? else {
+        return Ok(None);
+    };
     let verify = load_verify(state_dir, &subject.manifest_digest);
     let scan = if policy.block_severity.is_some() && !policy_skips(&policy, subject) {
         let sbom = sbom::load_or_collect(state_dir, subject, now)?;
-        Some(advisory::scan(&sbom, advisory::load(state_dir)?.as_ref(), now))
+        Some(advisory::scan(
+            &sbom,
+            advisory::load(state_dir)?.as_ref(),
+            now,
+        ))
     } else {
         None
     };
@@ -401,7 +458,11 @@ pub fn enforce(
     Err(anyhow::Error::new(PolicyBlocked(format!(
         "the image policy blocks {}: {}\n  to run it anyway (this is logged): set policy_override / pass `--policy-override`\n  more: fluxctl explain {}",
         subject.reference,
-        d.violations.iter().map(|v| v.message.as_str()).collect::<Vec<_>>().join("; "),
+        d.violations
+            .iter()
+            .map(|v| v.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
         first.code
     ))))
 }
@@ -424,7 +485,11 @@ fn policy_skips(p: &Policy, s: &Subject) -> bool {
 
 /// The loud record: a WARN on the audit target and a line in `policy-overrides.log`.
 pub fn audit_override(state_dir: &Path, subject: &Subject, d: &Decision, actor: &str, now: u64) {
-    let reasons: Vec<String> = d.violations.iter().map(|v| format!("{}: {}", v.code, v.message)).collect();
+    let reasons: Vec<String> = d
+        .violations
+        .iter()
+        .map(|v| format!("{}: {}", v.code, v.message))
+        .collect();
     tracing::warn!(
         target: "fluxvm_audit",
         actor = %actor,
@@ -444,14 +509,22 @@ pub fn audit_override(state_dir: &Path, subject: &Subject, d: &Decision, actor: 
     });
     let p = state_dir.join("oci").join(OVERRIDE_LOG);
     let _ = std::fs::create_dir_all(p.parent().unwrap());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         use std::io::Write;
         let _ = writeln!(f, "{line}");
     }
 }
 
 /// Re-hash the manifest's blobs: every layer and the config. Returns the digests that are missing or do not match.
-pub fn check_blobs(store: &BlobStore, subject: &Subject, config_digest: Option<&str>) -> (Vec<String>, Vec<String>) {
+pub fn check_blobs(
+    store: &BlobStore,
+    subject: &Subject,
+    config_digest: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let (mut missing, mut bad) = (Vec::new(), Vec::new());
@@ -500,7 +573,14 @@ mod tests {
     }
 
     fn verify(v: &str) -> VerifyRecord {
-        VerifyRecord { reference: "r".into(), digest: subject().manifest_digest, verdict: v.into(), signer: Some("me".into()), blobs_ok: true, checked_unix: 1 }
+        VerifyRecord {
+            reference: "r".into(),
+            digest: subject().manifest_digest,
+            verdict: v.into(),
+            signer: Some("me".into()),
+            blobs_ok: true,
+            checked_unix: 1,
+        }
     }
 
     fn scan_with(sev: Option<Severity>, age_days: u64) -> ScanReport {
@@ -509,7 +589,15 @@ mod tests {
             updated_unix: 1_000_000,
             source: "t".into(),
             advisories: sev
-                .map(|s| Advisory { id: "CVE-1".into(), package: "p".into(), ecosystem: "*".into(), severity: s, introduced: None, fixed: None, summary: "x".into() })
+                .map(|s| Advisory {
+                    id: "CVE-1".into(),
+                    package: "p".into(),
+                    ecosystem: "*".into(),
+                    severity: s,
+                    introduced: None,
+                    fixed: None,
+                    summary: "x".into(),
+                })
                 .into_iter()
                 .collect(),
         };
@@ -518,7 +606,13 @@ mod tests {
             manifest_digest: "d".into(),
             architecture: "arm64".into(),
             distro: None,
-            packages: vec![sbom::Package { name: "p".into(), version: "1".into(), ecosystem: "deb".into(), arch: None, purl: String::new() }],
+            packages: vec![sbom::Package {
+                name: "p".into(),
+                version: "1".into(),
+                ecosystem: "deb".into(),
+                arch: None,
+                purl: String::new(),
+            }],
             notes: vec![],
             generated_unix: 0,
         };
@@ -543,9 +637,24 @@ mod tests {
         assert!(p.block_unsigned);
         assert_eq!(p.block_severity, Some(Severity::Critical));
         assert_eq!(p.max_advisory_age_days, 30);
-        assert!(Policy::parse("block_unsigend = true").unwrap_err().to_string().contains("does not parse"));
-        assert!(Policy::parse("block_severity = \"bad\"").unwrap_err().to_string().contains("not one of"));
-        assert_eq!(Policy::parse("block_severity = \"none\"").unwrap().block_severity, None);
+        assert!(
+            Policy::parse("block_unsigend = true")
+                .unwrap_err()
+                .to_string()
+                .contains("does not parse")
+        );
+        assert!(
+            Policy::parse("block_severity = \"bad\"")
+                .unwrap_err()
+                .to_string()
+                .contains("not one of")
+        );
+        assert_eq!(
+            Policy::parse("block_severity = \"none\"")
+                .unwrap()
+                .block_severity,
+            None
+        );
     }
 
     #[test]
@@ -555,11 +664,21 @@ mod tests {
         assert!(!d.allowed);
         assert_eq!(d.violations[0].code, CODE_UNSIGNED);
         assert!(d.violations[0].message.contains("has not been verified"));
-        let d = decide(&p, &subject(), Some(&verify("trusted")), Some(&scan_with(Some(Severity::Critical), 3)));
+        let d = decide(
+            &p,
+            &subject(),
+            Some(&verify("trusted")),
+            Some(&scan_with(Some(Severity::Critical), 3)),
+        );
         assert_eq!(d.violations.len(), 1);
         assert_eq!(d.violations[0].code, CODE_VULNERABLE);
         assert!(d.violations[0].message.contains("3 days old"));
-        let d = decide(&p, &subject(), Some(&verify("trusted")), Some(&scan_with(Some(Severity::High), 3)));
+        let d = decide(
+            &p,
+            &subject(),
+            Some(&verify("trusted")),
+            Some(&scan_with(Some(Severity::High), 3)),
+        );
         assert!(d.allowed, "high is below the critical threshold");
         let d = decide(&p, &subject(), Some(&verify("untrusted-signer")), None);
         assert!(d.violations[0].message.contains("not by a key you trust"));
@@ -588,7 +707,15 @@ mod tests {
     fn no_advisory_data_warns_instead_of_claiming_clean() {
         let p = Policy::parse("block_severity = \"critical\"").unwrap();
         let sbom_scan = advisory::scan(
-            &sbom::Sbom { reference: "r".into(), manifest_digest: "d".into(), architecture: "a".into(), distro: None, packages: vec![], notes: vec![], generated_unix: 0 },
+            &sbom::Sbom {
+                reference: "r".into(),
+                manifest_digest: "d".into(),
+                architecture: "a".into(),
+                distro: None,
+                packages: vec![],
+                notes: vec![],
+                generated_unix: 0,
+            },
             None,
             0,
         );
@@ -608,20 +735,34 @@ mod tests {
     #[test]
     fn enforce_without_a_policy_is_a_no_op_then_blocks_then_overrides_loudly() {
         let d = tempfile::tempdir().unwrap();
-        assert!(enforce(d.path(), &subject(), false, "t", 0).unwrap().is_none());
+        assert!(
+            enforce(d.path(), &subject(), false, "t", 0)
+                .unwrap()
+                .is_none()
+        );
         init_policy(d.path()).unwrap();
         assert!(init_policy(d.path()).is_err(), "never overwrites");
         // Only block_unsigned can fire here (no layers, no advisory data).
-        let e = enforce(d.path(), &subject(), false, "t", 0).unwrap_err().to_string();
+        let e = enforce(d.path(), &subject(), false, "t", 0)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("IMAGE_POLICY_UNSIGNED"), "{e}");
         assert!(e.contains("--policy-override"));
-        let ok = enforce(d.path(), &subject(), true, "tok-a", 77).unwrap().unwrap();
+        let ok = enforce(d.path(), &subject(), true, "tok-a", 77)
+            .unwrap()
+            .unwrap();
         assert!(ok.overridden && !ok.allowed);
         let log = std::fs::read_to_string(d.path().join("oci").join(OVERRIDE_LOG)).unwrap();
-        assert!(log.contains("POLICY OVERRIDE") && log.contains("tok-a") && log.contains("IMAGE_POLICY_UNSIGNED"));
+        assert!(
+            log.contains("POLICY OVERRIDE")
+                && log.contains("tok-a")
+                && log.contains("IMAGE_POLICY_UNSIGNED")
+        );
         // A trusted verification lets it through with no override.
         save_verify(d.path(), &verify("trusted")).unwrap();
-        let ok = enforce(d.path(), &subject(), false, "t", 0).unwrap().unwrap();
+        let ok = enforce(d.path(), &subject(), false, "t", 0)
+            .unwrap()
+            .unwrap();
         assert!(ok.allowed && !ok.overridden);
     }
 
@@ -629,13 +770,23 @@ mod tests {
     fn blob_check_finds_missing_and_corrupt() {
         let d = tempfile::tempdir().unwrap();
         let store = BlobStore::for_state_dir(d.path());
-        let good = store.put(&format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"abc"))), b"abc").unwrap();
+        let good = store
+            .put(
+                &format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"abc"))),
+                b"abc",
+            )
+            .unwrap();
         let good_digest = format!("sha256:{}", good.file_name().unwrap().to_string_lossy());
         let bad_digest = format!("sha256:{}", "11".repeat(32));
         std::fs::write(store.path(&bad_digest).unwrap(), b"not that").unwrap();
         let lost = format!("sha256:{}", "22".repeat(32));
         let mut s = subject();
-        let layer = |d: &str| crate::oci_registry::Layer { digest: d.into(), size: 0, compression: crate::oci_registry::Compression::None, diff_id: String::new() };
+        let layer = |d: &str| crate::oci_registry::Layer {
+            digest: d.into(),
+            size: 0,
+            compression: crate::oci_registry::Compression::None,
+            diff_id: String::new(),
+        };
         s.layers = vec![layer(&good_digest), layer(&bad_digest), layer(&lost)];
         let (missing, bad) = check_blobs(&store, &s, None);
         assert_eq!(missing, vec![lost]);

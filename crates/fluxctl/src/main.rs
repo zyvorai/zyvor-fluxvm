@@ -102,7 +102,6 @@ mod mac_cp;
 mod mac_doctor;
 mod mac_dp;
 mod mac_errors;
-mod supply_errors;
 mod mac_events;
 mod mac_fleet;
 mod mac_fleet_agg;
@@ -162,6 +161,7 @@ mod stack;
 mod stack_fleet;
 mod status;
 mod styles;
+mod supply_errors;
 mod support_cmd;
 mod up;
 mod vm_net;
@@ -8480,7 +8480,9 @@ async fn main() -> Result<()> {
         Command::Mac { .. } => anyhow::bail!(
             "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
         ),
-        Command::Image { command } => run_image(command, format, Some(cfg.state_dir.clone())).await?,
+        Command::Image { command } => {
+            run_image(command, format, Some(cfg.state_dir.clone())).await?
+        }
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image, platform } => {

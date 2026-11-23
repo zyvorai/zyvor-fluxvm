@@ -123,7 +123,10 @@ fn subjects_dir(state_dir: &Path) -> PathBuf {
 }
 
 fn subject_file(state_dir: &Path, s: &Subject) -> PathBuf {
-    subjects_dir(state_dir).join(format!("{}.json", s.manifest_digest.trim_start_matches("sha256:")))
+    subjects_dir(state_dir).join(format!(
+        "{}.json",
+        s.manifest_digest.trim_start_matches("sha256:")
+    ))
 }
 
 /// Remember a pulled image, so later commands find it without the registry.
@@ -140,7 +143,11 @@ fn remember(state_dir: &Path, s: &Subject) {
 pub fn known(cfg: &Config, image: &str) -> Option<(Subject, Option<String>)> {
     if let Ok(e) = oci_images::find(cfg, image) {
         let subject = Subject {
-            reference: e.references.first().cloned().unwrap_or_else(|| e.manifest_digest.clone()),
+            reference: e
+                .references
+                .first()
+                .cloned()
+                .unwrap_or_else(|| e.manifest_digest.clone()),
             manifest_digest: e.manifest_digest.clone(),
             architecture: e.architecture.clone(),
             layers: e.layers.clone(),
@@ -149,11 +156,18 @@ pub fn known(cfg: &Config, image: &str) -> Option<(Subject, Option<String>)> {
     }
     let prefix = image.strip_prefix("sha256:").unwrap_or(image);
     let mut found: Vec<Subject> = Vec::new();
-    for f in std::fs::read_dir(subjects_dir(&cfg.state_dir)).ok()?.flatten() {
-        let Ok(s) = std::fs::read(f.path()).map_err(drop).and_then(|b| serde_json::from_slice::<Subject>(&b).map_err(drop)) else {
+    for f in std::fs::read_dir(subjects_dir(&cfg.state_dir))
+        .ok()?
+        .flatten()
+    {
+        let Ok(s) = std::fs::read(f.path())
+            .map_err(drop)
+            .and_then(|b| serde_json::from_slice::<Subject>(&b).map_err(drop))
+        else {
             continue;
         };
-        let by_digest = prefix.len() >= 12 && s.manifest_digest["sha256:".len()..].starts_with(prefix);
+        let by_digest =
+            prefix.len() >= 12 && s.manifest_digest["sha256:".len()..].starts_with(prefix);
         if s.reference == image || s.manifest_digest == image || by_digest {
             found.push(s);
         }
@@ -204,7 +218,12 @@ fn map_layers_error(e: anyhow::Error) -> anyhow::Error {
 // ---- rendering (pure, unit-tested) ----
 
 pub fn render_scan(r: &ScanReport) -> String {
-    let mut o = format!("{}  {}  ({} packages)\n", r.reference, short(&r.manifest_digest), r.packages);
+    let mut o = format!(
+        "{}  {}  ({} packages)\n",
+        r.reference,
+        short(&r.manifest_digest),
+        r.packages
+    );
     o.push_str(&format!("{}\n", capitalize(&r.advisory.describe())));
     if !r.advisory.present {
         o.push_str("This is not a clean result: nothing was checked.\n");
@@ -212,11 +231,25 @@ pub fn render_scan(r: &ScanReport) -> String {
     } else if r.findings.is_empty() {
         o.push_str("No known problems in the advisory data for these packages.\n");
     } else {
-        let counts: Vec<String> = [Severity::Critical, Severity::High, Severity::Medium, Severity::Low, Severity::Unknown]
-            .iter()
-            .filter_map(|s| r.counts.get(s.as_str()).map(|n| format!("{n} {}", s.as_str())))
-            .collect();
-        o.push_str(&format!("{} finding(s): {}\n\n", r.findings.len(), counts.join(", ")));
+        let counts: Vec<String> = [
+            Severity::Critical,
+            Severity::High,
+            Severity::Medium,
+            Severity::Low,
+            Severity::Unknown,
+        ]
+        .iter()
+        .filter_map(|s| {
+            r.counts
+                .get(s.as_str())
+                .map(|n| format!("{n} {}", s.as_str()))
+        })
+        .collect();
+        o.push_str(&format!(
+            "{} finding(s): {}\n\n",
+            r.findings.len(),
+            counts.join(", ")
+        ));
         for f in &r.findings {
             o.push_str(&format!(
                 "  {:<8}  {:<18}  {} {}  {}\n",
@@ -224,7 +257,9 @@ pub fn render_scan(r: &ScanReport) -> String {
                 f.id,
                 f.package,
                 f.version,
-                f.fixed.as_deref().map_or("no fix known".to_string(), |v| format!("fixed in {v}")),
+                f.fixed
+                    .as_deref()
+                    .map_or("no fix known".to_string(), |v| format!("fixed in {v}")),
             ));
         }
     }
@@ -236,7 +271,9 @@ pub fn render_scan(r: &ScanReport) -> String {
 
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
-    c.next().map_or(String::new(), |f| f.to_uppercase().collect::<String>() + c.as_str())
+    c.next().map_or(String::new(), |f| {
+        f.to_uppercase().collect::<String>() + c.as_str()
+    })
 }
 
 pub fn render_assessment(a: &Assessment) -> String {
@@ -248,7 +285,10 @@ pub fn render_assessment(a: &Assessment) -> String {
         } else {
             o.push_str("  Policy: it would be REFUSED:\n");
             for v in &d.violations {
-                o.push_str(&format!("    - {}\n      more: fluxctl explain {}\n", v.message, v.code));
+                o.push_str(&format!(
+                    "    - {}\n      more: fluxctl explain {}\n",
+                    v.message, v.code
+                ));
             }
             o.push_str("    to start it anyway (logged loudly): --policy-override\n");
         }
@@ -265,11 +305,21 @@ pub fn render_assessment(a: &Assessment) -> String {
 }
 
 pub fn render_policy(p: &supply::Policy, path: &Path) -> String {
-    let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+    let list = |v: &[String]| {
+        if v.is_empty() {
+            "none".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
     format!(
         "Image policy ({}):\n  unsigned images: {}\n  vulnerable images: {}\n  always allowed: {}\n  never allowed: {}\n  advisory data older than {} days is flagged\n",
         path.display(),
-        if p.block_unsigned { "refused (until `image verify` finds a trusted signature)" } else { "allowed" },
+        if p.block_unsigned {
+            "refused (until `image verify` finds a trusted signature)"
+        } else {
+            "allowed"
+        },
         match p.block_severity {
             Some(s) => format!("refused at {} or worse", s.as_str()),
             None => "allowed".into(),
@@ -284,14 +334,21 @@ fn verdict_words(v: &str) -> (&'static str, &'static str) {
     match v {
         "trusted" => ("TRUSTED", ""),
         "unsigned" => ("UNSIGNED: nothing vouches for this image", "IMAGE_UNSIGNED"),
-        "untrusted-signer" => ("SIGNED, BUT NOT BY A KEY YOU TRUST", "IMAGE_SIGNER_UNTRUSTED"),
+        "untrusted-signer" => (
+            "SIGNED, BUT NOT BY A KEY YOU TRUST",
+            "IMAGE_SIGNER_UNTRUSTED",
+        ),
         _ => ("INVALID: do not run this image", "IMAGE_SIGNATURE_INVALID"),
     }
 }
 
 pub fn render_verify(r: &VerifyReport) -> String {
     let (words, code) = verdict_words(&r.verdict);
-    let mut o = format!("{}  {}\n  Verdict: {words}\n", r.reference, short(&r.digest));
+    let mut o = format!(
+        "{}  {}\n  Verdict: {words}\n",
+        r.reference,
+        short(&r.digest)
+    );
     if let Some(s) = &r.signer {
         o.push_str(&format!("  Signed by: {s}\n"));
     }
@@ -328,21 +385,35 @@ fn layers_sentence(total: usize, missing: usize, corrupt: usize) -> String {
 
 // ---- commands ----
 
-pub async fn run(command: SupplyCommand, format: OutputFormat, state_dir: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    command: SupplyCommand,
+    format: OutputFormat,
+    state_dir: Option<PathBuf>,
+) -> Result<()> {
     let mut cfg = Config::default();
     if let Some(d) = state_dir {
         cfg.state_dir = d;
     }
     let json = matches!(format, OutputFormat::Json);
     match command {
-        SupplyCommand::Sbom { image, sbom_format, out, offline, refresh, platform } => {
+        SupplyCommand::Sbom {
+            image,
+            sbom_format,
+            out,
+            offline,
+            refresh,
+            platform,
+        } => {
             let fmt = Format::parse(&sbom_format)?;
             let (subject, _) = resolve(&cfg, &image, platform.as_deref(), offline, refresh).await?;
-            let s = sbom::load_or_collect(&cfg.state_dir, &subject, now()).map_err(map_layers_error)?;
-            let doc = serde_json::to_string_pretty(&sbom::render(&s, fmt, env!("CARGO_PKG_VERSION")))?;
+            let s =
+                sbom::load_or_collect(&cfg.state_dir, &subject, now()).map_err(map_layers_error)?;
+            let doc =
+                serde_json::to_string_pretty(&sbom::render(&s, fmt, env!("CARGO_PKG_VERSION")))?;
             match out {
                 Some(p) => {
-                    std::fs::write(&p, doc + "\n").with_context(|| format!("writing {}", p.display()))?;
+                    std::fs::write(&p, doc + "\n")
+                        .with_context(|| format!("writing {}", p.display()))?;
                     eprintln!("wrote {} ({} packages)", p.display(), s.packages.len());
                 }
                 None => println!("{doc}"),
@@ -353,7 +424,12 @@ pub async fn run(command: SupplyCommand, format: OutputFormat, state_dir: Option
             Ok(())
         }
         SupplyCommand::Sign { image } => sign(&image).await,
-        SupplyCommand::Verify { image, offline, refresh, platform } => {
+        SupplyCommand::Verify {
+            image,
+            offline,
+            refresh,
+            platform,
+        } => {
             let rep = verify(&cfg, &image, offline, refresh, platform.as_deref()).await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&rep)?);
@@ -365,23 +441,42 @@ pub async fn run(command: SupplyCommand, format: OutputFormat, state_dir: Option
             }
             Ok(())
         }
-        SupplyCommand::Scan { image, update, source, fail_on, offline, refresh, platform } => {
+        SupplyCommand::Scan {
+            image,
+            update,
+            source,
+            fail_on,
+            offline,
+            refresh,
+            platform,
+        } => {
             if update {
                 update_advisories(&cfg.state_dir, source.as_deref()).await?;
             }
             let Some(image) = image else {
                 if !update {
-                    anyhow::bail!("give an image to scan, or --update to refresh the advisory data");
+                    anyhow::bail!(
+                        "give an image to scan, or --update to refresh the advisory data"
+                    );
                 }
                 return Ok(());
             };
             let threshold = fail_on
                 .as_deref()
-                .map(|s| Severity::parse(s).filter(|v| *v != Severity::Unknown).with_context(|| format!("--fail-on {s:?}: use critical, high, medium or low")))
+                .map(|s| {
+                    Severity::parse(s)
+                        .filter(|v| *v != Severity::Unknown)
+                        .with_context(|| {
+                            format!("--fail-on {s:?}: use critical, high, medium or low")
+                        })
+                })
                 .transpose()?;
             let (subject, _) = resolve(&cfg, &image, platform.as_deref(), offline, refresh).await?;
-            let s = sbom::load_or_collect(&cfg.state_dir, &subject, now()).map_err(map_layers_error)?;
-            let data = advisory::load(&cfg.state_dir).map_err(|e| crate::supply_errors::coded(format!("{e:#}"), "IMAGE_ADVISORY_UNUSABLE"))?;
+            let s =
+                sbom::load_or_collect(&cfg.state_dir, &subject, now()).map_err(map_layers_error)?;
+            let data = advisory::load(&cfg.state_dir).map_err(|e| {
+                crate::supply_errors::coded(format!("{e:#}"), "IMAGE_ADVISORY_UNUSABLE")
+            })?;
             let report = advisory::scan(&s, data.as_ref(), now());
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -390,7 +485,9 @@ pub async fn run(command: SupplyCommand, format: OutputFormat, state_dir: Option
             }
             if let Some(t) = threshold {
                 if !report.advisory.present {
-                    eprintln!("--fail-on: there is no advisory data, so this image could not be judged");
+                    eprintln!(
+                        "--fail-on: there is no advisory data, so this image could not be judged"
+                    );
                     std::process::exit(2);
                 }
                 if report.worst().is_some_and(|w| w >= t) {
@@ -399,7 +496,9 @@ pub async fn run(command: SupplyCommand, format: OutputFormat, state_dir: Option
             }
             Ok(())
         }
-        SupplyCommand::Policy { command } => policy(&cfg, command.unwrap_or(PolicyCommand::Show), json).await,
+        SupplyCommand::Policy { command } => {
+            policy(&cfg, command.unwrap_or(PolicyCommand::Show), json).await
+        }
     }
 }
 
@@ -408,20 +507,30 @@ async fn policy(cfg: &Config, command: PolicyCommand, json: bool) -> Result<()> 
     match command {
         PolicyCommand::Show => {
             let path = supply::policy_path(sd);
-            match supply::load_policy(sd).map_err(|e| coded(format!("{e:#}"), "IMAGE_POLICY_INVALID"))? {
+            match supply::load_policy(sd)
+                .map_err(|e| coded(format!("{e:#}"), "IMAGE_POLICY_INVALID"))?
+            {
                 None if json => println!("{}", serde_json::json!({"present": false, "path": path})),
                 None => println!(
                     "No image policy ({} does not exist), so nothing is blocked.\nCreate one: fluxctl image policy init",
                     path.display()
                 ),
-                Some(p) if json => println!("{}", serde_json::to_string_pretty(&serde_json::json!({"present": true, "path": path, "policy": p}))?),
+                Some(p) if json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"present": true, "path": path, "policy": p})
+                    )?
+                ),
                 Some(p) => print!("{}", render_policy(&p, &path)),
             }
             Ok(())
         }
         PolicyCommand::Init => {
             let p = supply::init_policy(sd)?;
-            println!("wrote {}\nIt blocks unsigned images and critical findings. Edit it, then `fluxctl image policy` to review.", p.display());
+            println!(
+                "wrote {}\nIt blocks unsigned images and critical findings. Edit it, then `fluxctl image policy` to review.",
+                p.display()
+            );
             Ok(())
         }
         PolicyCommand::Check { image } => {
@@ -443,7 +552,8 @@ async fn policy(cfg: &Config, command: PolicyCommand, json: bool) -> Result<()> 
             Ok(())
         }
         PolicyCommand::Overrides => {
-            let text = std::fs::read_to_string(sd.join("oci").join(supply::OVERRIDE_LOG)).unwrap_or_default();
+            let text = std::fs::read_to_string(sd.join("oci").join(supply::OVERRIDE_LOG))
+                .unwrap_or_default();
             if text.trim().is_empty() {
                 println!("No runs have gone ahead against the policy.");
             } else if json {
@@ -489,7 +599,10 @@ async fn update_advisories(state_dir: &Path, source: Option<&str>) -> Result<()>
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(now, |d| d.as_secs());
-        (std::fs::read(p).with_context(|| format!("reading {source}"))?, mtime)
+        (
+            std::fs::read(p).with_context(|| format!("reading {source}"))?,
+            mtime,
+        )
     };
     let mut file = advisory::parse(&bytes, dated)
         .map_err(|e| coded(format!("{source}: {e:#}"), "IMAGE_ADVISORY_UNUSABLE"))?;
@@ -513,10 +626,18 @@ async fn sign(image: &str) -> Result<()> {
     let trust = open_trust()?;
     let rep = fluxvm_image::oci_manage::inspect(image, creds())
         .await
-        .map_err(|e| coded(format!("asking the registry about {image}: {e:#}"), "IMAGE_REGISTRY_UNREACHABLE"))?;
+        .map_err(|e| {
+            coded(
+                format!("asking the registry about {image}: {e:#}"),
+                "IMAGE_REGISTRY_UNREACHABLE",
+            )
+        })?;
     let rec = trust.sign_digest(&rep.digest)?;
     let r = fluxvm_image::oci_registry::ImageRef::parse(image)?;
-    let pinned = fluxvm_image::oci_registry::ImageRef { reference: rep.digest.clone(), ..r };
+    let pinned = fluxvm_image::oci_registry::ImageRef {
+        reference: rep.digest.clone(),
+        ..r
+    };
     let tmp = std::env::temp_dir().join(format!("fluxvm-image-sig-{}.json", std::process::id()));
     std::fs::write(&tmp, serde_json::to_vec_pretty(&rec)?)?;
     let res = fluxvm_image::oci_manage::attach(
@@ -558,7 +679,10 @@ pub async fn verify(
     // 1. The signature.
     let (reg_digest, records) = if offline {
         notes.push("Offline: used the signatures saved by the last successful check.".to_string());
-        (subject.manifest_digest.clone(), trust.load_signatures(&subject.manifest_digest)?)
+        (
+            subject.manifest_digest.clone(),
+            trust.load_signatures(&subject.manifest_digest)?,
+        )
     } else {
         use mac_trust::SignatureSource;
         let src = mac_trust::RegistrySource { creds: creds() };
@@ -587,17 +711,25 @@ pub async fn verify(
     }
     .to_string();
     if trusted.is_empty() && word != "unsigned" {
-        notes.push("Your trust store is empty: add a key with `fluxctl mac keys trust NAME FILE`.".into());
+        notes.push(
+            "Your trust store is empty: add a key with `fluxctl mac keys trust NAME FILE`.".into(),
+        );
     }
 
     // 2. The tag still means what we have cached.
     if !offline && reg_digest != subject.manifest_digest {
         let is_member = fluxvm_image::oci_manage::inspect(image, creds())
             .await
-            .map(|r| r.manifests.iter().any(|m| m.digest == subject.manifest_digest))
+            .map(|r| {
+                r.manifests
+                    .iter()
+                    .any(|m| m.digest == subject.manifest_digest)
+            })
             .unwrap_or(false);
         if is_member {
-            notes.push("The signature covers the multi-platform index this image is part of.".into());
+            notes.push(
+                "The signature covers the multi-platform index this image is part of.".into(),
+            );
         } else {
             word = "invalid".into();
             signer = None;
@@ -652,7 +784,13 @@ mod tests {
             distro: None,
             packages: pkgs
                 .iter()
-                .map(|(n, v)| sbom::Package { name: (*n).into(), version: (*v).into(), ecosystem: "deb".into(), arch: None, purl: String::new() })
+                .map(|(n, v)| sbom::Package {
+                    name: (*n).into(),
+                    version: (*v).into(),
+                    ecosystem: "deb".into(),
+                    arch: None,
+                    purl: String::new(),
+                })
                 .collect(),
             notes: vec![],
             generated_unix: 0,
@@ -685,7 +823,11 @@ mod tests {
                 summary: "x".into(),
             }],
         };
-        let r = advisory::scan(&sbom_of(&[("openssl", "1"), ("zlib", "1")]), Some(&f), 1_000_000 + 9 * 86_400);
+        let r = advisory::scan(
+            &sbom_of(&[("openssl", "1"), ("zlib", "1")]),
+            Some(&f),
+            1_000_000 + 9 * 86_400,
+        );
         let t = render_scan(&r);
         assert!(t.contains("Advisory data is 9 days old"), "{t}");
         assert!(t.contains("1 finding(s): 1 critical"));
@@ -706,9 +848,15 @@ mod tests {
             checked_unix: 0,
         };
         let t = render_verify(&r);
-        assert!(t.contains("NOT BY A KEY YOU TRUST") && t.contains("IMAGE_SIGNER_UNTRUSTED"), "{t}");
+        assert!(
+            t.contains("NOT BY A KEY YOU TRUST") && t.contains("IMAGE_SIGNER_UNTRUSTED"),
+            "{t}"
+        );
         assert!(t.contains("1 of 4 are not on this machine"));
-        assert_eq!(layers_sentence(3, 0, 0), "all 3 re-hashed and match their digests");
+        assert_eq!(
+            layers_sentence(3, 0, 0),
+            "all 3 re-hashed and match their digests"
+        );
         assert!(layers_sentence(3, 1, 2).contains("do NOT match"));
     }
 
@@ -716,7 +864,10 @@ mod tests {
     fn the_policy_reads_in_plain_words() {
         let p = supply::Policy::parse(supply::STARTER).unwrap();
         let t = render_policy(&p, Path::new("/x/policy.toml"));
-        assert!(t.contains("unsigned images: refused") && t.contains("refused at critical or worse"), "{t}");
+        assert!(
+            t.contains("unsigned images: refused") && t.contains("refused at critical or worse"),
+            "{t}"
+        );
     }
 
     #[test]
@@ -733,7 +884,12 @@ mod tests {
         assert!(known(&cfg, &s.reference).is_none());
         remember(d.path(), &s);
         assert_eq!(known(&cfg, "ghcr.io/acme/app:1").unwrap().0, s);
-        assert_eq!(known(&cfg, &format!("sha256:{}", "ab".repeat(8))).unwrap().0, s);
+        assert_eq!(
+            known(&cfg, &format!("sha256:{}", "ab".repeat(8)))
+                .unwrap()
+                .0,
+            s
+        );
         assert!(known(&cfg, "ghcr.io/acme/other:1").is_none());
     }
 
@@ -742,8 +898,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.state_dir = d.path().to_path_buf();
-        let e = resolve(&cfg, "nope:1", None, true, false).await.unwrap_err().to_string();
-        assert!(e.contains("IMAGE_NOT_CACHED") && e.contains("--offline"), "{e}");
+        let e = resolve(&cfg, "nope:1", None, true, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("IMAGE_NOT_CACHED") && e.contains("--offline"),
+            "{e}"
+        );
     }
 
     #[tokio::test]
@@ -756,19 +918,32 @@ mod tests {
         )
         .unwrap();
         let state = d.path().join("state");
-        update_advisories(&state, Some(src.to_str().unwrap())).await.unwrap();
+        update_advisories(&state, Some(src.to_str().unwrap()))
+            .await
+            .unwrap();
         let f = advisory::load(&state).unwrap().unwrap();
         assert_eq!(f.advisories.len(), 1);
         assert_eq!(f.source, src.to_str().unwrap());
         std::fs::write(&src, "not json").unwrap();
-        let e = update_advisories(&state, Some(src.to_str().unwrap())).await.unwrap_err().to_string();
+        let e = update_advisories(&state, Some(src.to_str().unwrap()))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("IMAGE_ADVISORY_UNUSABLE"), "{e}");
-        assert_eq!(advisory::load(&state).unwrap().unwrap().advisories.len(), 1, "bad update leaves the old data");
+        assert_eq!(
+            advisory::load(&state).unwrap().unwrap().advisories.len(),
+            1,
+            "bad update leaves the old data"
+        );
         // No source at all.
         // SAFETY: tests in this crate do not read this variable concurrently.
         let none = update_advisories(&state, None).await;
         if std::env::var_os("FLUXVM_ADVISORY_SOURCE").is_none() {
-            assert!(none.unwrap_err().to_string().contains("IMAGE_ADVISORY_SOURCE_MISSING"));
+            assert!(
+                none.unwrap_err()
+                    .to_string()
+                    .contains("IMAGE_ADVISORY_SOURCE_MISSING")
+            );
         }
     }
 }

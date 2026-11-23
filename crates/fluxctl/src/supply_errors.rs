@@ -27,8 +27,13 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_LAYERS_MISSING",
         status: None,
         summary: "Some of the image's layers are no longer in the local blob store, so its contents cannot be read.",
-        causes: &["`fluxctl oci prune` removed blobs no cached image needed", "the state directory was cleaned or moved"],
-        fixes: &["pull the image again: `fluxctl oci pull IMAGE`, or add `--refresh` to the command"],
+        causes: &[
+            "`fluxctl oci prune` removed blobs no cached image needed",
+            "the state directory was cleaned or moved",
+        ],
+        fixes: &[
+            "pull the image again: `fluxctl oci pull IMAGE`, or add `--refresh` to the command",
+        ],
         aliases: &["layers-missing"],
         signatures: &["pull the image first"],
     },
@@ -51,7 +56,10 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_UNSIGNED",
         status: None,
         summary: "Nothing vouches for this image: it has no signature.",
-        causes: &["the publisher never signed it", "the signature was attached to a different tag or digest"],
+        causes: &[
+            "the publisher never signed it",
+            "the signature was attached to a different tag or digest",
+        ],
         fixes: &[
             "sign it if it is yours: `fluxctl image sign IMAGE` (needs a key: `fluxctl mac keys generate`)",
             "if the policy blocks unsigned images and you accept the risk, start it with `--policy-override` (logged)",
@@ -64,7 +72,9 @@ pub const CODES: &[MacCode] = &[
         status: None,
         summary: "The image is signed, but not by a key you have chosen to trust.",
         causes: &["the signer's public key is not in your trust store"],
-        fixes: &["if you know and trust the signer, add their public key: `fluxctl mac keys trust NAME FILE`, then verify again"],
+        fixes: &[
+            "if you know and trust the signer, add their public key: `fluxctl mac keys trust NAME FILE`, then verify again",
+        ],
         aliases: &["signer-untrusted", "untrusted-signer"],
         signatures: &[],
     },
@@ -88,7 +98,10 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_ADVISORY_SOURCE_MISSING",
         status: None,
         summary: "There is no advisory data on this machine and no source was given to fetch it from.",
-        causes: &["`image scan` never ran with `--update`", "FluxVM does not choose a vulnerability feed for you"],
+        causes: &[
+            "`image scan` never ran with `--update`",
+            "FluxVM does not choose a vulnerability feed for you",
+        ],
         fixes: &[
             "load advisories from a file or URL: `fluxctl image scan --update --source FILE_OR_URL`",
             "or set `FLUXVM_ADVISORY_SOURCE` once. Accepted: OSV records (a JSON object, array or {\"vulns\": [...]}) or FluxVM's own advisory JSON",
@@ -101,8 +114,14 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_ADVISORY_UNUSABLE",
         status: None,
         summary: "The advisory file could not be read.",
-        causes: &["it is not JSON, or not one of the accepted shapes (OSV records or FluxVM's advisory JSON)", "the download was cut short"],
-        fixes: &["fetch it again with `--update`", "remove `<state_dir>/oci/advisories.json` to start over"],
+        causes: &[
+            "it is not JSON, or not one of the accepted shapes (OSV records or FluxVM's advisory JSON)",
+            "the download was cut short",
+        ],
+        fixes: &[
+            "fetch it again with `--update`",
+            "remove `<state_dir>/oci/advisories.json` to start over",
+        ],
         aliases: &["advisory-unusable"],
         signatures: &[],
     },
@@ -110,7 +129,9 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_POLICY_INVALID",
         status: None,
         summary: "The image policy file has a mistake, so it was not applied.",
-        causes: &["a misspelt key, or a value that is not allowed (`block_severity` must be critical, high, medium, low or none)"],
+        causes: &[
+            "a misspelt key, or a value that is not allowed (`block_severity` must be critical, high, medium, low or none)",
+        ],
         fixes: &[
             "see the message for the line, fix `<state_dir>/oci/policy.toml`, and run `fluxctl image policy` to confirm",
             "`fluxctl image policy init` writes a correct starter if the file does not exist",
@@ -122,7 +143,9 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_POLICY_DENIED",
         status: Some(403),
         summary: "The image policy lists this image on its deny list, so it was not started.",
-        causes: &["its reference or digest matches a pattern in `deny` of `<state_dir>/oci/policy.toml`"],
+        causes: &[
+            "its reference or digest matches a pattern in `deny` of `<state_dir>/oci/policy.toml`",
+        ],
         fixes: &[
             "use a different image, or remove the pattern from `deny`",
             "to start it once anyway: `--policy-override` (or `policy_override: true` in the API). It is written to the audit log and `policy-overrides.log`",
@@ -150,7 +173,9 @@ pub const CODES: &[MacCode] = &[
         code: "IMAGE_POLICY_VULNERABLE",
         status: Some(403),
         summary: "The image policy blocks images with known vulnerabilities at or above a severity, and this one has some.",
-        causes: &["`block_severity` is set and the advisory data lists a matching problem for a package in the image"],
+        causes: &[
+            "`block_severity` is set and the advisory data lists a matching problem for a package in the image",
+        ],
         fixes: &[
             "see them: `fluxctl image scan IMAGE`; update the image to a fixed version",
             "if the advisory data is old, refresh it: `fluxctl image scan IMAGE --update --source FILE_OR_URL`",
@@ -178,7 +203,10 @@ pub fn find(query: &str) -> Vec<&'static MacCode> {
         return exact;
     }
     if q.len() >= 4 {
-        return CODES.iter().filter(|c| c.code.contains(q.as_str())).collect();
+        return CODES
+            .iter()
+            .filter(|c| c.code.contains(q.as_str()))
+            .collect();
     }
     vec![]
 }

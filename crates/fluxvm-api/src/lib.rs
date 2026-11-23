@@ -126,7 +126,9 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
             };
         }
         // The image policy refused the image (`fluxctl explain IMAGE_POLICY_UNSIGNED`).
-        if e.downcast_ref::<fluxvm_image::supply::PolicyBlocked>().is_some() {
+        if e.downcast_ref::<fluxvm_image::supply::PolicyBlocked>()
+            .is_some()
+        {
             return Self {
                 status: StatusCode::FORBIDDEN,
                 message: format!("{:#}", e),

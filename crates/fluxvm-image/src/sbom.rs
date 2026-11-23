@@ -111,7 +111,9 @@ fn is_node_manifest(path: &str) -> bool {
 
 fn normalize(p: &Path) -> String {
     let s = p.to_string_lossy();
-    s.trim_start_matches("./").trim_start_matches('/').to_string()
+    s.trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Collect the files of interest from each layer in order, applying whiteouts.
@@ -145,7 +147,11 @@ fn walk_layers(store: &BlobStore, layers: &[Layer]) -> Result<BTreeMap<String, V
                 continue;
             }
             if let Some(gone) = base.strip_prefix(".wh.") {
-                let target = if dir.is_empty() { gone.to_string() } else { format!("{dir}/{gone}") };
+                let target = if dir.is_empty() {
+                    gone.to_string()
+                } else {
+                    format!("{dir}/{gone}")
+                };
                 let prefix = format!("{target}/");
                 files.retain(|k, _| k != &target && !k.starts_with(&prefix));
                 continue;
@@ -168,7 +174,13 @@ fn field(line: &str, key: &str) -> Option<String> {
     line.strip_prefix(key).map(|v| v.trim().to_string())
 }
 
-fn purl(ecosystem: &str, namespace: Option<&str>, name: &str, version: &str, arch: Option<&str>) -> String {
+fn purl(
+    ecosystem: &str,
+    namespace: Option<&str>,
+    name: &str,
+    version: &str,
+    arch: Option<&str>,
+) -> String {
     let ty = match ecosystem {
         "pypi" => "pypi",
         "npm" => "npm",
@@ -217,8 +229,13 @@ pub fn parse_dpkg(text: &str, distro_id: &str) -> Vec<Package> {
                 status = Some(v);
             }
         }
-        let (Some(name), Some(version)) = (name, version) else { continue };
-        if status.as_deref().is_some_and(|s| !s.ends_with("installed") || s.contains("not-installed")) {
+        let (Some(name), Some(version)) = (name, version) else {
+            continue;
+        };
+        if status
+            .as_deref()
+            .is_some_and(|s| !s.ends_with("installed") || s.contains("not-installed"))
+        {
             continue;
         }
         out.push(Package {
@@ -272,7 +289,13 @@ fn parse_python(text: &str) -> Option<Package> {
     }
     let (name, version) = (name?, version?);
     Some(Package {
-        purl: purl("pypi", None, &name.to_ascii_lowercase().replace('_', "-"), &version, None),
+        purl: purl(
+            "pypi",
+            None,
+            &name.to_ascii_lowercase().replace('_', "-"),
+            &version,
+            None,
+        ),
         name,
         version,
         ecosystem: "pypi".into(),
@@ -288,7 +311,13 @@ fn parse_node(bytes: &[u8]) -> Option<Package> {
         Some((scope, n)) => format!("pkg:npm/%40{}/{}@{}", enc(scope), enc(n), enc(&version)),
         None => purl("npm", None, &name, &version, None),
     };
-    Some(Package { purl: p, name, version, ecosystem: "npm".into(), arch: None })
+    Some(Package {
+        purl: p,
+        name,
+        version,
+        ecosystem: "npm".into(),
+        arch: None,
+    })
 }
 
 fn os_release(files: &BTreeMap<String, Vec<u8>>) -> (String, Option<String>) {
@@ -355,8 +384,12 @@ pub fn collect(store: &BlobStore, subject: &Subject, now: u64) -> Result<Sbom> {
 
 fn cache_path(state_dir: &Path, digest: &str) -> Option<std::path::PathBuf> {
     let hex = digest.strip_prefix("sha256:")?;
-    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| state_dir.join("oci").join("sbom").join(format!("{hex}.json")))
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| {
+        state_dir
+            .join("oci")
+            .join("sbom")
+            .join(format!("{hex}.json"))
+    })
 }
 
 /// The cached SBOM for this manifest digest (layers are immutable, so it never goes stale), else build and cache it.
@@ -526,7 +559,12 @@ mod tests {
             let c = gz(l);
             let d = format!("sha256:{}", hex::encode(Sha256::digest(&c)));
             store.put(&d, &c).unwrap();
-            ls.push(Layer { digest: d, size: c.len() as u64, compression: Compression::Gzip, diff_id: String::new() });
+            ls.push(Layer {
+                digest: d,
+                size: c.len() as u64,
+                compression: Compression::Gzip,
+                diff_id: String::new(),
+            });
         }
         Subject {
             reference: "example.test/app:1".into(),
@@ -544,17 +582,39 @@ mod tests {
         let l1 = tar_of(&[
             ("etc/os-release", "ID=debian\nVERSION_ID=\"12\"\n"),
             ("var/lib/dpkg/status", DPKG),
-            ("usr/lib/python3/site-packages/requests-2.31.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: requests\nVersion: 2.31.0\n\nbody Name: x\n"),
-            ("app/node_modules/left-pad/package.json", "{\"name\":\"left-pad\",\"version\":\"1.3.0\"}"),
-            ("app/node_modules/left-pad/node_modules/deep/package.json", "{\"name\":\"deep\",\"version\":\"2.0.0\"}"),
+            (
+                "usr/lib/python3/site-packages/requests-2.31.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: requests\nVersion: 2.31.0\n\nbody Name: x\n",
+            ),
+            (
+                "app/node_modules/left-pad/package.json",
+                "{\"name\":\"left-pad\",\"version\":\"1.3.0\"}",
+            ),
+            (
+                "app/node_modules/left-pad/node_modules/deep/package.json",
+                "{\"name\":\"deep\",\"version\":\"2.0.0\"}",
+            ),
         ]);
-        let l2 = tar_of(&[("lib/apk/db/installed", "P:musl\nV:1.2.4-r2\nA:aarch64\n\nP:busybox\nV:1.36.1-r5\n")]);
+        let l2 = tar_of(&[(
+            "lib/apk/db/installed",
+            "P:musl\nV:1.2.4-r2\nA:aarch64\n\nP:busybox\nV:1.36.1-r5\n",
+        )]);
         let s = subject_with(d.path(), &[l1, l2]);
         let sbom = collect(&BlobStore::for_state_dir(d.path()), &s, 0).unwrap();
-        let names: Vec<_> = sbom.packages.iter().map(|p| format!("{}:{}@{}", p.ecosystem, p.name, p.version)).collect();
-        assert!(names.contains(&"deb:openssl@3.0.11-1".to_string()), "{names:?}");
+        let names: Vec<_> = sbom
+            .packages
+            .iter()
+            .map(|p| format!("{}:{}@{}", p.ecosystem, p.name, p.version))
+            .collect();
+        assert!(
+            names.contains(&"deb:openssl@3.0.11-1".to_string()),
+            "{names:?}"
+        );
         assert!(names.contains(&"deb:libc6@2.36-9".to_string()));
-        assert!(!names.iter().any(|n| n.contains("gone")), "removed packages are skipped");
+        assert!(
+            !names.iter().any(|n| n.contains("gone")),
+            "removed packages are skipped"
+        );
         assert!(names.contains(&"apk:musl@1.2.4-r2".to_string()));
         assert!(names.contains(&"pypi:requests@2.31.0".to_string()));
         assert!(names.contains(&"npm:left-pad@1.3.0".to_string()));
@@ -599,7 +659,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut s = subject_with(d.path(), &[tar_of(&[("a", "b")])]);
         s.layers[0].digest = format!("sha256:{}", "cd".repeat(32));
-        let e = collect(&BlobStore::for_state_dir(d.path()), &s, 0).unwrap_err().to_string();
+        let e = collect(&BlobStore::for_state_dir(d.path()), &s, 0)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("pull the image first"), "{e}");
     }
 
@@ -623,7 +685,10 @@ mod tests {
     #[test]
     fn the_sbom_is_cached_by_manifest_digest() {
         let d = tempfile::tempdir().unwrap();
-        let s = subject_with(d.path(), &[tar_of(&[("lib/apk/db/installed", "P:a\nV:1\n")])]);
+        let s = subject_with(
+            d.path(),
+            &[tar_of(&[("lib/apk/db/installed", "P:a\nV:1\n")])],
+        );
         let first = load_or_collect(d.path(), &s, 5).unwrap();
         // Layers gone: the cache still answers.
         std::fs::remove_dir_all(d.path().join("oci").join("blobs")).unwrap();

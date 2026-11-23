@@ -46,8 +46,12 @@ pub(crate) fn subject_of(e: &OciImageEntry) -> Subject {
 
 /// The last few lines of `policy-overrides.log`, newest last.
 fn recent_overrides(state_dir: &std::path::Path, n: usize) -> Vec<Value> {
-    let text = std::fs::read_to_string(state_dir.join("oci").join(supply::OVERRIDE_LOG)).unwrap_or_default();
-    let mut v: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let text = std::fs::read_to_string(state_dir.join("oci").join(supply::OVERRIDE_LOG))
+        .unwrap_or_default();
+    let mut v: Vec<Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     let skip = v.len().saturating_sub(n);
     v.drain(..skip);
     v

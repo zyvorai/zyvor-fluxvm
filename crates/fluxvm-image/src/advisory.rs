@@ -20,7 +20,9 @@ pub const FORMAT: &str = "fluxvm-advisories-v1";
 /// Largest advisory file accepted from `--update`.
 pub const MAX_BYTES: usize = 256 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     #[default]
@@ -121,10 +123,10 @@ pub fn save(state_dir: &Path, file: &AdvisoryFile) -> Result<()> {
 
 /// Parse either input shape. `fallback_unix` dates data that does not carry its own date (an OSV dump).
 pub fn parse(bytes: &[u8], fallback_unix: u64) -> Result<AdvisoryFile> {
-    let v: serde_json::Value =
-        serde_json::from_slice(bytes).context("the file is not JSON")?;
+    let v: serde_json::Value = serde_json::from_slice(bytes).context("the file is not JSON")?;
     if v.get("advisories").is_some_and(|a| a.is_array()) {
-        let mut f: AdvisoryFile = serde_json::from_value(v).context("not a fluxvm advisory file")?;
+        let mut f: AdvisoryFile =
+            serde_json::from_value(v).context("not a fluxvm advisory file")?;
         if f.updated_unix == 0 {
             f.updated_unix = fallback_unix;
         }
@@ -138,7 +140,9 @@ pub fn parse(bytes: &[u8], fallback_unix: u64) -> Result<AdvisoryFile> {
     } else if v.get("id").is_some() {
         vec![v]
     } else {
-        bail!("expected a fluxvm advisory file or OSV records (an object with id, an array, or {{\"vulns\": [...]}})");
+        bail!(
+            "expected a fluxvm advisory file or OSV records (an object with id, an array, or {{\"vulns\": [...]}})"
+        );
     };
     let mut advisories = Vec::new();
     for r in &records {
@@ -164,7 +168,9 @@ fn osv_ecosystem(name: &str) -> String {
 }
 
 fn osv_record(r: &serde_json::Value, out: &mut Vec<Advisory>) {
-    let Some(id) = r.get("id").and_then(|v| v.as_str()) else { return };
+    let Some(id) = r.get("id").and_then(|v| v.as_str()) else {
+        return;
+    };
     let summary = r
         .get("summary")
         .and_then(|v| v.as_str())
@@ -175,11 +181,30 @@ fn osv_record(r: &serde_json::Value, out: &mut Vec<Advisory>) {
         .and_then(|v| v.as_str())
         .and_then(Severity::parse)
         .unwrap_or_default();
-    for aff in r.get("affected").and_then(|a| a.as_array()).into_iter().flatten() {
-        let Some(name) = aff.pointer("/package/name").and_then(|v| v.as_str()) else { continue };
-        let eco = osv_ecosystem(aff.pointer("/package/ecosystem").and_then(|v| v.as_str()).unwrap_or("*"));
-        for range in aff.get("ranges").and_then(|a| a.as_array()).into_iter().flatten() {
-            if !matches!(range.get("type").and_then(|v| v.as_str()), Some("ECOSYSTEM" | "SEMVER")) {
+    for aff in r
+        .get("affected")
+        .and_then(|a| a.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = aff.pointer("/package/name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let eco = osv_ecosystem(
+            aff.pointer("/package/ecosystem")
+                .and_then(|v| v.as_str())
+                .unwrap_or("*"),
+        );
+        for range in aff
+            .get("ranges")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if !matches!(
+                range.get("type").and_then(|v| v.as_str()),
+                Some("ECOSYSTEM" | "SEMVER")
+            ) {
                 continue;
             }
             let mut introduced: Option<String> = None;
@@ -195,7 +220,12 @@ fn osv_record(r: &serde_json::Value, out: &mut Vec<Advisory>) {
                     summary: summary.clone(),
                 });
             };
-            for ev in range.get("events").and_then(|a| a.as_array()).into_iter().flatten() {
+            for ev in range
+                .get("events")
+                .and_then(|a| a.as_array())
+                .into_iter()
+                .flatten()
+            {
                 if let Some(i) = ev.get("introduced").and_then(|v| v.as_str()) {
                     if open {
                         emit(&introduced, None, out);
@@ -328,8 +358,20 @@ pub fn cmp_generic(a: &str, b: &str) -> Ordering {
                     return o;
                 }
             }
-            (Some(x), None) => return if x.parse::<u64>().is_ok() { Ordering::Greater } else { Ordering::Less },
-            (None, Some(y)) => return if y.parse::<u64>().is_ok() { Ordering::Less } else { Ordering::Greater },
+            (Some(x), None) => {
+                return if x.parse::<u64>().is_ok() {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                };
+            }
+            (None, Some(y)) => {
+                return if y.parse::<u64>().is_ok() {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+            }
             (None, None) => {}
         }
     }
@@ -395,10 +437,21 @@ impl DataStatus {
     /// "advisory data is 12 days old", or the plain statement that there is none.
     pub fn describe(&self) -> String {
         match (self.present, self.age_days) {
-            (false, _) => "there is no advisory data on this machine, so nothing was checked".into(),
-            (true, Some(0)) => format!("advisory data is from today ({} advisories)", self.advisories),
-            (true, Some(1)) => format!("advisory data is 1 day old ({} advisories)", self.advisories),
-            (true, Some(n)) => format!("advisory data is {n} days old ({} advisories)", self.advisories),
+            (false, _) => {
+                "there is no advisory data on this machine, so nothing was checked".into()
+            }
+            (true, Some(0)) => format!(
+                "advisory data is from today ({} advisories)",
+                self.advisories
+            ),
+            (true, Some(1)) => format!(
+                "advisory data is 1 day old ({} advisories)",
+                self.advisories
+            ),
+            (true, Some(n)) => format!(
+                "advisory data is {n} days old ({} advisories)",
+                self.advisories
+            ),
             (true, None) => "advisory data has no date".into(),
         }
     }
@@ -406,7 +459,13 @@ impl DataStatus {
 
 pub fn status(file: Option<&AdvisoryFile>, now: u64) -> DataStatus {
     match file {
-        None => DataStatus { present: false, updated_unix: 0, age_days: None, advisories: 0, source: String::new() },
+        None => DataStatus {
+            present: false,
+            updated_unix: 0,
+            age_days: None,
+            advisories: 0,
+            source: String::new(),
+        },
         Some(f) => DataStatus {
             present: true,
             updated_unix: f.updated_unix,
@@ -492,10 +551,16 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>> {
     if !resp.status().is_success() {
         bail!("{url} answered {}", resp.status());
     }
-    if resp.content_length().is_some_and(|n| n as usize > MAX_BYTES) {
+    if resp
+        .content_length()
+        .is_some_and(|n| n as usize > MAX_BYTES)
+    {
         bail!("{url} is larger than {} MiB", MAX_BYTES >> 20);
     }
-    let bytes = resp.bytes().await.with_context(|| format!("reading {url}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading {url}"))?;
     if bytes.len() > MAX_BYTES {
         bail!("{url} is larger than {} MiB", MAX_BYTES >> 20);
     }
@@ -507,10 +572,22 @@ mod tests {
     use super::*;
 
     fn pkg(eco: &str, name: &str, version: &str) -> Package {
-        Package { name: name.into(), version: version.into(), ecosystem: eco.into(), arch: None, purl: String::new() }
+        Package {
+            name: name.into(),
+            version: version.into(),
+            ecosystem: eco.into(),
+            arch: None,
+            purl: String::new(),
+        }
     }
 
-    fn adv(eco: &str, name: &str, intro: Option<&str>, fixed: Option<&str>, sev: Severity) -> Advisory {
+    fn adv(
+        eco: &str,
+        name: &str,
+        intro: Option<&str>,
+        fixed: Option<&str>,
+        sev: Severity,
+    ) -> Advisory {
         Advisory {
             id: "CVE-TEST-1".into(),
             package: name.into(),
@@ -542,11 +619,26 @@ mod tests {
 
     #[test]
     fn ranges_decide_who_is_affected() {
-        let a = adv("deb", "openssl", Some("3.0.0"), Some("3.0.12-1"), Severity::Critical);
+        let a = adv(
+            "deb",
+            "openssl",
+            Some("3.0.0"),
+            Some("3.0.12-1"),
+            Severity::Critical,
+        );
         assert!(matches(&a, &pkg("deb", "openssl", "3.0.11-1")));
-        assert!(!matches(&a, &pkg("deb", "openssl", "3.0.12-1")), "the fixed version is not affected");
-        assert!(!matches(&a, &pkg("deb", "openssl", "2.9")), "before it was introduced");
-        assert!(!matches(&a, &pkg("apk", "openssl", "3.0.11-1")), "other ecosystem");
+        assert!(
+            !matches(&a, &pkg("deb", "openssl", "3.0.12-1")),
+            "the fixed version is not affected"
+        );
+        assert!(
+            !matches(&a, &pkg("deb", "openssl", "2.9")),
+            "before it was introduced"
+        );
+        assert!(
+            !matches(&a, &pkg("apk", "openssl", "3.0.11-1")),
+            "other ecosystem"
+        );
         let unfixed = adv("*", "x", None, None, Severity::Low);
         assert!(matches(&unfixed, &pkg("npm", "x", "99.0.0")));
         let py = adv("pypi", "My_Pkg", None, Some("2.0"), Severity::High);
@@ -594,7 +686,10 @@ mod tests {
         assert_eq!(r.findings[0].package, "b");
         assert_eq!(r.worst(), Some(Severity::Critical));
         assert_eq!(r.counts["low"], 1);
-        assert_eq!(r.advisory.describe(), "advisory data is 12 days old (2 advisories)");
+        assert_eq!(
+            r.advisory.describe(),
+            "advisory data is 12 days old (2 advisories)"
+        );
     }
 
     #[test]
@@ -627,7 +722,12 @@ mod tests {
     fn save_and_load_round_trip() {
         let d = tempfile::tempdir().unwrap();
         assert!(load(d.path()).unwrap().is_none());
-        let f = AdvisoryFile { format: FORMAT.into(), updated_unix: 7, source: "s".into(), advisories: vec![adv("*", "x", None, None, Severity::High)] };
+        let f = AdvisoryFile {
+            format: FORMAT.into(),
+            updated_unix: 7,
+            source: "s".into(),
+            advisories: vec![adv("*", "x", None, None, Severity::High)],
+        };
         save(d.path(), &f).unwrap();
         assert_eq!(load(d.path()).unwrap().unwrap(), f);
     }
