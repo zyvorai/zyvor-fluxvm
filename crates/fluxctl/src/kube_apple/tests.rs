@@ -22,6 +22,32 @@ struct FVm {
     labels: Option<(String, Role, String, String)>,
 }
 
+/// What a real server's `backup` streams: a gzip tar with the token and the datastore, so the verify that follows every
+/// backup passes.
+fn fake_backup_archive(ds: Datastore) -> Vec<u8> {
+    let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::fast(),
+    ));
+    let mut add = |name: &str, data: &[u8]| {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o600);
+        h.set_cksum();
+        b.append_data(&mut h, name, data).unwrap();
+    };
+    add("token", b"K10fake::server:secret");
+    match ds {
+        Datastore::Sqlite => {
+            let mut db = b"SQLite format 3\0".to_vec();
+            db.extend([0u8; 512]);
+            add("db/state.db", &db);
+        }
+        Datastore::Etcd => add("db/snapshots/fluxvm-1", b"snapshot"),
+    }
+    b.into_inner().unwrap().finish().unwrap()
+}
+
 struct Fake {
     root: PathBuf,
     log: RefCell<Vec<String>>,
@@ -324,7 +350,7 @@ impl Host for Fake {
     }
     async fn ssh(
         &self,
-        _st: &State,
+        st: &State,
         node: &str,
         script: &str,
         stdin: Option<&[u8]>,
@@ -408,7 +434,8 @@ impl Host for Fake {
                 format!("disk={n}\ncm={n}\n").into_bytes()
             }
             "snapshot-ls" => b"fluxvm-1-dev-1700000000  1MiB\n".to_vec(),
-            "backup" | "snapshot-pull" => {
+            "backup" => fake_backup_archive(st.datastore),
+            "snapshot-pull" => {
                 let mut v = vec![0x1f, 0x8b];
                 v.extend([0u8; 64]);
                 v

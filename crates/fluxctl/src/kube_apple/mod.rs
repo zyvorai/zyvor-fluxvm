@@ -598,6 +598,8 @@ pub(crate) async fn create_value<H: host::Host>(
         },
     };
     let report = lifecycle::create(h, store, &req).await?;
+    // A new cluster backs itself up every day (see `fluxctl kube backup schedule`).
+    crate::kube_backups::enable_default(store, &req.name);
     let note = gateway_choice::choice_note(choice, gateway_installed).replace("NAME", &req.name);
     let Some(plan) = platform_plan else {
         // Nothing was asked for, but the choice is still recorded so the report says why there is no gateway.

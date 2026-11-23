@@ -1395,7 +1395,15 @@ pub async fn upgrade<H: Host>(
     }
     let mut backed_up = None;
     if req.backup {
-        match backup(h, store, name, None).await {
+        match crate::kube_backups::take(
+            h,
+            store,
+            name,
+            fluxvm_core::k3s_backups::Kind::PreUpgrade,
+            None,
+        )
+        .await
+        {
             Ok(b) => backed_up = Some(b.file),
             Err(e) => {
                 clean_staged(h, &st, std::slice::from_ref(&server)).await;

@@ -57,6 +57,7 @@ mod kube_app_cmd;
 mod kube_apple;
 mod kube_apps;
 mod kube_backup;
+mod kube_backups;
 mod kube_chaos;
 mod kube_checkpoint;
 mod kube_cis;
@@ -832,10 +833,36 @@ enum KubeCommand {
         label: String,
     },
     /// Put the cluster back as a checkpoint saved it: every object and running pod, in seconds. Waits until the API answers.
+    /// Given a k3s backup instead (a name from `kube backups`, a path, or --latest), it replaces the cluster's datastore
+    /// from that backup after verifying it and saving the current state; that one needs --yes.
     Restore {
         #[command(flatten)]
         cluster: KubeArgs,
-        label: String,
+        /// A checkpoint label, or a backup (name ending in .tar.gz, or a path).
+        #[arg(required_unless_present = "latest")]
+        label: Option<String>,
+        /// Restore the newest backup of the k3s cluster.
+        #[arg(long, conflicts_with = "label")]
+        latest: bool,
+        /// With a backup: the k3s cluster (`kube cluster`) to restore into (default: `default`, or the only one).
+        #[arg(long = "k3s-cluster", value_name = "NAME")]
+        k3s_cluster: Option<String>,
+        /// With a backup: confirm that the cluster's state is replaced.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// With a backup: print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Back up the k3s cluster's state (`kube cluster`) to a verified file: `fluxctl kube backup`. Scheduled backups are on
+    /// by default for new clusters. Subcommands: verify, prune, schedule, run-due. See docs/kube-backups.md.
+    Backup(kube_backups::BackupArgs),
+    /// List the k3s cluster's backups with their age and size.
+    Backups {
+        #[arg(long)]
+        cluster: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// List the cluster's checkpoints as JSON, newest first.
     Checkpoints {
@@ -6551,6 +6578,21 @@ async fn main() -> Result<()> {
         };
         let code = tokio::task::block_in_place(|| kube_app_cmd::run(cmd));
         std::process::exit(code);
+    // Listing, verifying, pruning and scheduling k3s backups only read and write files: no daemon needed.
+    if let Command::Kube { command } = &cli.command {
+        match command {
+            KubeCommand::Backups { cluster, json } => {
+                return kube_backups::cmd_list(cluster.as_deref(), *json);
+            }
+            KubeCommand::Backup(a) => {
+                if let Some(sub) = a.sub.as_ref()
+                    && !matches!(sub, kube_backups::BackupSub::RunDue { .. })
+                {
+                    return kube_backups::cmd_offline(sub);
+                }
+            }
+            _ => {}
+        }
     }
 
     // `kube prompt` runs on every shell prompt: no daemon, no VmManager, nothing slow.
@@ -8926,12 +8968,37 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 kube_checkpoint::checkpoint(api, &cluster.options()?, &label).await?
             );
         }
-        KubeCommand::Restore { cluster, label } => {
-            println!(
-                "{}",
-                kube_checkpoint::restore(api, &cluster.options()?, &label).await?
-            );
+        KubeCommand::Restore {
+            cluster,
+            label,
+            latest,
+            k3s_cluster,
+            yes,
+            json,
+        } => {
+            if latest || label.as_deref().is_some_and(kube_backups::is_backup_arg) {
+                kube_backups::cmd_restore(
+                    api,
+                    label.as_deref(),
+                    latest,
+                    k3s_cluster.as_deref(),
+                    yes,
+                    json,
+                )
+                .await?;
+            } else {
+                let label = label.unwrap_or_default();
+                println!(
+                    "{}",
+                    kube_checkpoint::restore(api, &cluster.options()?, &label).await?
+                );
+            }
         }
+        KubeCommand::Backup(a) => {
+            let json = a.json;
+            kube_backups::cmd_backup(api, a, json).await?;
+        }
+        KubeCommand::Backups { .. } => unreachable!("listed before the daemon is needed"),
         KubeCommand::Checkpoints { cluster } => {
             println!(
                 "{}",

@@ -57,6 +57,7 @@ mod agent_sessions;
 mod cluster_health;
 mod docker_view;
 mod guest_ops;
+mod k3s_backups;
 mod kube;
 mod kube_actions;
 mod kube_apps;
@@ -537,6 +538,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 pub fn router(manager: Arc<VmManager>) -> Router {
     fluxvm_scheduler::history::start_sampler(&manager);
     agent_sessions::start_sweeper(&manager);
+    k3s_backups::start_scheduler();
     let oidc = build_oidc(&manager.cfg.auth);
     let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
@@ -1060,6 +1062,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(macos_pool_api::routes())
         .merge(mac_view::routes())
         .merge(cluster_health::routes())
+        .merge(k3s_backups::routes())
         .merge(support_bundle::routes())
         .merge(image_security::routes())
         .merge(up_plan::routes())
