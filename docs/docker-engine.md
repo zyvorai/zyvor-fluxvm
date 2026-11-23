@@ -14,7 +14,7 @@ managed by systemd, rootless where the kernel allows it, no Docker API. See [lin
 | | Built-in `docker.sock` | `fluxctl docker` |
 |---|---|---|
 | Containers | one microVM each | ordinary containers in one VM |
-| `docker build`, Compose | no | yes |
+| `docker build`, Compose | build only (macOS images, forwarded to the Mac builder); no Compose | yes |
 | Bind mounts of Mac paths | no | yes, for folders you share (below) |
 | Docker networks | no | yes |
 | Start-up | about a second per container | one VM, a few minutes the first time (it installs Docker) |
@@ -22,7 +22,7 @@ managed by systemd, rootless where the kernel allows it, no Docker API. See [lin
 
 ## What the built-in `docker.sock` supports
 
-Every path also works with a version prefix (`/v1.43/containers/json`). Anything not listed answers `501` with a Docker-style
+Every path also works with a version prefix (`/v1.44/containers/json`; the engine reports API 1.44, the oldest the current docker CLI accepts). Anything not listed answers `501` with a Docker-style
 `{"message": ...}` body that names `fluxctl docker up`, so the `docker` CLI prints a sentence you can act on.
 
 | Endpoint | `docker` command | Notes |
@@ -156,3 +156,24 @@ that engine.
 Live check: `scripts/docker-engine-live-test.sh`.
 
 Need Kubernetes instead? `fluxctl kube up` does the same for a single-node k3s cluster: [kubernetes-on-mac.md](kubernetes-on-mac.md).
+
+## `docker build` on the built-in socket
+
+On a Mac the built-in `docker.sock` forwards `docker build` to the FluxVM image builder (`fluxctl mac build`), so one command builds a
+macOS image from a Macfile (pass `-f Macfile`: the docker CLI looks for `Dockerfile` itself before it uploads anything; a `Dockerfile` written in Macfile syntax works without `-f`).
+
+```sh
+fluxctl docker context install --builtin --use     # point docker at the built-in socket (repair a dead one: fluxctl docker context repair)
+DOCKER_BUILDKIT=0 docker build -f Macfile -t app:1 --build-arg VER=3 .
+fluxctl docker builds                              # the history, same as Studio > Images > Builds
+```
+
+What is honoured: `-t` (several), `-f`, `--build-arg`, `--label`, `--target`, `--platform`, `--no-cache`, `-q`, `.dockerignore`. The docker CLI
+(v29 with the buildx plugin, the only one tried) builds with BuildKit unless `DOCKER_BUILDKIT=0` is set, even though `/_ping` says
+`Builder-Version: 1`; its default builder then tries to pull and run `moby/buildkit`, which the socket refuses at once. BuildKit
+(`docker buildx build`, `--secret`, `--ssh`) is refused with the sentence `DOCKER_BUILDKIT=0 docker build ...` or `fluxctl mac build --secret ... --ssh default`. Flags that
+cannot apply to a macOS VM build (`--memory`, `--cpuset-cpus`, `--squash`, `--add-host`, `--network`, `--cache-from`, `--output`, git or
+URL contexts) are refused before the upload with the `fluxctl` equivalent. The new image's id is the store digest as `sha256:...`;
+`docker images` lists it. `docker run` of that image is not wired: it answers `fluxctl mac run NAME`.
+
+The history (tags, flag names, outcome, time, image id; never a build-arg value) is kept in `docker-builds.json` next to the socket.

@@ -126,7 +126,7 @@ pub fn config_dir_from_env() -> Option<PathBuf> {
     )
 }
 
-fn meta_path(dir: &Path) -> PathBuf {
+pub fn meta_path(dir: &Path) -> PathBuf {
     dir.join("contexts")
         .join("meta")
         .join(meta_dir_name(NAME))
@@ -276,6 +276,50 @@ pub fn install(dir: &Path, socket: &Path, use_current: bool) -> Result<Installed
         changed,
         made_current,
     })
+}
+
+/// What `fluxctl docker context repair` should do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Repair {
+    /// There is no `fluxvm` context to repair.
+    NoContext,
+    /// The context points at something that is not a unix socket; it was not made by `context install`, so it is left alone.
+    Foreign(String),
+    /// The socket the context points at answers.
+    Healthy(PathBuf),
+    /// The context points at a socket that does not answer; this one does.
+    Repoint { from: PathBuf, to: PathBuf },
+    /// Nothing answers, so the context cannot be fixed by pointing it elsewhere.
+    NothingAnswers { from: PathBuf },
+}
+
+/// The unix socket path of a `unix:///path` host.
+pub fn socket_of_host(host: &str) -> Option<PathBuf> {
+    host.strip_prefix("unix://").map(PathBuf::from)
+}
+
+/// Decide the repair from the context's host and which sockets answer. `candidates` are tried in order.
+pub fn plan_repair(
+    host: Option<&str>,
+    answers: &dyn Fn(&Path) -> bool,
+    candidates: &[PathBuf],
+) -> Repair {
+    let Some(host) = host else {
+        return Repair::NoContext;
+    };
+    let Some(from) = socket_of_host(host) else {
+        return Repair::Foreign(host.to_owned());
+    };
+    if answers(&from) {
+        return Repair::Healthy(from);
+    }
+    match candidates.iter().find(|c| **c != from && answers(c)) {
+        Some(to) => Repair::Repoint {
+            from,
+            to: to.clone(),
+        },
+        None => Repair::NothingAnswers { from },
+    }
 }
 
 /// What [`uninstall`] did.
@@ -442,6 +486,34 @@ pub fn status(i: &StatusInput<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repair_points_a_dead_context_at_a_live_socket() {
+        let live = |p: &Path| p == Path::new("/run/b.sock");
+        let c = [PathBuf::from("/run/a.sock"), PathBuf::from("/run/b.sock")];
+        assert_eq!(plan_repair(None, &live, &c), Repair::NoContext);
+        assert_eq!(
+            plan_repair(Some("tcp://h:1"), &live, &c),
+            Repair::Foreign("tcp://h:1".into())
+        );
+        assert_eq!(
+            plan_repair(Some("unix:///run/b.sock"), &live, &c),
+            Repair::Healthy("/run/b.sock".into())
+        );
+        assert_eq!(
+            plan_repair(Some("unix:///run/dead.sock"), &live, &c),
+            Repair::Repoint {
+                from: "/run/dead.sock".into(),
+                to: "/run/b.sock".into()
+            }
+        );
+        assert_eq!(
+            plan_repair(Some("unix:///run/dead.sock"), &|_| false, &c),
+            Repair::NothingAnswers {
+                from: "/run/dead.sock".into()
+            }
+        );
+    }
 
     #[test]
     fn meta_json_is_dockers_exact_format() {
