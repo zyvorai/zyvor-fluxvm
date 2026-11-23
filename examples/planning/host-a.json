@@ -1,0 +1,42 @@
+{
+  "name": "host-a",
+  "arch": "x86_64",
+  "kernel": "6.8.0-45-generic",
+  "memoryMib": 131072,
+  "freeMemoryMib": 90000,
+  "smt": true,
+  "cpu": {
+    "vendor": "GenuineIntel",
+    "modelName": "Intel(R) Xeon(R) Gold 6338",
+    "family": 6,
+    "model": 106,
+    "stepping": 6,
+    "flags": ["sse4_2", "avx", "avx2", "avx512f", "avx512bw", "vmx"]
+  },
+  "backends": { "qemu": "9.1.0", "cloud-hypervisor": "v54.0", "firecracker": "1.10.1" },
+  "topology": {
+    "numaNodes": [
+      {
+        "id": 0, "cpus": [0, 1, 2, 3, 4, 5, 6, 7],
+        "threadSiblings": [[0, 1], [2, 3], [4, 5], [6, 7]],
+        "memoryMib": 65536, "freeMemoryMib": 30000,
+        "hugepages": [{ "sizeKib": 2048, "total": 8192, "free": 0 }],
+        "distances": [10, 21]
+      },
+      {
+        "id": 1, "cpus": [8, 9, 10, 11, 12, 13, 14, 15],
+        "threadSiblings": [[8, 9], [10, 11], [12, 13], [14, 15]],
+        "memoryMib": 65536, "freeMemoryMib": 60000,
+        "hugepages": [{ "sizeKib": 2048, "total": 16384, "free": 16384 }],
+        "distances": [21, 10]
+      }
+    ],
+    "devices": [
+      {
+        "bdf": "0000:3b:00.0", "class": "gpu", "classId": 196608, "vendorId": 4318, "deviceId": 9999,
+        "numaNode": 1, "pcieRoot": "pci0000:3a", "iommuGroup": 41,
+        "iommuMembers": ["0000:3b:00.0", "0000:3b:00.1"], "allocated": false
+      }
+    ]
+  }
+}

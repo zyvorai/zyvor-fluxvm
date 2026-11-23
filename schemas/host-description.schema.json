@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FluxVM host description (host-compat, place)",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "arch": {
+      "type": "string",
+      "examples": [
+        "x86_64",
+        "aarch64"
+      ]
+    },
+    "kernel": {
+      "type": "string"
+    },
+    "memoryMib": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "freeMemoryMib": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "smt": {
+      "type": "boolean"
+    },
+    "cpu": {
+      "type": "object",
+      "properties": {
+        "vendor": {
+          "type": "string"
+        },
+        "modelName": {
+          "type": "string"
+        },
+        "family": {
+          "type": "integer"
+        },
+        "model": {
+          "type": "integer"
+        },
+        "stepping": {
+          "type": "integer"
+        },
+        "microcode": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {
+            "type": "string",
+            "maxLength": 48,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          }
+        }
+      }
+    },
+    "backends": {
+      "type": "object",
+      "maxProperties": 16,
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "hypervisor name (qemu, cloud-hypervisor, firecracker) to version"
+    },
+    "topology": {
+      "type": "object",
+      "description": "the host graph of GET /v1/host/topology (numaNodes, devices)"
+    }
+  }
+}
