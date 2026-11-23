@@ -712,6 +712,35 @@ resolve the IPSW, create the sparse disk (at least 40 GiB), run the installer, p
 disable sleep and the screen lock, shut down and store the template, then the Macfile steps. What still needs hardware: wiring that sequence as a build step, and running the whole chain on a Mac
 with an unlocked session and about 90 GB free; nothing here has done that.
 
+## Studio: the Mac page
+
+Open **Mac** in Studio's Platform menu (or `/console/mac`). It needs no set-up: it reads the daemon you are already connected to, and
+works for an administrator token. Each part says what it shows, and every action has its `fluxctl` command next to it (the copy
+button) so you can do the same in a terminal.
+
+| Part | What it shows | `fluxctl` equivalent |
+|---|---|---|
+| Instances | name, address, image, state, CPUs and memory, published ports, age; "N of 2 macOS VMs running" | `fluxctl mac ps -a` |
+| Start, Stop, Restart, Kill, Remove | the same sequence the CLI uses, including the labels it keeps (a stopped instance is not restarted by `mac reconcile`; start begins a new health period). Kill and Remove ask twice. | `fluxctl mac start\|stop\|restart\|kill\|rm NAME` |
+| Logs | the tail of the VM console log (100 to 3000 lines), refreshed while it runs | `fluxctl mac logs --tail 300 NAME` |
+| Inspect | the instance's facts and the daemon's full record | `fluxctl mac inspect NAME` |
+| Images | the local template store: reference, source, disk size, age | `fluxctl mac images` |
+| Compose | projects and their services, read-only | `fluxctl mac compose ls` |
+| Registry login | which registries have a saved login and the user name (never a password; logging in stays in the terminal) | `fluxctl mac logins`, `fluxctl mac login REGISTRY` |
+| Host health | this Mac's health report (macOS slots, memory, disk, login session, backups), as on Home | `fluxctl cluster status`, `fluxctl mac doctor` |
+
+Home also gets a **Mac instances** card (on a Mac only) with the running count and a link.
+
+The page uses two daemon routes (admin only, listed in `GET /v1/openapi.json`): `GET /v1/mac` for the instances, projects, images and
+logins in one answer, and `POST /v1/mac/instances/{id}/{start|stop|restart|kill|rm}`; the answer names the `fluxctl` command. Logs and
+inspect use the existing `GET /v1/vms/{id}/logs` and `GET /v1/vms/{id}`. A refusal is explained in words: the two-VM limit says to stop
+or remove one, a locked login session says to unlock the Mac.
+
+The image list and the login list are read from the account the **daemon** runs as (`FLUXVM_MAC_STORE`, `FLUXVM_MAC_REGISTRY_AUTH`, or
+`~/.fluxvm/mac-images` and `~/.config/fluxvm/mac-registry-auth.json`). If you run `fluxctl` as a different user than the daemon, the
+page says which folder it looked in and the command to run as your user. A login file other people can read is not used, and the page
+says to `chmod 600` it. Not verified against a real Mac, daemon or browser.
+
 ## Hard limits
 
 These come from the design and from macOS itself; they apply to the whole workflow.
