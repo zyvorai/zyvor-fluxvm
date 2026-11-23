@@ -117,6 +117,9 @@ export const explainError = (name: string, message: string): string => {
 };
 
 export const inspectCommand = (name: string): string => `fluxctl mac inspect ${name}`;
+/** A shell in the instance (`mac exec -it`), and what `mac attach` follows. */
+export const execCommand = (name: string): string => `fluxctl mac exec -it ${name}`;
+export const attachCommand = (name: string): string => `fluxctl mac attach ${name}`;
 export const logsCommand = (name: string): string => `fluxctl mac logs --tail 300 ${name}`;
 export const PS_COMMAND = 'fluxctl mac ps -a';
 export const IMAGES_COMMAND = 'fluxctl mac images';

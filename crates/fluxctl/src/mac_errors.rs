@@ -1028,6 +1028,51 @@ pub const CODES: &[MacCode] = &[
         aliases: &["network-unsupported"],
         signatures: &["mac_network_unsupported"],
     },
+    MacCode {
+        code: "MAC_EXEC_NOT_RUNNING",
+        status: None,
+        summary: "`mac exec`, `mac attach` or `mac run -it` found an instance that is stopped or still booting, so there is no guest to connect to.",
+        causes: &[
+            "the instance was stopped (`mac stop`, a crash, or a `--rm` run that finished)",
+            "the instance just started and macOS has not got an address yet",
+        ],
+        fixes: &[
+            "start it: `fluxctl mac start NAME` (see every instance with `fluxctl mac ps -a`)",
+            "if it is booting, wait for ssh: `fluxctl mac wait-ready NAME`, then run the command again",
+            "to read what a stopped instance printed: `fluxctl mac logs NAME`",
+        ],
+        aliases: &["exec-not-running", "mac-exec-not-running"],
+        signatures: &[
+            "not running, so there is nothing to connect to",
+            "no address yet (macos is still booting)",
+            "not running, so it has no live console",
+        ],
+    },
+    MacCode {
+        code: "MAC_GUEST_SSH_FAILED",
+        status: None,
+        summary: "ssh could not open a session in the macOS guest (ssh itself failed with exit status 255, not the command you ran).",
+        causes: &[
+            "Remote Login (sshd) is off in the guest, or the guest is not finished booting",
+            "the account in `-u USER` does not exist in the guest, or it has no authorised key",
+            "the image was built without the FluxVM key, so the generated key is not accepted",
+        ],
+        fixes: &[
+            "check that the guest answers on ssh: `fluxctl mac wait-ready NAME`",
+            "run as the image's own account: `fluxctl mac exec NAME -u admin -- whoami`",
+            "see ssh's reason by running the printed command yourself: `fluxctl mac exec --print NAME -- true`",
+            "check the whole setup: `fluxctl mac doctor`",
+        ],
+        aliases: &[
+            "guest-ssh-failed",
+            "exec-ssh-failed",
+            "mac-guest-ssh-failed",
+        ],
+        signatures: &[
+            "could not open an ssh session to",
+            "ssh exited with exit status: 255",
+        ],
+    },
 ];
 
 fn norm(s: &str) -> String {

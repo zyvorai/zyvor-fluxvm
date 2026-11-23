@@ -9,7 +9,7 @@ import { navigate, Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, us
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
   COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, actionLabel, actionsFor, ageText, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, sizeText, statusTone, summarize,
+  actionCommand, actionDone, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, sizeText, statusTone, summarize,
   type MacAction, type MacInstance, type MacView,
 } from '../lib/mac';
 
@@ -82,6 +82,8 @@ function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; 
             <pre className="fx-mono" style={{ maxHeight: 320, overflow: 'auto' }}>{rec.error ? `Could not read the record: ${rec.error.message}` : JSON.stringify(rec.data ?? {}, null, 2)}</pre>
           </details>
           <p><CopyCmd notify={notify} cmd={inspectCommand(inst.name)} /> <code className="fx-mono">{inspectCommand(inst.name)}</code></p>
+          <p><CopyCmd notify={notify} cmd={execCommand(inst.name)} /> <code className="fx-mono">{execCommand(inst.name)}</code> <span className="fx-muted">a shell in the guest</span></p>
+          <p><CopyCmd notify={notify} cmd={attachCommand(inst.name)} /> <code className="fx-mono">{attachCommand(inst.name)}</code> <span className="fx-muted">follow its console</span></p>
         </>
       ) : (
         <>

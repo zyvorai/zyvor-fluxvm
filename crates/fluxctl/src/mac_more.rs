@@ -52,6 +52,11 @@ pub struct ExecOpts {
     /// Directory to run CMD in.
     #[arg(short = 'w', long)]
     pub workdir: Option<String>,
+    #[command(flatten)]
+    pub tty: crate::mac_exec::TtyFlags,
+    /// Print the ssh command that would run, and run nothing (to paste into a script or another tool).
+    #[arg(long)]
+    pub print: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -181,6 +186,24 @@ compare it with.")]
         /// With `-f`: put the time fluxctl received each line in front of it. Lines already in the log show `-`.
         #[arg(short = 't', long)]
         timestamps: bool,
+    },
+    /// Follow an instance's console (the VM's serial output) live, read-only, like `docker attach` for output. Ctrl-C detaches
+    /// and leaves the instance running. `--cmd` follows the output of a command started with `mac run -d` instead. For a shell,
+    /// use `mac exec -it NAME`.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac attach web\n  fluxctl mac attach --cmd web      (output of `mac run -d`)"
+    )]
+    Attach {
+        name: String,
+        /// Follow the output of the command `mac run -d` started in the guest (over SSH) instead of the console.
+        #[arg(long)]
+        cmd: bool,
+        /// Lines from the end to show first.
+        #[arg(long, default_value_t = 20)]
+        tail: usize,
+        /// With `--cmd`: the guest account to read the output as.
+        #[arg(short = 'u', long, default_value = "admin")]
+        user: String,
     },
     /// Copy between this Mac and an instance, either way: `NAME:/path` is the guest side. Uses scp -r over SSH.
     #[command(
@@ -515,24 +538,50 @@ pub async fn exec(
     o: ExecOpts,
 ) -> Result<()> {
     let vm = crate::mac_cmd::find_instance(r, &name).await?;
-    ensure!(
-        view::status(&vm) == "running",
-        "{name} is {} (not running; `fluxctl mac start {name}`)",
-        view::status(&vm)
-    );
-    let ip = vm["guest_ip"]
-        .as_str()
-        .context("the instance has no address yet: wait for it to boot")?;
+    let ip = crate::mac_exec::running_address(&name, &vm)?;
     let env = crate::mac_instance::collect_env(&o.env, &[], |k| std::env::var(k).ok())?;
     let cfg = image_config_of(&vm).unwrap_or_default();
-    crate::run::ssh_to(
-        ip,
-        &user,
-        22,
-        true,
-        &[exec_shell(&cfg, &cmd, &env, o.workdir.as_deref())],
-    )
-    .await
+    let args = if cmd.is_empty() {
+        let mut all = cfg.env.clone();
+        all.extend(env.iter().cloned());
+        crate::mac_exec::shell_args(&all, o.workdir.as_deref().or(cfg.workdir.as_deref()))
+    } else {
+        vec![exec_shell(&cfg, &cmd, &env, o.workdir.as_deref())]
+    };
+    let tty = crate::mac_exec::resolve_here(o.tty);
+    if o.print {
+        println!("{}", crate::mac_exec::printable(&ip, &user, tty, &args));
+        return Ok(());
+    }
+    let code = crate::run::ssh_to_code(&ip, &user, 22, true, tty, &args).await?;
+    crate::mac_exec::exit_with(crate::mac_exec::outcome(&name, &user, code)?)
+}
+
+/// `mac attach`: follow the console log, or with `--cmd` the output of a command started by `mac run -d`.
+async fn attach(
+    r: &crate::remote::Remote,
+    name: &str,
+    cmd: bool,
+    tail: usize,
+    user: &str,
+) -> Result<()> {
+    let vm = crate::mac_cmd::find_instance(r, name).await?;
+    if cmd {
+        let ip = crate::mac_exec::running_address(name, &vm)?;
+        let args = [crate::mac_exec::tail_command(tail, true)];
+        let code =
+            crate::run::ssh_to_code(&ip, user, 22, true, crate::mac_exec::Tty::Off, &args).await?;
+        return crate::mac_exec::exit_with(crate::mac_exec::outcome(name, user, code)?);
+    }
+    let st = view::status(&vm).to_string();
+    if st != "running" && st != "paused" {
+        return Err(crate::mac_exec::failure(format!(
+            "{name} is {st}, not running, so it has no live console to follow. Start it with `fluxctl mac start {name}`, or read what it printed before with `fluxctl mac logs {name}`."
+        )));
+    }
+    eprintln!("{}", crate::mac_exec::attach_banner(name));
+    let path = format!("/v1/vms/{}/logs?lines={tail}&follow=true", id_of(&vm)?);
+    follow_logs(r, &path).await
 }
 
 async fn lifecycle(
@@ -894,6 +943,12 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                 print!("{}", String::from_utf8_lossy(&body));
             }
         }
+        MacMore::Attach {
+            name,
+            cmd,
+            tail,
+            user,
+        } => attach(r, &name, cmd, tail, &user).await?,
         MacMore::Cp { src, dst, user } => {
             let t = crate::mac_cp::plan(&src, &dst)?;
             let vm = crate::mac_cmd::find_instance(r, &t.name).await?;
@@ -1401,6 +1456,8 @@ mod tests {
         let mac = c.find_subcommand_mut("mac").unwrap();
         for (sub, needle) in [
             ("logs", "fluxctl mac logs -f"),
+            ("attach", "fluxctl mac attach --cmd"),
+            ("exec", "fluxctl mac exec -it"),
             ("cp", "fluxctl mac cp ./site"),
             ("inspect", "jq"),
             ("top", "fluxctl mac top"),

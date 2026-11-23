@@ -422,39 +422,92 @@ pub async fn ssh_to_agent(
     forward_agent: bool,
     args: &[String],
 ) -> Result<()> {
+    let mut argv = ssh_argv(
+        ip,
+        user,
+        port,
+        local_nat_vm,
+        crate::mac_exec::Tty::Force,
+        args,
+    );
+    if forward_agent {
+        argv.insert(1, "-A".into());
+    }
+    let status = tokio::process::Command::new("ssh")
+        .args(argv)
+        .status()
+        .await
+        .context(
+            "running ssh (is the OpenSSH client installed? it ships with macOS and most Linux)",
+        )?;
+    if !status.success() {
+        bail!("ssh exited with {status}");
+    }
+    Ok(())
+}
+
+/// The `ssh` arguments (without the program name) that [`ssh_to_code`] runs. Pure, so tests and `--print` see the real thing.
+pub(crate) fn ssh_argv(
+    ip: &str,
+    user: &str,
+    port: u16,
+    local_nat_vm: bool,
+    tty: crate::mac_exec::Tty,
+    args: &[String],
+) -> Vec<String> {
     // `127.0.0.1:<port>` is a QEMU user-mode guest behind its loopback forward; its host key changes whenever the VM is
     // recreated, so treat it like the local NAT guests on a Mac.
     let (host, forwarded) = split_endpoint(ip);
     let local_nat_vm = local_nat_vm || forwarded.is_some();
     let port = forwarded.unwrap_or(port);
-    let mut c = tokio::process::Command::new("ssh");
-    c.arg("-tt").arg("-p").arg(port.to_string());
-    if forward_agent {
-        c.arg("-A");
-    }
+    let mut c: Vec<String> = vec![
+        match tty {
+            crate::mac_exec::Tty::Force => "-tt",
+            crate::mac_exec::Tty::Off => "-T",
+        }
+        .into(),
+        "-p".into(),
+        port.to_string(),
+    ];
     if local_nat_vm {
-        c.args([
-            "-o",
+        for o in [
             "StrictHostKeyChecking=no",
-            "-o",
             "UserKnownHostsFile=/dev/null",
-            "-o",
             "LogLevel=ERROR",
-        ]);
+        ] {
+            c.push("-o".into());
+            c.push(o.into());
+        }
         if let Some(key) = generated_identity() {
-            c.arg("-i").arg(key);
+            c.push("-i".into());
+            c.push(key.display().to_string());
         }
     }
-    let status = c
-        .arg(format!("{user}@{host}"))
-        .args(args)
+    c.push(format!("{user}@{host}"));
+    c.extend(args.iter().cloned());
+    c
+}
+
+/// Like [`ssh_to`] but hands back ssh's exit code (the remote command's, or 255 when ssh itself failed) and lets the caller
+/// choose whether to allocate a terminal.
+pub async fn ssh_to_code(
+    ip: &str,
+    user: &str,
+    port: u16,
+    local_nat_vm: bool,
+    tty: crate::mac_exec::Tty,
+    args: &[String],
+) -> Result<i32> {
+    let status = tokio::process::Command::new("ssh")
+        .args(ssh_argv(ip, user, port, local_nat_vm, tty, args))
         .status()
         .await
-        .context("running ssh (is OpenSSH client installed?)")?;
-    if !status.success() {
-        bail!("ssh exited with {status}");
-    }
-    Ok(())
+        .context(
+            "running ssh (is the OpenSSH client installed? it ships with macOS and most Linux)",
+        )?;
+    status
+        .code()
+        .context("ssh was stopped by a signal before it finished")
 }
 
 /// `~/.ssh/fluxvm_ed25519`, when `fluxctl run` had to create it because the user has no key of their own.

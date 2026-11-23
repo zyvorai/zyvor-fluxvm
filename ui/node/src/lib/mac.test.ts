@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -40,6 +40,10 @@ describe('mac actions', () => {
     expect(actionsFor('stopped')).toEqual(['start', 'rm']);
     expect(actionsFor('failed')).toEqual(['start', 'rm']);
     expect(actionsFor('paused')).not.toContain('start');
+  });
+  it('shows the fluxctl command for a shell and for attach', () => {
+    expect(execCommand('ci')).toBe('fluxctl mac exec -it ci');
+    expect(attachCommand('ci')).toBe('fluxctl mac attach ci');
   });
   it('shows the fluxctl command of every action', () => {
     for (const a of ['start', 'stop', 'restart', 'kill', 'rm'] as const) {

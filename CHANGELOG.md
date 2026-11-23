@@ -64,6 +64,12 @@ Gateway problems in the cluster health model ([docs/cluster-home.md](docs/cluste
 - `fluxctl cluster status` and `fluxctl fix` read the Gateways of each `~/.kube/fluxvm-NAME.yaml` cluster (read-only; never the default kubeconfig) and report them as cluster items. New `fluxvm_core::health::{GatewayFacts, gateway_items, assess_with}`; additive `Cluster::facts` in `gateway/kube.rs`.
 
 - Studio: a Gateways tab on the Kubernetes page (Gateways, listeners, attached HTTPRoutes, plain-English status, ready endpoint counts, "Copy as fluxctl") backed by the new read-only `GET /v1/kube/{cluster}/gateways` (`schema: 1`; an unreachable cluster is an `error` field with the next command). Parsing is unit-tested with fixtures; **not compiled, type-checked or rendered when this entry was written**. See [docs/gateway.md](docs/gateway.md#in-studio).
+Docker-style interactive access to macOS instances ([docs/macos-containers.md](docs/macos-containers.md#interactive-access-exec--it-run--it-attach)). Unit-tested with fakes; **not run against a real macOS guest or a real terminal session when this entry was written**, and Studio has no button for it yet.
+
+- `mac exec` gains `-i`/`-t` (`-it` for a shell or `top`), `-u USER`, `--print` (show the ssh command, run nothing), runs a login shell when no command is given, and exits with the command's own exit code. Without `-i`/`-t` it now allocates a terminal only when stdin and stdout are both terminals (it always forced one before), so piped output is clean.
+- `mac run -it IMAGE [-- CMD]` (a shell in the new instance when there is no command) and `-u`. Refused with `-d` and with `--fleet`.
+- New `mac attach NAME`: follow the console log live, read-only; `--cmd` follows the output of a `mac run -d` command over ssh.
+- New `explain` codes `MAC_EXEC_NOT_RUNNING` and `MAC_GUEST_SSH_FAILED`; the messages carry the fix. No new transport: it is the same `ssh` as before (`run::ssh_to_code`, `run::ssh_argv`).
 
 Live run on a Linux host (single-node k3s v1.37.2 in a QEMU/KVM guest, Envoy Gateway v1.10.0) found and fixed two bugs ([docs/gateway.md](docs/gateway.md#what-the-live-run-found)):
 

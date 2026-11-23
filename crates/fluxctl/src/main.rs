@@ -105,6 +105,7 @@ mod mac_cp;
 mod mac_doctor;
 mod mac_dp;
 mod mac_errors;
+mod mac_exec;
 mod mac_events;
 mod mac_fleet;
 mod mac_fleet_agg;
