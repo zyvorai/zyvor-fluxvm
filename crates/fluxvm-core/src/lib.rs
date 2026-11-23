@@ -15,6 +15,7 @@ pub mod health;
 pub mod instancetype;
 pub mod k3s_backups;
 pub mod keychain;
+pub mod kube_view;
 pub mod kube_app;
 pub mod lifecycle;
 pub mod login_session;

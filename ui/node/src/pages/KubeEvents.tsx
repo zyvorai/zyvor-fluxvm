@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useMemo, useState } from 'react';
-import { Card, EmptyState, Pill, Skeleton, api, usePoll } from '@fluxvm/ui-core';
+import { Copy } from 'lucide-react';
+import type { Notify } from '../App';
+import { Button, Card, EmptyState, Pill, Skeleton, api, usePoll } from '@fluxvm/ui-core';
+import { eventsCommand } from '../lib/kubeInventory';
 import { type EventFilter, type KubeEvent, ageOf, eventTone, filterEvents, kubeProblem, namespacesOfEvents } from '../lib/kube';
 
 const enc = encodeURIComponent;
@@ -10,7 +13,7 @@ const enc = encodeURIComponent;
 type Events = { cluster: string; events: KubeEvent[]; warnings: number; truncated: boolean };
 
 /** What has happened in a cluster, newest first: the quickest way to see why a pod is not starting. */
-export function KubeEvents({ cluster }: { cluster: string }) {
+export function KubeEvents({ cluster, notify }: { cluster: string; notify: Notify }) {
   const poll = usePoll(async () => await api.get<Events>(`/v1/kube/${enc(cluster)}/events`), 8000, [cluster]);
   const [filter, setFilter] = useState<EventFilter>({ warningsOnly: false, namespace: '', text: '' });
   const d = poll.data;
@@ -31,6 +34,7 @@ export function KubeEvents({ cluster }: { cluster: string }) {
           {namespacesOfEvents(d.events).map((x) => <option key={x} value={x}>{x}</option>)}
         </select>
         <input className="fx-input" aria-label="Filter events" placeholder="Filter by reason, object or message" value={filter.text} onChange={(e) => setFilter({ ...filter, text: e.target.value })} style={{ maxWidth: 320 }} />
+        <Button size="sm" variant="ghost" onClick={() => { const cmd = eventsCommand(cluster, filter.warningsOnly, filter.namespace); void navigator.clipboard.writeText(cmd).then(() => notify('Copied: ' + cmd), () => notify('Copy blocked by the browser', 'bad')); }}><Copy size={14} />Copy as fluxctl</Button>
       </div>
       {shown.length === 0 ? (
         <p className="fx-muted">{d.events.length ? 'No event matches this filter.' : 'The cluster has recorded no events (Kubernetes keeps them for about an hour).'}</p>

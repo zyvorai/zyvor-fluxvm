@@ -425,6 +425,8 @@ fn ops() -> Vec<Op> {
         op("get", "/v1/kube", "Kubernetes clusters made by `fluxctl kube`, with their VMs", VMS),
         op("get", "/v1/kube/{name}", "A cluster's nodes and pods, read from its API server (read-only)", VMS),
         op("get", "/v1/kube/{name}/workloads", "Deployments, StatefulSets, DaemonSets and Services of a cluster (read-only)", VMS),
+        op("get", "/v1/kube/{name}/secrets", "Secrets of a cluster as names, types and key names; values are never returned (read-only; ?namespace=)", VMS),
+        op("get", "/v1/kube/{name}/certs", "Certificates served by the cluster's Ingresses and Gateways, with expiry state and the one-line fix (read-only)", VMS),
         op("get", "/v1/kube/{name}/events", "Recent events of a cluster, newest first (?namespace=)", VMS),
         op("get", "/v1/kube/{name}/flows", "Who talks to whom: Cilium Hubble flows folded into nodes and edges (?lines=)", VMS),
         op("get", "/v1/kube/{name}/pods/{ns}/{pod}/log", "Tail of a pod container's log as text (?container=&tail=&previous=)", VMS),

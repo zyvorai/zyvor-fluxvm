@@ -788,6 +788,82 @@ pub const CODES: &[HealthCode] = &[
             "start one: `fluxctl kube run IMAGE`"
         ]
     ),
+    hc!(
+        "KUBE_VALUE_MISSING",
+        "No value was given for a Secret or ConfigMap key, or it was offered in a way that would leak it.",
+        [
+            "stdin was empty and no `--from-file` was given",
+            "a secret value was written on the command line, where shell history and `ps` would keep it"
+        ],
+        [
+            "type it at the hidden prompt: `fluxctl kube secrets set NAME KEY`",
+            "pipe it in: `printf %s \"$VALUE\" | fluxctl kube secrets set NAME KEY`",
+            "or read it from a file: `fluxctl kube secrets set NAME KEY --from-file ./value`"
+        ]
+    ),
+    hc!(
+        "KUBE_NEEDS_YES",
+        "This removes or changes something that cannot be undone from here, so it only runs when you add --yes.",
+        ["the command was run without `--yes`, so it showed what it would do instead"],
+        ["read the plan it printed, then repeat the same command with `--yes`"]
+    ),
+    hc!(
+        "KUBE_METRICS_UNAVAILABLE",
+        "The cluster has no CPU and memory numbers: its metrics-server is missing or has not collected anything yet.",
+        [
+            "the cluster started less than a minute ago (the first numbers take about 60 seconds)",
+            "k3s was started with `--disable metrics-server`, or this is not a k3s cluster",
+            "the metrics-server pod is crashing"
+        ],
+        [
+            "wait a minute and run `fluxctl kube top` again",
+            "see the pod: `kubectl -n kube-system get pods -l k8s-app=metrics-server`",
+            "install it where k3s did not: `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`"
+        ]
+    ),
+    hc!(
+        "KUBE_CERT_PROBLEM",
+        "A certificate an Ingress or Gateway serves is expired, about to end, missing or unreadable.",
+        [
+            "nothing renews it (no cert-manager, or it cannot reach the issuer)",
+            "the Secret the Ingress or Gateway names does not exist in that namespace",
+            "the Secret does not hold a valid certificate in `tls.crt`"
+        ],
+        [
+            "see which and the one-line fix for each: `fluxctl kube certs`",
+            "renew with cert-manager: `cmctl renew -n NAMESPACE CERTIFICATE`",
+            "or replace the Secret with a new certificate and key: `kubectl -n NAMESPACE create secret tls NAME --cert=CERT.pem --key=KEY.pem --dry-run=client -o yaml | kubectl apply -f -`"
+        ]
+    ),
+    hc!(
+        "KUBE_UPGRADE_REFUSED",
+        "The k3s upgrade was not started because it would be unsafe or is not possible from here.",
+        [
+            "the target is older than what runs now (k3s does not support downgrades)",
+            "the target skips a Kubernetes minor version",
+            "a node is not Ready, or the cluster is owned by another Mac",
+            "the pre-upgrade backup could not be taken"
+        ],
+        [
+            "see the plan and the reason: `fluxctl kube upgrade`",
+            "go one minor version at a time, for example `fluxctl kube upgrade --channel v1.31`",
+            "fix an unhealthy node first: `fluxctl cluster status`"
+        ]
+    ),
+    hc!(
+        "KUBE_NODE_UNSUPPORTED",
+        "Nodes cannot be added or removed this way on this cluster.",
+        [
+            "the cluster has no VM backend on this machine (an existing cluster reached with --kube-context)",
+            "a server node cannot be removed from here",
+            "removing a node's VM is not offered yet: only adding is automatic"
+        ],
+        [
+            "add a node: `fluxctl kube node add`",
+            "drain it and remove it from the cluster: `kubectl drain NODE --ignore-daemonsets --delete-emptydir-data` then `kubectl delete node NODE`",
+            "see the VMs: `fluxctl cluster status`"
+        ]
+    ),
 ];
 
 pub fn code(name: &str) -> Option<&'static HealthCode> {
@@ -2272,6 +2348,12 @@ mod tests {
             "APP_PORT_TAKEN",
             "APP_NAME_TAKEN",
             "APP_NOT_FOUND",
+            "KUBE_VALUE_MISSING",
+            "KUBE_NEEDS_YES",
+            "KUBE_METRICS_UNAVAILABLE",
+            "KUBE_CERT_PROBLEM",
+            "KUBE_UPGRADE_REFUSED",
+            "KUBE_NODE_UNSUPPORTED",
         ] {
             seen.insert(extra.to_owned());
         }

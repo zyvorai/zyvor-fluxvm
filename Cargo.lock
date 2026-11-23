@@ -2493,6 +2493,7 @@ dependencies = [
  "fluxvm-cgroup",
  "libc",
  "rand 0.10.4",
+ "rcgen",
  "regex",
  "ring",
  "security-framework",
@@ -2502,9 +2503,11 @@ dependencies = [
  "socket2",
  "tar",
  "tempfile",
+ "time",
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

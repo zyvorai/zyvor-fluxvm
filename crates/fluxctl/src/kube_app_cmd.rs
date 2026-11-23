@@ -161,7 +161,7 @@ fn no_cluster(detail: &str) -> anyhow::Error {
 }
 
 /// What a failed kubectl call means for a person.
-fn kerr(what: &str, r: &RunOut) -> anyhow::Error {
+pub(crate) fn kerr(what: &str, r: &RunOut) -> anyhow::Error {
     let low = r.stderr.to_ascii_lowercase();
     let unreachable = [
         "unable to connect",
@@ -240,7 +240,7 @@ pub fn cluster_names(home: &Path) -> Vec<String> {
     v
 }
 
-fn selection(t: &Target) -> Result<(Selection, Vec<String>)> {
+pub(crate) fn selection(t: &Target) -> Result<(Selection, Vec<String>)> {
     let home = crate::docker_host::home()?;
     let sel = pick(&cluster_names(&home), t)?;
     let prefix = sel.prefix(Some(&home))?;
@@ -261,7 +261,7 @@ fn flags(sel: &Selection) -> String {
 // ---------------------------------------------------------------------------------------------------------------------
 // kubectl
 
-fn kc(
+pub(crate) fn kc(
     c: &Cluster,
     ns: Option<&str>,
     rest: &[&str],
