@@ -19,7 +19,7 @@
 //! own daemon context and is not used here.)
 
 mod demo;
-mod expose;
+pub(crate) mod expose;
 pub(crate) mod kube;
 mod probe;
 

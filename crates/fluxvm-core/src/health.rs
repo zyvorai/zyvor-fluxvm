@@ -618,6 +618,119 @@ pub const CODES: &[HealthCode] = &[
         ["see the check's own message"],
         ["run the command named in the fix line, or `fluxctl doctor` for details"]
     ),
+    hc!(
+        "APP_IMAGE_PULL",
+        "The cluster cannot download the image an app runs.",
+        [
+            "the image name or tag is misspelled, or the tag does not exist",
+            "the image is private and the cluster has no credentials for it",
+            "the image only exists on this machine, so the cluster has nothing to pull",
+            "the cluster has no internet (VPN, DNS or a captive network)"
+        ],
+        [
+            "check the name works: `docker pull IMAGE`",
+            "for an image built on this machine: `fluxctl kube load IMAGE`, then run the app again",
+            "see the exact error: `kubectl describe pod -l app.kubernetes.io/name=APP`",
+            "remove the app: `fluxctl kube rm APP`"
+        ]
+    ),
+    hc!(
+        "APP_CRASHING",
+        "An app starts and then stops, over and over (CrashLoopBackOff), or cannot start because its settings are wrong.",
+        [
+            "the program exits with an error right after it starts",
+            "it needs an environment variable, file or secret that is not there",
+            "it listens on a different port than the one given with --port"
+        ],
+        [
+            "read why it stopped: `fluxctl kube logs APP --previous`",
+            "pass settings with `--env NAME=value` when you run it",
+            "start again with the right port: `fluxctl kube run IMAGE --port N`"
+        ]
+    ),
+    hc!(
+        "APP_OUT_OF_MEMORY",
+        "An app used more memory than the cluster could give it and was stopped.",
+        [
+            "the app needs more memory than the cluster's machine has",
+            "several apps share a small cluster"
+        ],
+        [
+            "give the cluster more memory: `fluxctl kube up --memory-mib 8192`",
+            "run fewer copies: `fluxctl kube scale APP 1`"
+        ]
+    ),
+    hc!(
+        "APP_NOT_READY",
+        "An app did not become ready in time, or no machine in the cluster has room for it.",
+        [
+            "the image is still downloading (large images take minutes the first time)",
+            "the cluster is out of CPU or memory",
+            "the app's health check is failing"
+        ],
+        [
+            "watch it: `fluxctl kube apps`",
+            "wait longer with `--wait 600` next time, or start without waiting with `--detach`",
+            "give the cluster more room: `fluxctl kube up --memory-mib 8192`"
+        ]
+    ),
+    hc!(
+        "APP_NO_CLUSTER",
+        "There is no Kubernetes cluster to run apps on.",
+        [
+            "no cluster has been created on this machine",
+            "the cluster's kubeconfig is missing or kubectl is not installed"
+        ],
+        [
+            "create one: `fluxctl kube up` (or `fluxctl up` for everything in one step)",
+            "see what exists: `fluxctl cluster status`",
+            "install kubectl if it is missing (macOS: `brew install kubectl`)"
+        ]
+    ),
+    hc!(
+        "APP_CLUSTER_AMBIGUOUS",
+        "There is more than one cluster, so fluxctl cannot guess which one you mean.",
+        ["several clusters made with `fluxctl kube up` exist on this machine"],
+        [
+            "name one: add `--cluster NAME` to the command",
+            "list them: `ls ~/.kube/fluxvm-*.yaml`"
+        ]
+    ),
+    hc!(
+        "APP_PORT_TAKEN",
+        "The port on this machine is already in use by another program.",
+        ["another app, a forward or a local server already listens on that port"],
+        [
+            "leave out --local-port and fluxctl picks a free one",
+            "choose another: `--local-port 8081`",
+            "see what holds it: `lsof -nP -iTCP:PORT -sTCP:LISTEN`"
+        ]
+    ),
+    hc!(
+        "APP_NAME_TAKEN",
+        "Something in the cluster already uses that name and was not made by `fluxctl kube run`, so fluxctl will not touch it.",
+        [
+            "a Deployment or Service with the same name exists in this namespace",
+            "it was created with kubectl or Helm"
+        ],
+        [
+            "pick another name: `fluxctl kube run IMAGE --name other`",
+            "or use another namespace: `-n NAMESPACE`"
+        ]
+    ),
+    hc!(
+        "APP_NOT_FOUND",
+        "There is no app with that name in this cluster and namespace.",
+        [
+            "the name is misspelled, or the app is in another namespace",
+            "it was already removed"
+        ],
+        [
+            "list the apps: `fluxctl kube apps`",
+            "add `-n NAMESPACE` if it is not in `default`",
+            "start one: `fluxctl kube run IMAGE`"
+        ]
+    ),
 ];
 
 pub fn code(name: &str) -> Option<&'static HealthCode> {

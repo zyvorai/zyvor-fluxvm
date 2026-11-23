@@ -59,6 +59,7 @@ mod docker_view;
 mod guest_ops;
 mod kube;
 mod kube_actions;
+mod kube_apps;
 mod kube_flows;
 mod kube_gateways;
 mod kube_metrics;
@@ -998,6 +999,14 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/kube/{name}/events", get(kube_workloads::get_events))
         .route("/v1/kube/{name}/gateways", get(kube_gateways::get_gateways))
+        .route(
+            "/v1/kube/{name}/apps",
+            get(kube_apps::get_apps).post(kube_apps::run_app),
+        )
+        .route(
+            "/v1/kube/{name}/apps/{ns}/{app}/delete",
+            post(kube_apps::delete_app),
+        )
         .route(
             "/v1/kube/{name}/pods/{ns}/{pod}/log",
             get(kube_pod::pod_log),
