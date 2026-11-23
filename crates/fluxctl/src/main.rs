@@ -6655,7 +6655,11 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             cli.server_token.clone(),
             cli.context.as_deref(),
         )?;
-        let cfg = if r.is_none() { Some(load_cfg(&cli)?) } else { None };
+        let cfg = if r.is_none() {
+            Some(load_cfg(&cli)?)
+        } else {
+            None
+        };
         let Command::Audit { command } = cli.command else {
             unreachable!()
         };
