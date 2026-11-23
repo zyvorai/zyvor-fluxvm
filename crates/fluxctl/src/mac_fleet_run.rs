@@ -141,7 +141,7 @@ impl RunPlaceFlags {
     }
 }
 
-fn default_conn() -> Conn {
+pub(crate) fn default_conn() -> Conn {
     use clap::Parser;
     #[derive(clap::Parser)]
     struct W {

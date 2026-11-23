@@ -9,7 +9,7 @@ import { navigate, Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, us
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
   COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, sizeText, statusTone, summarize,
+  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, sizeText, statusTone, summarize,
   type MacAction, type MacInstance, type MacView,
 } from '../lib/mac';
 
@@ -229,7 +229,7 @@ export function MacPage({ notify }: { notify: Notify }) {
                 <EmptyState title="No compose projects" body="Bring one up with fluxctl mac compose up; its services show here, read-only." action={<CopyCmd notify={notify} cmd="fluxctl mac compose up" />} />
               ) : d.projects.map((p) => (
                 <div key={p.name} style={{ marginBottom: 12 }}>
-                  <p><b>{p.name}</b> <Pill tone={p.running === p.total ? 'ok' : p.running ? 'warn' : 'idle'}>{p.running} of {p.total} running</Pill> <CopyCmd notify={notify} cmd={`fluxctl mac compose ps -p ${p.name}`} /></p>
+                  <p><b>{p.name}</b> <Pill tone={p.running === p.total ? 'ok' : p.running ? 'warn' : 'idle'}>{p.running} of {p.total} running</Pill> <CopyCmd notify={notify} cmd={`fluxctl mac compose ps -p ${p.name}`} /> {composeCommands(p.name).map((c) => <span key={c.label} title={c.label}><CopyCmd notify={notify} cmd={c.cmd} /></span>)}</p>
                   <ul className="fx-feed">{p.services.map((s) => <li key={s.instance}><Pill tone={statusTone(s.status)}>{s.status}</Pill><span>{s.service ?? s.instance} <span className="fx-muted fx-mono">({s.instance})</span></span></li>)}</ul>
                 </div>
               ))}

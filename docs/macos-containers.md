@@ -443,6 +443,16 @@ at that service, naming what it already started).
   dependency on a service in a profile that is not enabled says which `--profile` to pass.
 - Each instance `up` creates carries `fluxvm.mac.owner` and `fluxvm.mac.created` (never an expiry), so `mac reap --owner NAME` and
   `mac ps` can tell whose project it is.
+### Compose: watch, scale, one-shots and a fleet
+
+Not run against a real Mac; unit-tested with fakes.
+
+- **`fluxctl mac compose watch`** starts the project (unless `--no-up`), then looks at the files named in each service's `develop: watch:` every 2 seconds. A rule is `{path, action, target, ignore}`: `sync` copies changed files to `target` in the guest, `sync+restart` also runs the service's command again, `restart` only runs it again, `rebuild` builds the image again and recreates the instance. It also applies `restart:` policies, because the daemon never restarts a macOS VM by itself; `restart: on-failure:3` means three restarts, then the instance stays down and the message says how to start it by hand.
+- **`up --scale web=2`** runs two copies (`PROJECT-web-1`, `-2`). On one Mac the project may hold at most 2 VMs at the same moment; a fixed host port in `ports:` cannot be scaled.
+- **`depends_on` conditions**: `service_started`, `service_healthy` (waits for the dependency's `healthcheck:` or its image HEALTHCHECK, probed over SSH in the guest) and `service_completed_successfully` (the dependency's command runs to the end; on success its VM is stopped, so it frees its slot and the limit counts VMs at the same moment, not services). A failed one-shot stays up for `mac logs` and nothing that waits for it starts.
+- **`profiles:` / `--profile` / `COMPOSE_PROFILES`** select services (a service without profiles always runs).
+- **`up --fleet hosts.yaml`** spreads the project over the Macs of a `mac-fleet` inventory (2 macOS VMs per Mac). `up --dry-run --fleet hosts.yaml` prints, for every service, the Mac it would use and why, and why every other Mac was not used. `placement: {host, labels, ac_only, disk_gib}` narrows the choice. `ps --fleet` and `down --fleet` act on every Mac. Services find each other through `COMPOSE_<SERVICE>_HOST`. In fleet mode `environment:` values travel on ssh stdin to a 0600 temp file that is sourced and removed (never in the command line); bind-mount `volumes:`, `secrets:` and `configs:` are refused, because the other Macs cannot see this Mac's folders. `on-failure:N` is not counted on a fleet Mac.
+
 ### Docker Compose parity
 
 Everything works with no flags or set-up: `fluxctl mac compose config` is the first thing to run on a file. Nothing below was run

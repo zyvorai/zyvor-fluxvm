@@ -330,7 +330,7 @@ pub const CODES: &[MacCode] = &[
         status: None,
         summary: "The compose file uses a key or option that macOS guests do not support, so it is refused instead of being silently ignored.",
         causes: &[
-            "a Docker-only key such as `networks`, `deploy` or `healthcheck:` in the service (a macOS service is a VM, not a container)",
+            "a Docker-only key such as `networks` or `deploy` in the service (a macOS service is a VM, not a container)",
             "a `secrets:` or `configs:` entry that is `external`, `environment`-sourced, inline `content`, or sets `uid`, `gid` or `mode`",
             "an `include:` or `extends:` option other than the file path / `service` and `file`",
         ],
@@ -1072,6 +1072,187 @@ pub const CODES: &[MacCode] = &[
             "could not open an ssh session to",
             "ssh exited with exit status: 255",
         ],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_CONDITION",
+        status: None,
+        summary: "A `depends_on` entry in the compose file has a condition or key that is not understood.",
+        causes: &[
+            "the condition is misspelt, or is a Docker one that does not exist (only service_started, service_healthy and service_completed_successfully do)",
+            "the entry has a key other than condition, required or restart",
+        ],
+        fixes: &[
+            "write one of: service_started, service_healthy, service_completed_successfully",
+            "check the file: `fluxctl mac compose config --quiet`",
+        ],
+        aliases: &["compose-condition", "compose-depends-on"],
+        signatures: &["explain mac_compose_condition"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_HEALTHCHECK",
+        status: None,
+        summary: "The `healthcheck:` of a compose service cannot be used.",
+        causes: &[
+            "there is no `test:`, or it is empty or a list that does not start with CMD, CMD-SHELL or NONE",
+            "a duration such as `interval: 5x` is not a number with s, m or h",
+            "`retries` is 0",
+        ],
+        fixes: &[
+            "write `healthcheck: {test: [CMD-SHELL, \"pg_isready\"], interval: 5s, retries: 5}`",
+            "to turn the image's check off use `disable: true`",
+        ],
+        aliases: &["compose-healthcheck"],
+        signatures: &["explain mac_compose_healthcheck"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_SCALE",
+        status: None,
+        summary: "`--scale` could not be applied to this compose file.",
+        causes: &[
+            "the value is not SERVICE=N with N from 1 to 64",
+            "the service is not selected (check `profiles:`), runs to completion, or publishes a fixed host port that every copy would want on one Mac",
+            "the copies would need more than 2 macOS VMs at once on this Mac",
+        ],
+        fixes: &[
+            "write `--scale web=2`",
+            "drop the fixed host port from `ports:` of a scaled service",
+            "spread the copies over several Macs: `fluxctl mac compose up --fleet hosts.yaml --scale web=3`",
+        ],
+        aliases: &["compose-scale"],
+        signatures: &["explain mac_compose_scale"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_PLACEMENT",
+        status: None,
+        summary: "The `placement:` of a compose service is wrong.",
+        causes: &[
+            "a label in `labels:` is not a valid inventory label (letters, digits, and the characters = . _ -)",
+            "`placement:` has a key other than host, labels, ac_only or disk_gib",
+        ],
+        fixes: &[
+            "write `placement: {host: mini-1, labels: [xcode=15], ac_only: true, disk_gib: 100}`",
+            "`placement:` only matters with `compose up --fleet`; on one Mac it is ignored",
+        ],
+        aliases: &["compose-placement"],
+        signatures: &["explain mac_compose_placement"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_RESTART",
+        status: None,
+        summary: "The `restart:` policy of a compose service has a count that does not make sense.",
+        causes: &[
+            "only `on-failure` takes a count (`on-failure:3`)",
+            "the count is not a number",
+        ],
+        fixes: &[
+            "write `restart: on-failure:3`, or `restart: always` / `unless-stopped` / `no`",
+            "the count is enforced while `fluxctl mac compose watch` runs",
+        ],
+        aliases: &["compose-restart"],
+        signatures: &["explain mac_compose_restart"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_WATCH_RULE",
+        status: None,
+        summary: "A `develop: watch:` rule in the compose file cannot be used.",
+        causes: &[
+            "the action is not sync, sync+restart, restart or rebuild",
+            "a sync rule has no absolute `target:` in the guest",
+            "a rebuild rule is on a service with no `build:`",
+            "the watched path does not exist on this Mac",
+        ],
+        fixes: &[
+            "write `develop: {watch: [{action: sync+restart, path: ./src, target: /Users/admin/app}]}`",
+            "create the path, or fix `path:` (relative to the compose file)",
+        ],
+        aliases: &["compose-watch-rule"],
+        signatures: &["explain mac_compose_watch_rule"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_WATCH_NONE",
+        status: None,
+        summary: "`compose watch` has nothing to watch.",
+        causes: &["no service has `develop: watch:` rules and none has a `restart:` policy"],
+        fixes: &[
+            "add rules: `develop: {watch: [{action: sync, path: ./src, target: /Users/admin/app}]}`",
+            "or add `restart: on-failure:3` (or always) to a service, which `compose watch` then applies",
+        ],
+        aliases: &["compose-watch-none"],
+        signatures: &["explain mac_compose_watch_none"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_DEP_FAILED",
+        status: None,
+        summary: "A service that others wait for with `service_completed_successfully` did not finish successfully, so they were not started.",
+        causes: &[
+            "its command exited with an error, or the guest did not answer on SSH",
+            "it has no `command:` and its image has no CMD, so there is nothing to run to the end",
+        ],
+        fixes: &[
+            "look at what it printed: `fluxctl mac logs NAME` (a failed one-shot stays up for this)",
+            "fix the command, then `fluxctl mac compose down` and `up` again",
+        ],
+        aliases: &["compose-dep-failed"],
+        signatures: &["explain mac_compose_dep_failed"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_FLEET_VOLUMES",
+        status: None,
+        summary: "`volumes:`, `secrets:` or `configs:` cannot be used with `compose up --fleet`.",
+        causes: &[
+            "they are folders or files on this Mac, and the other Macs of a fleet cannot see them",
+        ],
+        fixes: &[
+            "put the files in the image (Macfile COPY), push it, and use that image",
+            "pass a value in `environment:`: with --fleet it travels over ssh stdin, not in the command line",
+            "or run on this Mac only (leave out --fleet)",
+        ],
+        aliases: &["compose-fleet-volumes"],
+        signatures: &["explain mac_compose_fleet_volumes"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_FLEET_NO_ROOM",
+        status: None,
+        summary: "No Mac of the inventory can take a service of the compose project.",
+        causes: &[
+            "every Mac already runs 2 macOS VMs (Apple's licence limit), or lacks the image, or fails a `placement:` rule, or is drained or unreachable",
+        ],
+        fixes: &[
+            "see the reason for each Mac: `fluxctl mac compose up --dry-run --fleet hosts.yaml`",
+            "free a slot, add a Mac to the inventory, or distribute the image: `fluxctl mac-fleet templates distribute`",
+            "relax `placement:` (host, labels, ac_only, disk_gib)",
+        ],
+        aliases: &["compose-fleet-no-room"],
+        signatures: &["explain mac_compose_fleet_no_room"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_FLEET_START",
+        status: None,
+        summary: "Starting a compose service on a fleet Mac failed.",
+        causes: &[
+            "ssh to the Mac failed, FluxVM is not installed there, or its daemon refused (for example a slot taken meanwhile)",
+            "an environment variable name cannot be sent (PATH, HOME, DYLD_* and a few others are reserved)",
+        ],
+        fixes: &[
+            "the message names the Mac and the reason; check it with `fluxctl mac-fleet doctor -f hosts.yaml`",
+            "what already started stays: `fluxctl mac compose down --fleet hosts.yaml` removes it",
+        ],
+        aliases: &["compose-fleet-start"],
+        signatures: &["explain mac_compose_fleet_start"],
+    },
+    MacCode {
+        code: "MAC_COMPOSE_FLEET_INVENTORY",
+        status: None,
+        summary: "The Macs for `compose --fleet` could not be read.",
+        causes: &[
+            "the inventory file is missing or is not valid YAML or JSON, or lists the same Mac twice",
+        ],
+        fixes: &[
+            "check the file with `fluxctl mac-fleet status -f hosts.yaml`",
+            "see docs/macos-containers.md for the inventory format",
+        ],
+        aliases: &["compose-fleet-inventory"],
+        signatures: &["explain mac_compose_fleet_inventory"],
     },
 ];
 
