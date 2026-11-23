@@ -110,6 +110,14 @@ pub enum SystemCommand {
         all: bool,
         #[arg(short = 'f', long)]
         force: bool,
+        /// Also delete volumes no instance uses. Their data is lost.
+        #[arg(long)]
+        volumes: bool,
+        /// Show what would be removed and how much room it frees; remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Everything at a glance, like `docker info`: fluxctl and daemon versions, the Mac (macOS build, chip), instances
     /// running out of 2, images and disk used, the store path and the `mac doctor` summary. Works without a daemon (that line
@@ -384,7 +392,7 @@ impl MacMore {
     }
 }
 
-fn confirm(what: &str, force: bool) -> Result<bool> {
+pub(crate) fn confirm(what: &str, force: bool) -> Result<bool> {
     if force {
         return Ok(true);
     }
@@ -1101,46 +1109,17 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
         }
         MacMore::System {
             command: SystemCommand::Df { json },
-        } => {
-            let items = instances(r).await?;
-            let all: Vec<&Value> = items.iter().collect();
-            let df = ops::compute_df(&open_store()?, &all)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&df)?);
-            } else {
-                print!("{}", ops::render_df(&df));
-            }
-        }
+        } => crate::mac_sysdisk::run_df(r, json).await?,
         MacMore::System {
-            command: SystemCommand::Prune { all, force },
-        } => {
-            let items = instances(r).await?;
-            let refs: Vec<&Value> = items.iter().collect();
-            let store = open_store()?;
-            let names: BTreeSet<String> = store.list()?.into_iter().map(|(k, _)| k).collect();
-            let victims = ops::prunable_instances(&refs, &names, true);
-            for v in &victims {
-                println!("instance {} ({})", name_of(v), view::status(v));
-            }
-            let unused = if all {
-                let used: Vec<String> = items
-                    .iter()
-                    .filter_map(|v| v["labels"][IMAGE_LABEL].as_str().map(String::from))
-                    .collect();
-                ops::unused_images(&store, &used)?
-            } else {
-                vec![]
-            };
-            if !confirm(&format!("This deletes {} instances", victims.len()), force)? {
-                println!("cancelled");
-                return Ok(());
-            }
-            for v in victims {
-                crate::mac_cmd::delete_instance(r, id_of(v)?).await?;
-                println!("removed {}", name_of(v));
-            }
-            prune_store(&store, &unused, false, true)?;
-        }
+            command:
+                SystemCommand::Prune {
+                    all,
+                    force,
+                    volumes,
+                    dry_run,
+                    json,
+                },
+        } => crate::mac_sysdisk::run_prune(r, all, volumes, dry_run, force, json).await?,
         MacMore::Image {
             command:
                 ImageCommand::Prune {
@@ -1375,7 +1354,10 @@ mod tests {
             C::More(MacMore::System {
                 command: SystemCommand::Prune {
                     all: true,
-                    force: true
+                    force: true,
+                    volumes: false,
+                    dry_run: false,
+                    json: false
                 }
             })
         ));

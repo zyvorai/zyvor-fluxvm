@@ -102,7 +102,7 @@ and `CMD` (from its Macfile) run; with neither, the instance just stays up.
 |---|---|
 | `-e NAME[=VALUE]` | Environment for `CMD` (`NAME` alone copies it from this shell). Repeatable. Not stored in the VM, so a later `mac exec` needs its own `-e`. |
 | `--env-file FILE` | `NAME=value` lines, `#` comments. `-e` wins over the file. |
-| `-v HOST:GUEST[:ro]` | A virtiofs share (`shared_folders`) from a directory on this Mac; the daemon must run on this Mac. A named volume is refused. A macOS guest shows shares under `/Volumes/My Shared Files`; `run` then makes the GUEST path a symlink to the share over SSH (tries without, then with `sudo -n`; a failure is a warning). **The share's name under that directory (`fs0`, `fs1`, ...) is a guess from the Linux tags and is unverified on a real guest.** |
+| `-v HOST:GUEST[:ro]` | A virtiofs share (`shared_folders`) from a directory on this Mac; the daemon must run on this Mac. A bare name (`-v cache:/var/cache`) is a named volume, made on first use (see "Volumes, ports and networks"); compose still refuses named volumes. A macOS guest shows shares under `/Volumes/My Shared Files`; `run` then makes the GUEST path a symlink to the share over SSH (tries without, then with `sudo -n`; a failure is a warning). **The share's name under that directory (`fs0`, `fs1`, ...) is a guess from the Linux tags and is unverified on a real guest.** |
 | `-w DIR` | Directory `CMD` runs in (overrides the image's `WORKDIR`). |
 | `--label KEY=VALUE` | A label on the VM. Keys starting `fluxvm.mac` are reserved. |
 | `--restart POLICY` | `no`, `always`, `unless-stopped`, `on-failure`. **A label only**: the daemon never restarts a macOS VM. `fluxctl mac reconcile` applies it (run it from launchd or cron). `mac stop` marks an instance so `unless-stopped` leaves it alone. |
@@ -200,7 +200,7 @@ Mac's login session is locked (a headless host needs an auto-login user with the
 | `mac image prune [--all] [--dry-run] [-f]` | Removes store directories no name uses (a crashed pull) and scratch directories older than an hour. `--all` also removes images no instance uses and needs the daemon. |
 | `mac system df [--json]` | Images (names, in use, size, reclaimable), instances (running, size, reclaimable) and unreferenced directories. Sizes are **allocated** bytes (`st_blocks`), because `disk.raw` is sparse; APFS clones share blocks, so deleting can free less than shown. Instance sizes count only disks this Mac can read. `mac images` still shows apparent size. |
 | `mac system info`, `mac system version` `[--json]` | [`docker info` and `docker version`](#mac-system-info-and-mac-system-version). |
-| `mac system prune [--all] [-f]` | `mac prune --orphaned`, plus `image prune`; with `--all`, also unused images. |
+| `mac system prune [--all] [--volumes] [--dry-run] [-f] [--json]` | `mac prune --orphaned`, plus `image prune`; with `--all`, also unused images; with `--volumes`, also volumes no remaining instance uses. Always prints what goes, how much it frees and the Mac's free space before and after; `--dry-run` stops there. See "Volumes, ports and networks". |
 
 ## Inspecting and observing: `--format`, `--since`, `--filter`, `system info`
 
@@ -824,6 +824,21 @@ The image list and the login list are read from the account the **daemon** runs 
 `~/.fluxvm/mac-images` and `~/.config/fluxvm/mac-registry-auth.json`). If you run `fluxctl` as a different user than the daemon, the
 page says which folder it looked in and the command to run as your user. A login file other people can read is not used, and the page
 says to `chmod 600` it. Not verified against a real Mac, daemon or browser.
+## Volumes, ports and networks (Docker resource parity)
+
+**Named volumes.** `fluxctl mac volume create [NAME] [--label K=V]`, `ls [--json|-q]`, `inspect NAME...`, `rm [-f] NAME...`, `prune [--dry-run] [-f]`. A volume is a folder on this Mac, `~/.fluxvm/mac-volumes/NAME/data` (`FLUXVM_MAC_VOLUMES` moves the root), shared into a guest over virtiofs exactly like `-v ./dir:/path`. `mac run|create -v NAME:/path[:ro]` uses the volume and creates it on first use; a path (`./x`, `/x`, `~/x`) is still a path. Names are letters, digits, `_`, `.`, `-`. A volume counts as in use while any instance, running or stopped, has its folder among its shared folders, and `volume rm` refuses with the instance's name (`MAC_VOLUME_IN_USE`). `volume create` needs no daemon; the other volume commands read the daemon's instances. Compose does not accept named volumes yet.
+
+**`mac cp`** already copies both ways (`mac cp NAME:/guest/path ./local`, `mac cp ./local NAME:/guest/path`, over `scp -r`); nothing was added.
+
+**Ports.** `mac port NAME [GUEST_PORT]` lists what an instance publishes. `-p [ADDR:]HOST:GUEST` is now checked before the VM is created: a host port below 1024 (`MAC_PORT_PRIVILEGED`, the daemon does not run as root), the same host port twice, a host port a running instance already publishes, or one another program on this Mac is listening on (found by binding it for an instant, then `lsof` names the program; only when the daemon is on this machine; `FLUXVM_MAC_SKIP_PORT_PROBE=1` skips it) all fail with a plain message naming the holder and a free port to try (`MAC_PORT_IN_USE`). Forwards are TCP only.
+
+**Networks.** `mac network ls` and `mac network inspect [nat]` show the one NAT network, who is on it, and what it does not do: guests on it cannot reach each other, no DNS names, no user-defined networks. `network create|rm|connect|disconnect|prune` are refused with that explanation (`MAC_NETWORK_UNSUPPORTED`).
+
+**Disk.** `mac system df` adds a Volumes row and the Mac's free space (and a warning under 30 GiB free). `mac system prune --dry-run` prints a table of instances, images (`--all`), store folders and volumes (`--volumes`) with sizes, "Would free up to X", and "Disk: A free of B. After this: about C free." Sizes are allocated bytes and an upper bound because APFS clones share blocks; after a real prune it prints the measured gain. With `--json` the plan has schema 1 (`would_free_bytes`, `disk_free_bytes`, ...).
+
+**Studio and API.** `GET /v1/mac/disk` (admin, read-only) returns the same numbers for Studio (disk, images, instances, volumes with their users, a prune preview) plus the `fluxctl` commands that act on them (Copy as fluxctl). No Studio page calls it yet.
+
+Not verified: any of this on a real Mac or macOS guest (the virtiofs share name under `/Volumes/My Shared Files` is the same unverified guess as for `-v`), the `lsof` output format on macOS, and the free-space numbers against Finder's "available" figure (which counts purgeable space; `df` does not).
 
 ## Hard limits
 

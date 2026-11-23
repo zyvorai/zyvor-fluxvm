@@ -208,6 +208,9 @@ pub enum MacCommand {
     /// `checkpoint`, `checkpoints`, `diff`: named checkpoints of an instance, and `run --from-checkpoint`.
     #[command(flatten)]
     Ckpt(crate::mac_checkpoint::MacCkpt),
+    /// `volume` and `network`: Docker resource parity.
+    #[command(flatten)]
+    Res(crate::mac_res::MacRes),
 }
 
 impl MacCommand {
@@ -228,6 +231,7 @@ impl MacCommand {
             Self::Plus(_) | Self::Ux(_) => true,
             Self::Ops(o) => o.is_client_side(),
             Self::Dp(d) => d.is_client_side(),
+            Self::Res(x) => x.is_client_side(),
             _ => !matches!(
                 self,
                 Self::Run { .. }
@@ -489,6 +493,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
         MacCommand::Imgx(i) => crate::mac_imgx::run_daemon(r, i).await,
         MacCommand::Ckpt(c) => crate::mac_checkpoint::run_daemon(r, c).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
+        MacCommand::Res(x) => crate::mac_res::run_daemon(r, x).await,
         MacCommand::Build {
             file,
             tag,
@@ -950,6 +955,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
     let command = match command {
         MacCommand::Ops(o) => return crate::mac_ops::run_client(o),
         MacCommand::Dp(d) => return crate::mac_dp::run_client(d).await,
+        MacCommand::Res(x) => return crate::mac_res::run_client(x),
         c => c,
     };
     let store = Store::open(mac_store::default_root()?)?;
@@ -1071,6 +1077,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Life(_)
         | MacCommand::Imgx(_)
         | MacCommand::Ckpt(_)
+        | MacCommand::Res(_)
         | MacCommand::Ops(_) => unreachable!("rejected above"),
     }
     Ok(())
