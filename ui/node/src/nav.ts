@@ -35,11 +35,13 @@ export const NAV: NavGroup[] = [
       { to: '/apps', label: 'Apps', desc: 'Run an image on a cluster' },
       { to: '/docker', label: 'Docker', desc: 'Containers and images of the engine' },
       { to: '/mac-fleet', label: 'Mac fleet', desc: 'Capacity, thermal and disk of each Mac' },
+      { to: '/templates', label: 'Templates', desc: 'One-command stacks' },
       { to: '/images', label: 'Images', desc: 'Catalog, templates and warm pools' },
       { to: '/volumes', label: 'Volumes', desc: 'Disks that outlive a machine' },
       { to: '/backups', label: 'Backups', desc: 'Standalone disk copies' },
       { to: '/host', label: 'Host', desc: 'Memory, GPUs and topology' },
       { to: '/access', label: 'Access & audit', desc: 'Quota, events and the API' },
+      { to: '/cheatsheet', label: 'Cheatsheet', desc: 'The commands you will want' },
     ],
   },
 ];

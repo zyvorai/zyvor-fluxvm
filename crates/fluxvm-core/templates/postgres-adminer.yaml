@@ -1,0 +1,26 @@
+# Postgres 17 with the Adminer web page, for local development. Reachable from this machine only (127.0.0.1).
+name: fluxvm-postgres-adminer
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: fluxvm-dev
+      POSTGRES_DB: app
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  adminer:
+    image: adminer:latest
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      - db
+volumes:
+  pgdata: {}

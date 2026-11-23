@@ -3,6 +3,7 @@
 
 pub mod agent_density;
 pub mod backend;
+pub mod cheatsheet;
 pub mod config;
 pub mod config_lint;
 pub mod egress;
@@ -15,8 +16,8 @@ pub mod health;
 pub mod instancetype;
 pub mod k3s_backups;
 pub mod keychain;
-pub mod kube_view;
 pub mod kube_app;
+pub mod kube_view;
 pub mod lifecycle;
 pub mod login_session;
 pub mod mdev;
@@ -32,6 +33,7 @@ pub mod security;
 pub mod setup_doctor;
 pub mod signing;
 pub mod spec_lint;
+pub mod stack_templates;
 pub mod support_bundle;
 pub mod support_collect;
 pub mod topology;

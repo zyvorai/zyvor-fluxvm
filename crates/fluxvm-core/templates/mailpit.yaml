@@ -1,0 +1,8 @@
+# Mailpit: a mail catcher. Your app sends to 127.0.0.1:1025 and you read the mail at http://127.0.0.1:8025.
+name: fluxvm-mailpit
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"

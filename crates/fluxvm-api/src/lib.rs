@@ -54,6 +54,7 @@ mod agent_session_approvals;
 mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
+mod cli_api;
 mod cluster_health;
 mod docker_view;
 mod guest_ops;
@@ -67,9 +68,9 @@ mod kube_inventory;
 mod kube_metrics;
 mod kube_pod;
 mod kube_workloads;
-mod mac_view;
-mod mac_fleet_api;
 mod mac_disk_api;
+mod mac_fleet_api;
+mod mac_view;
 mod macos_pool_api;
 mod setup_doctor;
 mod speculate_api;
@@ -1068,6 +1069,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
         .merge(setup_doctor::routes())
+        .merge(cli_api::routes())
         .merge(support_bundle::routes())
         .merge(image_security::routes())
         .merge(up_plan::routes())

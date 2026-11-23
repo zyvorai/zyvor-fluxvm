@@ -58,6 +58,13 @@ pub fn render(args: &ExplainArgs) -> Result<(String, i32)> {
             return Ok((crate::supply_errors::render(&sup, args.json)?, 0));
         }
     }
+    // CONFIG_UNKNOWN_KEY, UPGRADE_UNVERIFIED, TEMPLATE_UNKNOWN, ...: `fluxctl config set`, `upgrade`, `templates`, `completion`.
+    if hits.is_empty() && mac.is_empty() {
+        let cli = crate::cli_errors::find(query);
+        if !cli.is_empty() {
+            return Ok((crate::cli_errors::render(&cli, args.json)?, 0));
+        }
+    }
     // The codes `fluxctl cluster status` and `fluxctl fix` print (DAEMON_DOWN, LOW_DISK, ...): not API errors.
     if hits.is_empty() {
         let q = query.trim().to_ascii_uppercase().replace('-', "_");
