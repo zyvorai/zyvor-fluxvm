@@ -132,7 +132,42 @@ pub fn probe() -> HostHealth {
     }
 }
 
+/// Free space on the data volume, MiB. Blocking (runs `df`); `None` off macOS or when `df` cannot be read.
+pub fn probe_free_disk_mib() -> Option<u64> {
+    read("df", &["-k", "/System/Volumes/Data"])
+        .or_else(|| read("df", &["-k", "/"]))
+        .and_then(|t| free_disk_mib(&t))
+}
+
 // ------------------------------------------------------------------ decisions
+
+/// Free space a checkpoint keeps in reserve however small it is: the disk is an APFS clone (free until the live disk and the
+/// checkpoint diverge), but the guest keeps writing, and a full volume corrupts a running guest.
+pub const CHECKPOINT_RESERVE_MIB: u64 = 4096;
+
+/// Whether there is room to save a checkpoint. A checkpoint with memory writes about the guest's RAM to disk on top of the
+/// reserve; a disk-only one needs the reserve only. `None` free space (probe failed) never blocks. The text names the next step.
+pub fn checkpoint_space_blocker(
+    free_mib: Option<u64>,
+    guest_memory_mib: u64,
+    with_memory: bool,
+) -> Option<String> {
+    let free = free_mib?;
+    let need = CHECKPOINT_RESERVE_MIB + if with_memory { guest_memory_mib } else { 0 };
+    if free >= need {
+        return None;
+    }
+    Some(format!(
+        "not enough free disk to save a checkpoint: {free} MiB free on this Mac, about {need} MiB needed{}. Delete checkpoints \
+         you do not need (`fluxctl mac checkpoints`, then `fluxctl mac checkpoint rm NAME TAG`) or instances (`fluxctl mac rm NAME`), \
+         then retry",
+        if with_memory {
+            " (the guest's memory is written out with it; `--disk-only` skips that)"
+        } else {
+            ""
+        }
+    ))
+}
 
 /// What a restore of saved state should do given the build it was saved on and the host's build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +286,23 @@ impl HostHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_space_needs_the_reserve_and_the_memory_when_it_is_saved() {
+        assert!(checkpoint_space_blocker(None, 8192, true).is_none());
+        assert!(checkpoint_space_blocker(Some(20_000), 8192, true).is_none());
+        let m = checkpoint_space_blocker(Some(10_000), 8192, true).unwrap();
+        assert!(
+            m.contains("10000 MiB free")
+                && m.contains("12288 MiB needed")
+                && m.contains("--disk-only")
+        );
+        assert!(m.contains("fluxctl mac checkpoint rm"));
+        // The same Mac can still take a disk-only checkpoint.
+        assert!(checkpoint_space_blocker(Some(10_000), 8192, false).is_none());
+        let m = checkpoint_space_blocker(Some(100), 8192, false).unwrap();
+        assert!(m.contains("4096 MiB needed") && !m.contains("--disk-only"));
+    }
 
     #[test]
     fn override_variables_turn_on_only_for_explicit_values() {

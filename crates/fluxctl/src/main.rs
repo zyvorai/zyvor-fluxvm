@@ -94,6 +94,7 @@ mod launch_agent;
 mod mac_build;
 mod mac_build_exec;
 mod mac_cache;
+mod mac_checkpoint;
 mod mac_cmd;
 mod mac_compose;
 mod mac_compose_cfg;

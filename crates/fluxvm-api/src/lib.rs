@@ -3089,14 +3089,39 @@ async fn restore_vm(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     Path(id): Path<Uuid>,
-    Json(req): Json<VmSnapshotRequest>,
+    Json(req): Json<RestoreVmRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
+    // A macOS guest's current state is saved as an automatic checkpoint first (`safety_checkpoint: false` opts out), and the
+    // answer says under which tag, so the caller can tell the user how to roll back.
+    if req.safety_checkpoint.unwrap_or(true) {
+        let done = m
+            .restore_vm_snapshot_safe(id, &req.tag)
+            .await
+            .map_err(change_error)?;
+        let mut body = json!(done.vm);
+        if let (Some(tag), Some(obj)) = (done.safety_checkpoint, body.as_object_mut()) {
+            obj.insert("safety_checkpoint".into(), json!(tag));
+            obj.insert(
+                "safety_checkpoint_memory".into(),
+                json!(done.safety_has_memory),
+            );
+        }
+        return Ok(Json(body));
+    }
     let vm = m
         .restore_vm_snapshot(id, &req.tag)
         .await
         .map_err(change_error)?;
     Ok(Json(json!(vm)))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RestoreVmRequest {
+    tag: String,
+    /// Default `true`: save the current state of a macOS guest as an automatic checkpoint before restoring.
+    #[serde(default)]
+    safety_checkpoint: Option<bool>,
 }
 
 async fn stop_vm(

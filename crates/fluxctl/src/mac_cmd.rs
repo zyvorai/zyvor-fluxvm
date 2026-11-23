@@ -105,7 +105,8 @@ pub enum MacCommand {
         sched: crate::mac_fleet_run::FleetRun,
         #[command(flatten)]
         xrun: crate::mac_ops::RunExtra,
-        /// A local image (`fluxctl mac images`).
+        /// A local image (`fluxctl mac images`). Not given with `--from-checkpoint`.
+        #[arg(required_unless_present = "from_checkpoint", default_value = "")]
         image: String,
         /// The command to run in the guest, after `--`.
         #[arg(last = true)]
@@ -187,6 +188,9 @@ pub enum MacCommand {
     /// `export`, `manifest inspect`: instance export and registry manifests.
     #[command(flatten)]
     Imgx(crate::mac_imgx::MacImgx),
+    /// `checkpoint`, `checkpoints`, `diff`: named checkpoints of an instance, and `run --from-checkpoint`.
+    #[command(flatten)]
+    Ckpt(crate::mac_checkpoint::MacCkpt),
 }
 
 impl MacCommand {
@@ -201,6 +205,7 @@ impl MacCommand {
             }
             Self::Life(l) => l.is_client_side(),
             Self::Imgx(i) => i.is_client_side(),
+            Self::Ckpt(_) => false,
             Self::Ps { opts, .. } => opts.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) | Self::Ux(_) => true,
@@ -398,6 +403,19 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             cmd,
             ..
         } => {
+            if let Some(reference) = &xrun.from_checkpoint {
+                crate::mac_checkpoint::check_run_flags(
+                    &image,
+                    name.as_deref(),
+                    &publish,
+                    rm,
+                    false,
+                )?;
+                return crate::mac_checkpoint::run_from_checkpoint(
+                    r, reference, user, wait, cmd, json,
+                )
+                .await;
+            }
             xrun.check(rm)?;
             opts.life.check_supported()?;
             crate::mac_lifecycle::ensure_image(&image, opts.life.pull).await?;
@@ -452,6 +470,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
         MacCommand::Dp(d) => crate::mac_dp::run_daemon(r, d).await,
         MacCommand::Life(l) => crate::mac_lifecycle::run_daemon(r, l).await,
         MacCommand::Imgx(i) => crate::mac_imgx::run_daemon(r, i).await,
+        MacCommand::Ckpt(c) => crate::mac_checkpoint::run_daemon(r, c).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
         MacCommand::Build {
             file,
@@ -789,10 +808,14 @@ pub async fn run(command: MacCommand) -> Result<()> {
             opts,
             sched,
             queue,
+            xrun,
             image,
             cmd,
             ..
         } => {
+            if xrun.from_checkpoint.is_some() {
+                crate::mac_checkpoint::check_run_flags(&image, None, &[], false, true)?;
+            }
             return tokio::task::block_in_place(|| {
                 crate::mac_fleet_run::mac_run_fleet(
                     publish, name, user, wait, opts, sched, &queue, image, cmd,
@@ -895,6 +918,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Dp(_)
         | MacCommand::Life(_)
         | MacCommand::Imgx(_)
+        | MacCommand::Ckpt(_)
         | MacCommand::Ops(_) => unreachable!("rejected above"),
     }
     Ok(())
