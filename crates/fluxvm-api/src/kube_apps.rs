@@ -266,13 +266,17 @@ pub(crate) async fn delete_app(
         Ok(_) => {
             return Err(err(
                 StatusCode::CONFLICT,
-                format!("{app} was not made by `fluxctl kube run`, so fluxctl leaves it alone. Use kubectl for it."),
+                format!(
+                    "{app} was not made by `fluxctl kube run`, so fluxctl leaves it alone. Use kubectl for it."
+                ),
             ));
         }
         Err(e) if is_404(&e) => {
             return Err(err(
                 StatusCode::NOT_FOUND,
-                format!("There is no app called {app} in {ns} (it may already be removed). List the apps with `fluxctl kube apps` (APP_NOT_FOUND)"),
+                format!(
+                    "There is no app called {app} in {ns} (it may already be removed). List the apps with `fluxctl kube apps` (APP_NOT_FOUND)"
+                ),
             ));
         }
         Err(e) => return Err(e),
@@ -285,7 +289,9 @@ pub(crate) async fn delete_app(
     {
         send(&target, Method::DELETE, &svc_path, None, "application/json").await?;
     }
-    Ok(Json(json!({"cluster": cluster, "name": app, "namespace": ns, "result": "deleted"})))
+    Ok(Json(
+        json!({"cluster": cluster, "name": app, "namespace": ns, "result": "deleted"}),
+    ))
 }
 
 #[cfg(test)]
@@ -298,10 +304,19 @@ mod tests {
 
     #[test]
     fn a_request_fills_in_the_name_and_port_from_the_image() {
-        let s = spec_of(body(json!({"image": "ghcr.io/acme/Shop:1.0", "env": [{"name": "A", "value": "b"}]}))).unwrap();
-        assert_eq!((s.name.as_str(), s.port, s.replicas, s.namespace.as_str()), ("shop", 80, 1, "default"));
+        let s = spec_of(body(
+            json!({"image": "ghcr.io/acme/Shop:1.0", "env": [{"name": "A", "value": "b"}]}),
+        ))
+        .unwrap();
+        assert_eq!(
+            (s.name.as_str(), s.port, s.replicas, s.namespace.as_str()),
+            ("shop", 80, 1, "default")
+        );
         assert_eq!(s.env, vec![("A".to_owned(), "b".to_owned())]);
-        let s = spec_of(body(json!({"image": "grafana/grafana", "name": " ", "port": 3001, "replicas": 2}))).unwrap();
+        let s = spec_of(body(
+            json!({"image": "grafana/grafana", "name": " ", "port": 3001, "replicas": 2}),
+        ))
+        .unwrap();
         assert_eq!((s.name.as_str(), s.port, s.replicas), ("grafana", 3001, 2));
     }
 

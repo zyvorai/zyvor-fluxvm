@@ -119,7 +119,9 @@ pub fn validate(s: &Spec) -> Result<(), String> {
         return Err("the port must be between 1 and 65535".to_owned());
     }
     if s.replicas > MAX_REPLICAS {
-        return Err(format!("an app can have at most {MAX_REPLICAS} copies; give a smaller number"));
+        return Err(format!(
+            "an app can have at most {MAX_REPLICAS} copies; give a smaller number"
+        ));
     }
     for (k, _) in &s.env {
         let mut c = k.chars();
@@ -216,13 +218,17 @@ pub fn pod_status(pod: &Value) -> String {
         }
     }
     if pod["status"]["phase"] == "Pending"
-        && pod["status"]["conditions"]
-            .as_array()
-            .is_some_and(|cs| cs.iter().any(|c| c["type"] == "PodScheduled" && c["status"] == "False"))
+        && pod["status"]["conditions"].as_array().is_some_and(|cs| {
+            cs.iter()
+                .any(|c| c["type"] == "PodScheduled" && c["status"] == "False")
+        })
     {
         return "Unschedulable".to_owned();
     }
-    pod["status"]["phase"].as_str().unwrap_or("Unknown").to_owned()
+    pod["status"]["phase"]
+        .as_str()
+        .unwrap_or("Unknown")
+        .to_owned()
 }
 
 /// The plain-English problem behind a pod status, if it is one. `image` and `name` are the app's, for the sentence.
@@ -414,8 +420,14 @@ mod tests {
         let m = manifests(&spec());
         assert_eq!(m.len(), 2);
         assert!(m.iter().all(is_managed));
-        assert_eq!(m[0]["spec"]["selector"]["matchLabels"], m[1]["spec"]["selector"]);
-        assert_eq!(m[0]["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"], "dev");
+        assert_eq!(
+            m[0]["spec"]["selector"]["matchLabels"],
+            m[1]["spec"]["selector"]
+        );
+        assert_eq!(
+            m[0]["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"],
+            "dev"
+        );
         assert_eq!(m[1]["spec"]["ports"][0]["port"], 80);
     }
 
@@ -426,7 +438,10 @@ mod tests {
                "status": {"readyReplicas": ready}})
     }
     fn pod(name: &str, app: &str, waiting: Option<&str>) -> Value {
-        let state = waiting.map_or(json!({"running": {}}), |r| json!({"waiting": {"reason": r}}));
+        let state = waiting.map_or(
+            json!({"running": {}}),
+            |r| json!({"waiting": {"reason": r}}),
+        );
         json!({"metadata": {"namespace": "default", "name": name, "labels": {NAME_KEY: app}},
                "spec": {"containers": [{"name": app}]},
                "status": {"phase": "Running", "containerStatuses": [{"ready": waiting.is_none(), "restartCount": 2, "state": state}]}})
@@ -453,7 +468,10 @@ mod tests {
 
     #[test]
     fn pod_status_reads_waiting_oom_and_unschedulable() {
-        assert_eq!(pod_status(&pod("p", "a", Some("CrashLoopBackOff"))), "CrashLoopBackOff");
+        assert_eq!(
+            pod_status(&pod("p", "a", Some("CrashLoopBackOff"))),
+            "CrashLoopBackOff"
+        );
         let oom = json!({"status": {"phase": "Running", "containerStatuses": [{"ready": false, "state": {"running": {}}, "lastState": {"terminated": {"reason": "OOMKilled"}}}]}});
         assert_eq!(pod_status(&oom), "OOMKilled");
         let un = json!({"status": {"phase": "Pending", "conditions": [{"type": "PodScheduled", "status": "False"}]}});
@@ -463,9 +481,18 @@ mod tests {
 
     #[test]
     fn every_problem_code_is_explained() {
-        for s in ["ImagePullBackOff", "CrashLoopBackOff", "OOMKilled", "Unschedulable"] {
+        for s in [
+            "ImagePullBackOff",
+            "CrashLoopBackOff",
+            "OOMKilled",
+            "Unschedulable",
+        ] {
             let p = problem_for(s, "a", "i", "default").unwrap();
-            assert!(crate::health::code(p.code).is_some(), "{} is not in the explain table", p.code);
+            assert!(
+                crate::health::code(p.code).is_some(),
+                "{} is not in the explain table",
+                p.code
+            );
         }
     }
 }

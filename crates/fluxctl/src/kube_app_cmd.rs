@@ -125,7 +125,12 @@ pub enum Rollout {
 
 /// Runs the command and returns the exit code. Errors are printed as sentences ending with what to do next.
 pub fn run(cmd: AppCommand) -> i32 {
-    match execute(cmd, &SystemKubectl, &expose::SystemEnv, &mut std::io::stdout()) {
+    match execute(
+        cmd,
+        &SystemKubectl,
+        &expose::SystemEnv,
+        &mut std::io::stdout(),
+    ) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("fluxctl kube: {e:#}");
@@ -312,9 +317,7 @@ fn read_apps(c: &Cluster, ns: Option<&str>) -> Result<Vec<Value>> {
     }
     let all: Value = serde_json::from_str(&r.stdout)
         .map_err(|e| anyhow!("kubectl answered something that is not JSON: {e}"))?;
-    let of = |kind: &str| {
-        json!({"items": all["items"].as_array().map(|a| a.iter().filter(|i| i["kind"] == kind).cloned().collect::<Vec<_>>()).unwrap_or_default()})
-    };
+    let of = |kind: &str| json!({"items": all["items"].as_array().map(|a| a.iter().filter(|i| i["kind"] == kind).cloned().collect::<Vec<_>>()).unwrap_or_default()});
     Ok(kube_app::summarize(
         &of("Deployment"),
         &of("Service"),
@@ -325,7 +328,9 @@ fn read_apps(c: &Cluster, ns: Option<&str>) -> Result<Vec<Value>> {
 /// The managed Deployment, or the sentence saying why there is none.
 fn require_app(c: &Cluster, app: &str, ns: &str, sel: &Selection) -> Result<Value> {
     if !kube_app::name_ok(app) || !kube_app::name_ok(ns) {
-        bail!("{app:?} in {ns:?} is not an app name. Names use lowercase letters, digits and dashes");
+        bail!(
+            "{app:?} in {ns:?} is not an app name. Names use lowercase letters, digits and dashes"
+        );
     }
     match get_one(c, ns, &format!("deployment/{app}"))? {
         Some(d) if kube_app::is_managed(&d) => Ok(d),
@@ -425,7 +430,10 @@ pub fn execute(
             target,
         } => {
             if replicas > kube_app::MAX_REPLICAS {
-                bail!("an app can have at most {} copies; give a smaller number", kube_app::MAX_REPLICAS);
+                bail!(
+                    "an app can have at most {} copies; give a smaller number",
+                    kube_app::MAX_REPLICAS
+                );
             }
             let (sel, prefix) = selection(&target)?;
             let c = Cluster::new(prefix, runner);
@@ -434,7 +442,11 @@ pub fn execute(
             let r = kc(
                 &c,
                 Some(&namespace),
-                &["scale", &format!("deployment/{app}"), &format!("--replicas={n}")],
+                &[
+                    "scale",
+                    &format!("deployment/{app}"),
+                    &format!("--replicas={n}"),
+                ],
                 None,
                 60,
             )?;
@@ -442,7 +454,10 @@ pub fn execute(
                 return Err(kerr("kubectl scale", &r));
             }
             if replicas == 0 {
-                writeln!(out, "{app} stopped (0 copies). Start it again with `fluxctl kube scale {app} 1`.")?;
+                writeln!(
+                    out,
+                    "{app} stopped (0 copies). Start it again with `fluxctl kube scale {app} 1`."
+                )?;
             } else {
                 writeln!(out, "{app} scaled to {replicas}.")?;
             }
@@ -457,7 +472,11 @@ pub fn execute(
             let (sel, prefix) = selection(&target)?;
             let c = Cluster::new(prefix, runner);
             require_app(&c, &app, &namespace, &sel)?;
-            let verb = if action == Rollout::Undo { "undo" } else { "restart" };
+            let verb = if action == Rollout::Undo {
+                "undo"
+            } else {
+                "restart"
+            };
             let r = kc(
                 &c,
                 Some(&namespace),
@@ -466,7 +485,9 @@ pub fn execute(
                 60,
             )?;
             if r.code != 0 {
-                if r.stderr.contains("no rollout history") || r.stderr.contains("no previous revision") {
+                if r.stderr.contains("no rollout history")
+                    || r.stderr.contains("no previous revision")
+                {
                     bail!(
                         "{app} has no earlier version to go back to. Run it again with a different image (`fluxctl kube run IMAGE --name {app}`) and then undo"
                     );
@@ -474,9 +495,17 @@ pub fn execute(
                 return Err(kerr(&format!("kubectl rollout {verb}"), &r));
             }
             if action == Rollout::Undo {
-                writeln!(out, "{app} is going back to its previous version. Watch it with `fluxctl kube apps{}`.", flags(&sel))?;
+                writeln!(
+                    out,
+                    "{app} is going back to its previous version. Watch it with `fluxctl kube apps{}`.",
+                    flags(&sel)
+                )?;
             } else {
-                writeln!(out, "{app} is restarting. Watch it with `fluxctl kube apps{}`.", flags(&sel))?;
+                writeln!(
+                    out,
+                    "{app} is restarting. Watch it with `fluxctl kube apps{}`.",
+                    flags(&sel)
+                )?;
             }
             Ok(0)
         }
@@ -494,19 +523,21 @@ pub fn execute(
             require_app(&c, &app, &namespace, &sel)?;
             out.flush()?;
             // The gateway command does the rest: Envoy Gateway if needed, a Gateway and HTTPRoute, a free port and a forward.
-            Ok(crate::gateway::run(crate::gateway::GatewayCommand::Expose {
-                service: app,
-                namespace,
-                port: None,
-                host,
-                local_port,
-                yes,
-                dry_run,
-                target: Target {
-                    kube_context: sel.kube_context,
-                    cluster: sel.cluster,
+            Ok(crate::gateway::run(
+                crate::gateway::GatewayCommand::Expose {
+                    service: app,
+                    namespace,
+                    port: None,
+                    host,
+                    local_port,
+                    yes,
+                    dry_run,
+                    target: Target {
+                        kube_context: sel.kube_context,
+                        cluster: sel.cluster,
+                    },
                 },
-            }))
+            ))
         }
     }
 }
@@ -593,7 +624,13 @@ pub fn run_app(
         }
     }
     if ns != "default" {
-        let r = kc(c, None, &["get", "namespace", ns, "-o", "name", "--ignore-not-found"], None, 30)?;
+        let r = kc(
+            c,
+            None,
+            &["get", "namespace", ns, "-o", "name", "--ignore-not-found"],
+            None,
+            30,
+        )?;
         if r.code == 0 && r.stdout.trim().is_empty() {
             let r = kc(c, None, &["create", "namespace", ns], None, 30)?;
             if r.code != 0 && !r.stderr.contains("AlreadyExists") {
@@ -602,7 +639,13 @@ pub fn run_app(
         }
     }
     let list = json!({"apiVersion": "v1", "kind": "List", "items": kube_app::manifests(spec)});
-    let r = kc(c, None, &["apply", "-f", "-"], Some(list.to_string().as_bytes()), 60)?;
+    let r = kc(
+        c,
+        None,
+        &["apply", "-f", "-"],
+        Some(list.to_string().as_bytes()),
+        60,
+    )?;
     if r.code != 0 {
         return Err(kerr("kubectl apply", &r));
     }
@@ -638,7 +681,11 @@ pub fn run_app(
                             format!(
                                 "{} The app was left in the cluster; remove it with `fluxctl kube rm {name}{}`.\n  next: {}",
                                 row["summary"].as_str().unwrap_or("The app is not healthy."),
-                                if ns == "default" { String::new() } else { format!(" -n {ns}") },
+                                if ns == "default" {
+                                    String::new()
+                                } else {
+                                    format!(" -n {ns}")
+                                },
                                 row["next"].as_str().unwrap_or("")
                             ),
                         ));
@@ -693,7 +740,11 @@ fn keep_forwarding(argv: &[String], env: &dyn ExposeEnv, err: &mut dyn Write) ->
         match env.forward(argv)? {
             ForwardEnd::Interrupted => return Ok(0),
             ForwardEnd::Exited { code, ran } => {
-                fails = if ran >= Duration::from_secs(10) { 1 } else { fails + 1 };
+                fails = if ran >= Duration::from_secs(10) {
+                    1
+                } else {
+                    fails + 1
+                };
                 if fails >= 12 {
                     bail!(
                         "the forward keeps ending (kubectl exited {code}). Check the app with `fluxctl kube apps`, then run `{}` again",
@@ -726,7 +777,13 @@ fn rm(app: &str, ns: &str, sel: &Selection, c: &Cluster, out: &mut dyn Write) ->
     let r = kc(
         c,
         Some(ns),
-        &["delete", "deployment,service", app, "--ignore-not-found", "--timeout=60s"],
+        &[
+            "delete",
+            "deployment,service",
+            app,
+            "--ignore-not-found",
+            "--timeout=60s",
+        ],
         None,
         90,
     )?;
@@ -752,7 +809,10 @@ pub fn table(rows: &[Value]) -> Option<String> {
         .max()
         .unwrap_or(4)
         .max(4);
-    s.push_str(&format!("{:<w$}  {:<10}  {:<9}  {:<9}  IMAGE\n", "NAME", "NAMESPACE", "READY", "STATE"));
+    s.push_str(&format!(
+        "{:<w$}  {:<10}  {:<9}  {:<9}  IMAGE\n",
+        "NAME", "NAMESPACE", "READY", "STATE"
+    ));
     for r in rows {
         s.push_str(&format!(
             "{:<w$}  {:<10}  {:<9}  {:<9}  {}\n",
@@ -863,7 +923,10 @@ mod tests {
         let l = kube_app::manifests(&spec());
         let mut dep = l[0].clone();
         dep["status"] = json!({"readyReplicas": state_ready});
-        let state = pod_wait.map_or(json!({"running": {}}), |r| json!({"waiting": {"reason": r}}));
+        let state = pod_wait.map_or(
+            json!({"running": {}}),
+            |r| json!({"waiting": {"reason": r}}),
+        );
         json!({"items": [dep, l[1].clone(), {"kind": "Pod", "metadata": {"namespace": "default", "name": "web-1", "labels": {kube_app::NAME_KEY: "web"}},
             "spec": {"containers": [{"name": "web"}]}, "status": {"phase": "Running", "containerStatuses": [{"ready": pod_wait.is_none(), "restartCount": 0, "state": state}]}}]})
     }
@@ -874,12 +937,27 @@ mod tests {
     #[test]
     fn one_cluster_is_picked_none_falls_back_and_many_must_be_named() {
         let t = Target::default();
-        assert_eq!(pick(&["dev".into()], &t).unwrap().cluster.as_deref(), Some("dev"));
+        assert_eq!(
+            pick(&["dev".into()], &t).unwrap().cluster.as_deref(),
+            Some("dev")
+        );
         assert!(pick(&[], &t).unwrap().cluster.is_none());
         let e = pick(&["a".into(), "b".into()], &t).unwrap_err().to_string();
-        assert!(e.contains("--cluster NAME") && e.contains("APP_CLUSTER_AMBIGUOUS"), "{e}");
-        let named = Target { cluster: Some("x".into()), kube_context: None };
-        assert_eq!(pick(&["a".into(), "b".into()], &named).unwrap().cluster.as_deref(), Some("x"));
+        assert!(
+            e.contains("--cluster NAME") && e.contains("APP_CLUSTER_AMBIGUOUS"),
+            "{e}"
+        );
+        let named = Target {
+            cluster: Some("x".into()),
+            kube_context: None,
+        };
+        assert_eq!(
+            pick(&["a".into(), "b".into()], &named)
+                .unwrap()
+                .cluster
+                .as_deref(),
+            Some("x")
+        );
     }
 
     #[test]
@@ -892,25 +970,56 @@ mod tests {
             .json(list(1, None));
         let env = Env::new(true);
         let mut out = vec![];
-        let code = run_app(&spec(), &opts(false), &Selection::default(), &cluster(&f), &env, &mut out).unwrap();
+        let code = run_app(
+            &spec(),
+            &opts(false),
+            &Selection::default(),
+            &cluster(&f),
+            &env,
+            &mut out,
+        )
+        .unwrap();
         let out = String::from_utf8(out).unwrap();
         assert_eq!(code, 0);
-        assert!(out.contains("Created web") && out.contains("web is running") && out.contains("http://127.0.0.1:"), "{out}");
+        assert!(
+            out.contains("Created web")
+                && out.contains("web is running")
+                && out.contains("http://127.0.0.1:"),
+            "{out}"
+        );
         let calls = f.calls.borrow();
         assert!(calls[2].0.join(" ").contains("apply -f -"));
         assert!(calls[2].1.as_deref().unwrap().contains("fluxctl-app"));
         let fwd = env.forwarded.borrow();
-        assert!(fwd[0].contains("port-forward svc/web") && fwd[0].ends_with(":80"), "{fwd:?}");
+        assert!(
+            fwd[0].contains("port-forward svc/web") && fwd[0].ends_with(":80"),
+            "{fwd:?}"
+        );
         assert_eq!(env.pauses.get(), 1);
     }
 
     #[test]
     fn detach_creates_and_does_not_wait_or_forward() {
-        let f = FakeKubectl::default().text(0, "", "").text(0, "", "").text(0, "", "");
+        let f = FakeKubectl::default()
+            .text(0, "", "")
+            .text(0, "", "")
+            .text(0, "", "");
         let env = Env::new(true);
         let mut out = vec![];
-        run_app(&spec(), &opts(true), &Selection::default(), &cluster(&f), &env, &mut out).unwrap();
-        assert!(String::from_utf8(out).unwrap().contains("fluxctl kube expose web"));
+        run_app(
+            &spec(),
+            &opts(true),
+            &Selection::default(),
+            &cluster(&f),
+            &env,
+            &mut out,
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("fluxctl kube expose web")
+        );
         assert!(env.forwarded.borrow().is_empty());
     }
 
@@ -923,10 +1032,23 @@ mod tests {
             .json(list(0, Some("ErrImagePull")))
             .json(list(0, Some("ImagePullBackOff")));
         let env = Env::new(true);
-        let e = run_app(&spec(), &opts(false), &Selection::default(), &cluster(&f), &env, &mut vec![])
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("cannot download the image nginx") && e.contains("kube load") && e.contains("kube rm web") && e.contains("APP_IMAGE_PULL"), "{e}");
+        let e = run_app(
+            &spec(),
+            &opts(false),
+            &Selection::default(),
+            &cluster(&f),
+            &env,
+            &mut vec![],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("cannot download the image nginx")
+                && e.contains("kube load")
+                && e.contains("kube rm web")
+                && e.contains("APP_IMAGE_PULL"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -934,9 +1056,16 @@ mod tests {
         let foreign = json!({"metadata": {"name": "web", "labels": {}}});
         let f = FakeKubectl::default().json(foreign);
         let env = Env::new(false);
-        let e = run_app(&spec(), &opts(false), &Selection::default(), &cluster(&f), &env, &mut vec![])
-            .unwrap_err()
-            .to_string();
+        let e = run_app(
+            &spec(),
+            &opts(false),
+            &Selection::default(),
+            &cluster(&f),
+            &env,
+            &mut vec![],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("--name") && e.contains("APP_NAME_TAKEN"), "{e}");
         assert_eq!(f.calls.borrow().len(), 1);
     }
@@ -947,23 +1076,60 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         let f = FakeKubectl::default();
         let env = Env::new(true);
-        let o = RunOpts { local_port: Some(port), detach: false, wait: Duration::from_secs(4) };
-        let e = run_app(&spec(), &o, &Selection::default(), &cluster(&f), &env, &mut vec![]).unwrap_err().to_string();
-        assert!(e.contains("APP_PORT_TAKEN") && e.contains("Nothing was created"), "{e}");
+        let o = RunOpts {
+            local_port: Some(port),
+            detach: false,
+            wait: Duration::from_secs(4),
+        };
+        let e = run_app(
+            &spec(),
+            &o,
+            &Selection::default(),
+            &cluster(&f),
+            &env,
+            &mut vec![],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("APP_PORT_TAKEN") && e.contains("Nothing was created"),
+            "{e}"
+        );
         assert!(f.calls.borrow().is_empty());
     }
 
     #[test]
     fn no_cluster_is_explained() {
-        let f = FakeKubectl::default().text(1, "", "Unable to connect to the server: dial tcp 127.0.0.1:6443: connection refused");
-        let e = run_app(&spec(), &opts(true), &Selection::default(), &cluster(&f), &Env::new(false), &mut vec![])
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("fluxctl kube up") && e.contains("APP_NO_CLUSTER"), "{e}");
+        let f = FakeKubectl::default().text(
+            1,
+            "",
+            "Unable to connect to the server: dial tcp 127.0.0.1:6443: connection refused",
+        );
+        let e = run_app(
+            &spec(),
+            &opts(true),
+            &Selection::default(),
+            &cluster(&f),
+            &Env::new(false),
+            &mut vec![],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("fluxctl kube up") && e.contains("APP_NO_CLUSTER"),
+            "{e}"
+        );
         let f = FakeKubectl::default().fail("could not run kubectl: not found");
-        let e = run_app(&spec(), &opts(true), &Selection::default(), &cluster(&f), &Env::new(false), &mut vec![])
-            .unwrap_err()
-            .to_string();
+        let e = run_app(
+            &spec(),
+            &opts(true),
+            &Selection::default(),
+            &cluster(&f),
+            &Env::new(false),
+            &mut vec![],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("brew install kubectl"), "{e}");
     }
 
@@ -975,22 +1141,61 @@ mod tests {
             .fail("x") // httproute lookup fails: no gateway API; ignored
             .text(0, "deleted", "");
         let mut out = vec![];
-        rm("web", "default", &Selection::default(), &cluster(&f), &mut out).unwrap();
+        rm(
+            "web",
+            "default",
+            &Selection::default(),
+            &cluster(&f),
+            &mut out,
+        )
+        .unwrap();
         assert!(String::from_utf8(out).unwrap().contains("Removed web"));
         assert!(f.argvs()[2].contains("delete deployment,service web"));
         let f = FakeKubectl::default().text(0, "", "");
-        let e = rm("web", "default", &Selection::default(), &cluster(&f), &mut vec![]).unwrap_err().to_string();
-        assert!(e.contains("fluxctl kube apps") && e.contains("APP_NOT_FOUND"), "{e}");
+        let e = rm(
+            "web",
+            "default",
+            &Selection::default(),
+            &cluster(&f),
+            &mut vec![],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("fluxctl kube apps") && e.contains("APP_NOT_FOUND"),
+            "{e}"
+        );
         let f = FakeKubectl::default().json(json!({"metadata": {"labels": {}}}));
-        assert!(rm("web", "default", &Selection::default(), &cluster(&f), &mut vec![]).unwrap_err().to_string().contains("leaves it alone"));
+        assert!(
+            rm(
+                "web",
+                "default",
+                &Selection::default(),
+                &cluster(&f),
+                &mut vec![]
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("leaves it alone")
+        );
     }
 
     #[test]
     fn scale_and_rollout_check_the_label_first() {
         let l = kube_app::manifests(&spec());
-        let f = FakeKubectl::default().json(l[0].clone()).text(0, "scaled", "");
+        let f = FakeKubectl::default()
+            .json(l[0].clone())
+            .text(0, "scaled", "");
         let r = execute(
-            AppCommand::Scale { app: "web".into(), replicas: 3, namespace: "default".into(), target: Target { cluster: Some("c".into()), kube_context: None } },
+            AppCommand::Scale {
+                app: "web".into(),
+                replicas: 3,
+                namespace: "default".into(),
+                target: Target {
+                    cluster: Some("c".into()),
+                    kube_context: None,
+                },
+            },
             &f,
             &Env::new(false),
             &mut vec![],
@@ -1003,15 +1208,34 @@ mod tests {
             shell_argv(&["kubectl".into()], "web", "default", &[], true).join(" "),
             "kubectl -n default exec -it deploy/web -- sh -c [ -x /bin/bash ] && exec bash || exec sh"
         );
-        assert!(shell_argv(&["kubectl".into()], "web", "ns", &["ls".into(), "/".into()], false).join(" ").ends_with("-- ls /"));
+        assert!(
+            shell_argv(
+                &["kubectl".into()],
+                "web",
+                "ns",
+                &["ls".into(), "/".into()],
+                false
+            )
+            .join(" ")
+            .ends_with("-- ls /")
+        );
     }
 
     #[test]
     fn the_forward_reconnects_and_stops_on_ctrl_c() {
         let env = Env::new(true);
-        *env.ends.borrow_mut() = vec![ForwardEnd::Exited { code: 1, ran: Duration::from_secs(1) }, ForwardEnd::Interrupted];
+        *env.ends.borrow_mut() = vec![
+            ForwardEnd::Exited {
+                code: 1,
+                ran: Duration::from_secs(1),
+            },
+            ForwardEnd::Interrupted,
+        ];
         let mut err = vec![];
-        assert_eq!(keep_forwarding(&["kubectl".into()], &env, &mut err).unwrap(), 0);
+        assert_eq!(
+            keep_forwarding(&["kubectl".into()], &env, &mut err).unwrap(),
+            0
+        );
         assert_eq!(env.forwarded.borrow().len(), 2);
         assert!(String::from_utf8(err).unwrap().contains("reconnecting"));
     }
@@ -1023,7 +1247,10 @@ mod tests {
         let pods = json!({"items": pods["items"].as_array().unwrap().iter().filter(|i| i["kind"] == "Pod").cloned().collect::<Vec<_>>()});
         let rows = kube_app::summarize(&deps, &json!({"items": []}), &pods);
         let t = table(&rows).unwrap();
-        assert!(t.contains("web") && t.contains("problem") && t.contains("next:"), "{t}");
+        assert!(
+            t.contains("web") && t.contains("problem") && t.contains("next:"),
+            "{t}"
+        );
         assert!(table(&[]).is_none());
     }
 }

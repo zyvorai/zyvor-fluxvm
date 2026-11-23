@@ -690,9 +690,7 @@ pub const CODES: &[HealthCode] = &[
     hc!(
         "APP_CLUSTER_AMBIGUOUS",
         "There is more than one cluster, so fluxctl cannot guess which one you mean.",
-        [
-            "several clusters made with `fluxctl kube up` exist on this machine"
-        ],
+        ["several clusters made with `fluxctl kube up` exist on this machine"],
         [
             "name one: add `--cluster NAME` to the command",
             "list them: `ls ~/.kube/fluxvm-*.yaml`"
@@ -701,9 +699,7 @@ pub const CODES: &[HealthCode] = &[
     hc!(
         "APP_PORT_TAKEN",
         "The port on this machine is already in use by another program.",
-        [
-            "another app, a forward or a local server already listens on that port"
-        ],
+        ["another app, a forward or a local server already listens on that port"],
         [
             "leave out --local-port and fluxctl picks a free one",
             "choose another: `--local-port 8081`",
