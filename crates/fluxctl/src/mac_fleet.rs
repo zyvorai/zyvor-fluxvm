@@ -20,9 +20,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub enum MacFleetCommand {
     /// Bring Macs into the fleet: check each (Apple silicon, macOS, disk, session), install a pinned and checksum-verified
     /// FluxVM, start the daemon, enroll the node with a join token, and with --k3s prepare a k3s guest. Safe to repeat:
-    /// every step checks what is already done. Alias: add.
-    #[command(alias = "add")]
+    /// every step checks what is already done. See `add` for the same with a readiness check.
     Up(UpArgs),
+    /// `up`, then prove the Mac can take jobs: checks ssh, preflights, installs, and validates the runner side, and for each
+    /// problem says exactly what to fix. Safe to repeat.
+    Add(crate::mac_fleet_boot::AddArgs),
     /// Converge the Macs of an inventory file (YAML or JSON) to the state it describes, then print `status`.
     Apply(ApplyArgs),
     /// One table: host, version, daemon, VMs, macOS slots (2 at most), k3s, node agent.
@@ -40,8 +42,15 @@ pub enum MacFleetCommand {
     /// Run a command in a fresh macOS guest on the Mac the scheduler picks: it prefers a Mac that already holds the template
     /// (name:tag@digest) and has a free macOS slot (2 at most), and can wait for one with --queue-timeout.
     Run(crate::mac_fleet_run::RunArgs),
-    /// Stop placing new jobs on Macs (running jobs finish). `--list` shows the drained Macs.
-    Drain(crate::mac_fleet_run::DrainArgs),
+    /// Stop placing new jobs on Macs (running jobs finish). `--list` shows the drained Macs. With `--wait`, stay until the
+    /// Mac has no macOS guest left, so it is safe to upgrade or reboot.
+    Drain(crate::mac_fleet_ops::DrainOpts),
+    /// Stop placing new jobs on a Mac and nothing else (same list as `drain`; never waits).
+    Cordon(crate::mac_fleet_run::DrainArgs),
+    /// Let a cordoned or drained Mac take jobs again (same as `resume`).
+    Uncordon(crate::mac_fleet_run::DrainArgs),
+    /// Live capacity table: macOS guests against the 2-per-Mac limit, thermal state, free disk and power for each Mac.
+    Top(crate::mac_fleet_ops::TopArgs),
     /// Let drained Macs take jobs again.
     Resume(crate::mac_fleet_run::DrainArgs),
     /// `ls`: which templates each Mac holds. `distribute`: make every Mac hold one, digest-verified.
@@ -1179,7 +1188,11 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
             finish(&rs, "remove")
         }
         MacFleetCommand::Run(a) => crate::mac_fleet_run::run_cmd(a),
-        MacFleetCommand::Drain(a) => crate::mac_fleet_run::drain_cmd(a, true),
+        MacFleetCommand::Add(a) => crate::mac_fleet_boot::add_cmd(a),
+        MacFleetCommand::Drain(a) => crate::mac_fleet_ops::drain_cmd(a),
+        MacFleetCommand::Cordon(a) => crate::mac_fleet_ops::cordon_cmd(a, true),
+        MacFleetCommand::Uncordon(a) => crate::mac_fleet_ops::cordon_cmd(a, false),
+        MacFleetCommand::Top(a) => crate::mac_fleet_ops::top_cmd(a),
         MacFleetCommand::Resume(a) => crate::mac_fleet_run::drain_cmd(a, false),
         MacFleetCommand::Templates { command } => crate::mac_fleet_run::templates_cmd(command),
         MacFleetCommand::Logs(a) => crate::mac_fleet_view::logs_cmd(a),

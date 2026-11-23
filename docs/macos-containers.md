@@ -493,7 +493,7 @@ variables above still win when `FLUXVM_REGISTRY_USER` is set. A login is only ev
   (`MAC_REGISTRY_LOGIN_FAILED`). If the registry cannot be reached the login is saved anyway and the output lists, under
   `NOT verified:`, that it was not checked. Even a verified login does not prove it may pull or push a given repository.
 - `logout` does not revoke the token at the registry; do that in the registry's settings if it leaked.
-- `mac-fleet` runs still forward only `FLUXVM_REGISTRY_USER` / `FLUXVM_REGISTRY_PASSWORD` to the remote Mac, not the saved file.
+- `mac-fleet templates distribute` forwards the environment pair, or else the saved login of the template's registry, to each Mac (see [mac-fleet-ops.md](mac-fleet-ops.md#registry-login-on-the-macs)).
 - Studio has no page for Mac instances or registry credentials, so there is no UI for this yet.
 
 ### `fluxctl mac fork NAME -n N [--name-prefix P] [--start] [--json]`

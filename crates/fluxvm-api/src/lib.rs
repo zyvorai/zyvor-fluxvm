@@ -66,6 +66,7 @@ mod kube_metrics;
 mod kube_pod;
 mod kube_workloads;
 mod mac_view;
+mod mac_fleet_api;
 mod macos_pool_api;
 mod speculate_api;
 mod studio;
@@ -978,6 +979,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vznets", get(list_vznets))
         .route("/v1/docker", get(docker_view::get_docker))
         .route("/v1/docker/context", get(docker_view::get_context))
+        .route("/v1/mac-fleet", get(mac_fleet_api::get))
         .route(
             "/v1/docker/containers/{id}/logs",
             get(docker_view::container_logs),
