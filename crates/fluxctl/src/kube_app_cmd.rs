@@ -425,7 +425,7 @@ pub fn execute(
             target,
         } => {
             if replicas > kube_app::MAX_REPLICAS {
-                bail!("at most {} copies", kube_app::MAX_REPLICAS);
+                bail!("an app can have at most {} copies; give a smaller number", kube_app::MAX_REPLICAS);
             }
             let (sel, prefix) = selection(&target)?;
             let c = Cluster::new(prefix, runner);

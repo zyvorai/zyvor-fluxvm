@@ -119,7 +119,7 @@ pub fn validate(s: &Spec) -> Result<(), String> {
         return Err("the port must be between 1 and 65535".to_owned());
     }
     if s.replicas > MAX_REPLICAS {
-        return Err(format!("at most {MAX_REPLICAS} copies"));
+        return Err(format!("an app can have at most {MAX_REPLICAS} copies; give a smaller number"));
     }
     for (k, _) in &s.env {
         let mut c = k.chars();

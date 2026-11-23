@@ -141,10 +141,13 @@ pub(crate) async fn get_apps(
         }
         Err(e) => return Ok(Json(failure(&name, &e.message))),
     };
+    let deps_path = format!("/apis/apps/v1/deployments?{SEL}");
+    let svcs_path = format!("/api/v1/services?{SEL}");
+    let pods_path = format!("/api/v1/pods?{SEL}");
     let (deps, svcs, pods) = tokio::join!(
-        kube::get_json(&target, &format!("/apis/apps/v1/deployments?{SEL}")),
-        kube::get_json(&target, &format!("/api/v1/services?{SEL}")),
-        kube::get_json(&target, &format!("/api/v1/pods?{SEL}")),
+        kube::get_json(&target, &deps_path),
+        kube::get_json(&target, &svcs_path),
+        kube::get_json(&target, &pods_path),
     );
     match (deps, svcs, pods) {
         (Ok(d), Ok(s), Ok(p)) => Ok(Json(json!({
