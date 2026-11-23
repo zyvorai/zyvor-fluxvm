@@ -543,7 +543,7 @@ fn spec_from(
         mounts: opts
             .volume
             .iter()
-            .map(|v| crate::mac_instance::parse_mount(v, &cwd, home.as_deref()))
+            .map(|v| crate::mac_volume::parse_mount_default(v, &cwd, home.as_deref()))
             .collect::<Result<_>>()?,
         cpus: opts.cpus,
         memory_mib: opts

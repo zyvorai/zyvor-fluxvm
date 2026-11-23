@@ -433,6 +433,7 @@ fn ops() -> Vec<Op> {
         op("post", "/v1/kube/{name}/workloads/{ns}/{kind}/{wname}/scale", "Set replicas, 0 to 100, of a Deployment or StatefulSet; kind is deployments or statefulsets (admin; body {replicas})", VMS),
         op("post", "/v1/kube/{name}/workloads/{ns}/{kind}/{wname}/restart", "Roll a Deployment, StatefulSet or DaemonSet like kubectl rollout restart (admin)", VMS),
         op("post", "/v1/kube/{name}/nodes/{node}/{what}", "Cordon or uncordon a node; what is cordon or uncordon (admin)", VMS),
+        op("get", "/v1/mac/disk", "Disk used by macOS images, instances and named volumes, free space, and a prune preview with the `fluxctl mac system` commands (admin, read-only)", VMS),
         op("get", "/v1/macos-pool", "Enrolled macOS warm-pool slots", VMS).returns("VmList"),
         op("post", "/v1/macos-pool/checkout", "Restore a free macOS pool slot (409 when none is free)", VMS).returns("VmRecord"),
         op("post", "/v1/macos-pool/{id}/enroll", "Make a running, set-up macOS guest a pool slot", VMS).returns("VmRecord"),

@@ -917,6 +917,108 @@ pub const CODES: &[MacCode] = &[
         ],
         aliases: &["fleet-disk-low", "host-disk-low"],
         signatures: &["fleet_disk_low"],
+        code: "MAC_VOLUME_NAME",
+        status: None,
+        summary: "That is not a valid volume name.",
+        causes: &[
+            "a volume name may hold letters, digits, `_`, `.` and `-`, start with a letter or digit, and be at most 64 characters",
+        ],
+        fixes: &[
+            "pick a simple name: `fluxctl mac volume create build-cache`",
+            "to share a folder instead of a named volume, use a path that starts with `./`, `/` or `~/`: `-v ./src:/src`",
+        ],
+        aliases: &["volume-name"],
+        signatures: &["mac_volume_name"],
+    },
+    MacCode {
+        code: "MAC_VOLUME_NOT_FOUND",
+        status: Some(404),
+        summary: "There is no volume with that name.",
+        causes: &[
+            "it was never created, was removed, or the name is misspelled",
+            "FLUXVM_MAC_VOLUMES points at a different folder than when it was made",
+        ],
+        fixes: &[
+            "see what exists: `fluxctl mac volume ls`",
+            "make it: `fluxctl mac volume create NAME` (or just use `-v NAME:/path` on `mac run`, which creates it)",
+        ],
+        aliases: &["volume-not-found"],
+        signatures: &["mac_volume_not_found"],
+    },
+    MacCode {
+        code: "MAC_VOLUME_IN_USE",
+        status: Some(409),
+        summary: "A volume cannot be removed while an instance still has it mounted (running or stopped).",
+        causes: &[
+            "a stopped instance still lists the volume among its shared folders and would mount it again on start",
+        ],
+        fixes: &[
+            "remove the instance named in the message: `fluxctl mac rm NAME`, then retry",
+            "see which instances hold each volume: `fluxctl mac volume ls`",
+            "to clear everything unused in one go: `fluxctl mac system prune --volumes --dry-run`",
+        ],
+        aliases: &["volume-in-use"],
+        signatures: &["mac_volume_in_use"],
+    },
+    MacCode {
+        code: "MAC_VOLUME_IO",
+        status: None,
+        summary: "FluxVM could not write the volume folder on this Mac.",
+        causes: &[
+            "the disk is full or read-only",
+            "the folder (default `~/.fluxvm/mac-volumes`) is not writable by this user",
+        ],
+        fixes: &[
+            "check free space: `fluxctl mac system df` (a nearly full Mac says so)",
+            "free room: `fluxctl mac system prune --all --dry-run`, then without `--dry-run`",
+            "or keep volumes on another disk: `export FLUXVM_MAC_VOLUMES=/Volumes/Big/fluxvm-volumes`",
+        ],
+        aliases: &["volume-io"],
+        signatures: &["mac_volume_io"],
+    },
+    MacCode {
+        code: "MAC_PORT_IN_USE",
+        status: Some(409),
+        summary: "The host port you asked to publish with `-p` is already taken.",
+        causes: &[
+            "another running instance publishes the same host port",
+            "another program on this Mac is listening on it",
+            "the same host port was given twice in one command",
+        ],
+        fixes: &[
+            "use another host port: `-p 8081:80` (the message suggests a free one)",
+            "free the port: `fluxctl mac stop NAME` for an instance, or quit the program the message names",
+            "see what each instance publishes: `fluxctl mac port NAME`",
+        ],
+        aliases: &["port-in-use", "port-conflict"],
+        signatures: &["mac_port_in_use"],
+    },
+    MacCode {
+        code: "MAC_PORT_PRIVILEGED",
+        status: None,
+        summary: "Host ports below 1024 cannot be published: the FluxVM daemon does not run as root.",
+        causes: &["a `-p 80:80` style option asks for a low host port"],
+        fixes: &[
+            "publish a high port: `-p 8080:80`",
+            "if you need port 80 itself, put a small proxy or `pf` redirect on the Mac in front of the high port",
+        ],
+        aliases: &["port-privileged"],
+        signatures: &["mac_port_privileged"],
+    },
+    MacCode {
+        code: "MAC_NETWORK_UNSUPPORTED",
+        status: None,
+        summary: "A macOS guest has one NAT network; creating, removing or joining others is not supported.",
+        causes: &[
+            "Virtualization.framework's NAT gives each guest one card; guests on it cannot reach each other and there are no user-defined networks or DNS names",
+        ],
+        fixes: &[
+            "see what the network does and does not do: `fluxctl mac network inspect`",
+            "to let one instance call another, publish a port on the target (`-p 9000:9000`) and call the Mac's address on it",
+            "for Linux guests with private networks see docs/macos-architecture.md, section 6",
+        ],
+        aliases: &["network-unsupported"],
+        signatures: &["mac_network_unsupported"],
     },
 ];
 

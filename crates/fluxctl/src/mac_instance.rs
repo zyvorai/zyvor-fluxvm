@@ -327,6 +327,7 @@ pub async fn create_instance(
     extra: serde_json::Map<String, Value>,
 ) -> Result<String> {
     use reqwest::Method;
+    crate::mac_ports::preflight(r, &spec.publish).await?;
     let disk = store.resolve(&spec.image)?.join("disk.raw");
     let body = create_body(spec, &disk)?;
     let mut patch = labels_patch(spec)?;
@@ -472,7 +473,7 @@ pub async fn run_outcome(
     let mounts = opts
         .volume
         .iter()
-        .map(|v| parse_mount(v, &cwd, home.as_deref()))
+        .map(|v| crate::mac_volume::parse_mount_default(v, &cwd, home.as_deref()))
         .collect::<Result<Vec<_>>>()?;
     let labels = opts
         .label
