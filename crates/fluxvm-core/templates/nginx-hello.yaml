@@ -1,0 +1,41 @@
+# nginx behind a Service, three copies, in the default namespace. Reach it with `fluxctl kube run`-style forwarding:
+#   kubectl port-forward svc/fluxvm-nginx-hello 8081:80
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluxvm-nginx-hello
+  labels:
+    app.kubernetes.io/name: fluxvm-nginx-hello
+    app.kubernetes.io/managed-by: fluxctl-template
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluxvm-nginx-hello
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fluxvm-nginx-hello
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:stable
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluxvm-nginx-hello
+  labels:
+    app.kubernetes.io/managed-by: fluxctl-template
+spec:
+  selector:
+    app.kubernetes.io/name: fluxvm-nginx-hello
+  ports:
+    - port: 80
+      targetPort: 80

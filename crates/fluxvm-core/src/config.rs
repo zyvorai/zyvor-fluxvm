@@ -68,6 +68,9 @@ pub struct Config {
     /// Optional TLS for the REST API (server cert/key; optional client CA = mTLS).
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Settings of the `fluxctl` command line itself (`fluxctl config set cli.upgrade_url ...`). The daemon ignores them.
+    #[serde(default)]
+    pub cli: CliConfig,
     pub jailer: JailerConfig,
     pub catalog: CatalogConfig,
     pub storage: StorageConfig,
@@ -272,6 +275,16 @@ fn default_docker_sock() -> String {
     }
 }
 
+/// User-level settings of the `fluxctl` command line, kept in the same config file as everything else.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CliConfig {
+    /// Where `fluxctl upgrade` looks for releases (a GitHub-style releases URL or a mirror of one). Empty: the official one.
+    pub upgrade_url: String,
+    /// Set once `fluxctl` has offered to install shell completion, so it asks only one time.
+    pub completion_offered: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -300,6 +313,7 @@ impl Default for Config {
             policy: Policy::default(),
             auth: AuthConfig::default(),
             tls: TlsConfig::default(),
+            cli: CliConfig::default(),
             jailer: JailerConfig::default(),
             catalog: CatalogConfig::default(),
             storage: StorageConfig::default(),

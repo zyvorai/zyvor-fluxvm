@@ -15,6 +15,17 @@ pub enum ConfigCommand {
     /// protection, with the key and the fix for each. Reads the file only; exits 1 on an error (and on a warning with
     /// `--strict`).
     Check(CheckArgs),
+    /// Where settings are kept: the config file, and whether it exists yet.
+    Path,
+    /// Every setting written in the config file (secrets are never shown).
+    Ls(crate::user_config::LsArgs),
+    /// One setting, from the file or else its default: `fluxctl config get cli.upgrade_url`.
+    Get(crate::user_config::GetArgs),
+    /// Change one setting, in the same file the daemon reads. It is checked first and nothing is written if it would not
+    /// work: `fluxctl config set cli.upgrade_url https://mirror.example/releases`.
+    Set(crate::user_config::SetArgs),
+    /// Put a setting back to its default.
+    Unset(crate::user_config::GetArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -34,7 +45,9 @@ pub struct CheckArgs {
 }
 
 pub fn run(cmd: &ConfigCommand, global_config: Option<&Path>) -> Result<i32> {
-    let ConfigCommand::Check(args) = cmd;
+    let ConfigCommand::Check(args) = cmd else {
+        return crate::user_config::run(cmd, global_config);
+    };
     let (out, code) = render(args, global_config)?;
     print!("{out}");
     Ok(code)

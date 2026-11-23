@@ -28,12 +28,14 @@ use uuid::Uuid;
 
 mod agent_session;
 mod backup_verify_cmd;
+mod cli_errors;
 mod cloud;
 mod cluster;
 mod cluster_cmd;
 mod cluster_pair;
 mod cluster_remote;
 mod cluster_report;
+mod completion_cmd;
 mod compose;
 mod config_check;
 mod contexts;
@@ -182,7 +184,10 @@ mod status;
 mod styles;
 mod supply_errors;
 mod support_cmd;
+mod templates_cmd;
 mod up;
+mod upgrade_cmd;
+mod user_config;
 mod vm_net;
 mod vm_spec;
 mod vz_doctor;
@@ -2091,6 +2096,26 @@ enum Command {
     },
     /// Print a shell completion script: `fluxctl completions zsh > _fluxctl`.
     Completions { shell: clap_complete::Shell },
+    /// Shell completion: `completion bash|zsh|fish` prints the script, `completion install` puts it where your shell
+    /// looks (it names the one file it writes). Offered once on the first interactive run.
+    Completion {
+        #[command(subcommand)]
+        command: completion_cmd::CompletionCommand,
+    },
+    /// Replace this binary with the latest release, after checking its SHA-256 (refuses without one). Never runs by itself
+    /// and asks first; `--check` only looks. Releases come from `cli.upgrade_url` (see `fluxctl config`).
+    Upgrade(upgrade_cmd::UpgradeArgs),
+    /// One-command stacks built into fluxctl (Postgres and Adminer, Redis, Mailpit, nginx, whoami): `templates ls`, then
+    /// `templates run NAME`. Also in Studio's Templates page.
+    Templates {
+        #[command(subcommand)]
+        command: templates_cmd::TemplatesCommand,
+    },
+    /// The commands you will want, grouped. Also in Studio's Cheatsheet page.
+    Cheatsheet {
+        #[arg(long)]
+        json: bool,
+    },
     /// Model Context Protocol server for AI agents (Hermes Agent, ...).
     Mcp {
         #[command(subcommand)]
@@ -6282,6 +6307,35 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             ..cli
         }
     };
+    if !matches!(
+        &cli.command,
+        Command::Completion { .. }
+            | Command::Completions { .. }
+            | Command::Config { .. }
+            | Command::Upgrade(_)
+    ) {
+        completion_cmd::offer_once(cli.config.as_deref());
+    }
+    if let Command::Completion { command } = &cli.command {
+        return completion_cmd::run(command);
+    }
+    if let Command::Templates { command } = &cli.command {
+        return templates_cmd::run(command);
+    }
+    if let Command::Upgrade(a) = &cli.command {
+        return upgrade_cmd::run(a, cli.config.as_deref()).await;
+    }
+    if let Command::Cheatsheet { json } = &cli.command {
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&fluxvm_core::cheatsheet::json())?
+            );
+        } else {
+            print!("{}", fluxvm_core::cheatsheet::text());
+        }
+        return Ok(());
+    }
     if let Command::Completions { shell } = &cli.command {
         use std::io::Write;
         let mut buf = Vec::new();
@@ -6869,6 +6923,10 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Readyz
         | Command::Metrics { .. }
         | Command::Completions { .. }
+        | Command::Completion { .. }
+        | Command::Upgrade(_)
+        | Command::Templates { .. }
+        | Command::Cheatsheet { .. }
         | Command::WhatIf(_)
         | Command::Config { .. }
         | Command::ExecPolicy { .. }
@@ -11246,6 +11304,35 @@ mod backlog_tier1_cli_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn the_cheatsheet_commands_all_parse_with_the_real_cli() {
+        for (_, rows) in fluxvm_core::cheatsheet::SHEET {
+            for (c, _) in *rows {
+                let argv: Vec<&str> = c.split_whitespace().collect();
+                Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{c}: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn completion_config_upgrade_and_templates_parse() {
+        for argv in [
+            &["completion", "zsh"][..],
+            &["completion", "install", "--shell", "fish", "--dry-run"],
+            &["config", "set", "cli.upgrade_url", "https://m/r"],
+            &["config", "get", "listen"],
+            &["config", "ls", "--json"],
+            &["config", "path"],
+            &["upgrade", "--check", "--url", "file:///tmp/r"],
+            &["templates", "run", "redis", "--yes", "--json"],
+            &["templates", "down", "whoami", "--cluster", "lab"],
+        ] {
+            let mut v = vec!["fluxctl"];
+            v.extend(argv);
+            Cli::try_parse_from(&v).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
     }
 
     #[test]
