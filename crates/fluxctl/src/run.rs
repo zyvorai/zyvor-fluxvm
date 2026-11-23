@@ -410,6 +410,18 @@ pub async fn ssh_to(
     local_nat_vm: bool,
     args: &[String],
 ) -> Result<()> {
+    ssh_to_agent(ip, user, port, local_nat_vm, false, args).await
+}
+
+/// [`ssh_to`], optionally forwarding this shell's SSH agent (`ssh -A`) so the guest can use the user's keys without holding them.
+pub async fn ssh_to_agent(
+    ip: &str,
+    user: &str,
+    port: u16,
+    local_nat_vm: bool,
+    forward_agent: bool,
+    args: &[String],
+) -> Result<()> {
     // `127.0.0.1:<port>` is a QEMU user-mode guest behind its loopback forward; its host key changes whenever the VM is
     // recreated, so treat it like the local NAT guests on a Mac.
     let (host, forwarded) = split_endpoint(ip);
@@ -417,6 +429,9 @@ pub async fn ssh_to(
     let port = forwarded.unwrap_or(port);
     let mut c = tokio::process::Command::new("ssh");
     c.arg("-tt").arg("-p").arg(port.to_string());
+    if forward_agent {
+        c.arg("-A");
+    }
     if local_nat_vm {
         c.args([
             "-o",

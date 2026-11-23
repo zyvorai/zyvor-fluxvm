@@ -138,7 +138,11 @@ pub fn launch_spec(args: &Value) -> Result<LaunchSpec> {
 }
 
 /// The Macfile's plan for `tag`, as `mac build --dry-run` prints it.
-pub fn build_dry_run(src: &str, tag: &str, args: &Value) -> Result<String> {
+pub fn build_dry_run(src: &str, tag: &str, args: &Value, platform: Option<&str>) -> Result<String> {
+    if let Some(p) = platform {
+        crate::mac_build::check_platform(p)
+            .map_err(|m| crate::mac_errors::coded(m, "MAC_PLATFORM_UNSUPPORTED"))?;
+    }
     ensure!(!src.trim().is_empty(), "macfile is empty");
     ensure!(
         src.len() <= MAX_MACFILE,
@@ -157,11 +161,13 @@ pub fn build_dry_run(src: &str, tag: &str, args: &Value) -> Result<String> {
         }
     }
     let key = mac_store::normalize(tag)?;
-    let steps = crate::mac_build::plan_with(&crate::mac_build::parse(src)?, &build_args).0;
-    Ok(format!(
-        "build {key}\n{}",
-        crate::mac_build::render_dry_run(&steps)
-    ))
+    let file = crate::mac_build::parse(src)?;
+    let steps = crate::mac_build::plan_with(&file, &build_args).0;
+    let mut out = format!("build {key}\n{}", crate::mac_build::render_dry_run(&steps));
+    for w in crate::mac_build::check_build_args(&file, &build_args) {
+        out.push_str(&format!("warning: {w}\n"));
+    }
+    Ok(out)
 }
 
 /// The selector for a compose project's instances. The project name is checked because it goes into a label selector.
@@ -337,7 +343,8 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                 json!({
                     "macfile": {"type": "string", "description": "the Macfile's text"},
                     "tag": {"type": "string", "description": "name:tag the image would get"},
-                    "build_args": {"type": "object", "description": "values for ARG lines, NAME to value", "additionalProperties": {"type": "string"}}
+                    "build_args": {"type": "object", "description": "values for ARG lines, NAME to value", "additionalProperties": {"type": "string"}},
+                    "platform": {"type": "string", "description": "only darwin/arm64 is valid for a macOS image"}
                 }),
                 &["macfile", "tag"],
             ),
@@ -349,6 +356,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         str_arg(&args, "macfile").unwrap_or_default(),
                         str_arg(&args, "tag").unwrap_or_default(),
                         &args["build_args"],
+                        str_arg(&args, "platform"),
                     )
                 })
                 .await
@@ -690,23 +698,43 @@ mod tests {
 
     #[test]
     fn build_dry_run_prints_the_plan_and_reads_no_file() {
-        let plan =
-            build_dry_run("FROM macos-base:14\nRUN echo hi\n", "out:1", &json!(null)).unwrap();
+        let plan = build_dry_run(
+            "FROM macos-base:14\nRUN echo hi\n",
+            "out:1",
+            &json!(null),
+            None,
+        )
+        .unwrap();
         assert!(plan.starts_with("build out:1\n"), "{plan}");
         assert!(plan.contains("echo hi"), "{plan}");
-        assert!(build_dry_run("", "out:1", &json!(null)).is_err());
-        assert!(build_dry_run("NOT A MACFILE", "out:1", &json!(null)).is_err());
-        assert!(build_dry_run("FROM a:1\n", "bad tag", &json!(null)).is_err());
-        assert!(build_dry_run("FROM a:1\n", "t:1", &json!({"X": 1})).is_err());
+        assert!(build_dry_run("", "out:1", &json!(null), None).is_err());
+        assert!(build_dry_run("NOT A MACFILE", "out:1", &json!(null), None).is_err());
+        assert!(build_dry_run("FROM a:1\n", "bad tag", &json!(null), None).is_err());
+        assert!(build_dry_run("FROM a:1\n", "t:1", &json!({"X": 1}), None).is_err());
         let big = "# x\n".repeat(MAX_MACFILE);
         assert!(
-            build_dry_run(&big, "t:1", &json!(null))
+            build_dry_run(&big, "t:1", &json!(null), None)
                 .unwrap_err()
                 .to_string()
                 .contains("limit")
         );
         // COPY from outside the context is refused by the parser, as on the command line.
-        assert!(build_dry_run("FROM a:1\nCOPY ../x /y\n", "t:1", &json!(null)).is_err());
+        assert!(build_dry_run("FROM a:1\nCOPY ../x /y\n", "t:1", &json!(null), None).is_err());
+        let e = build_dry_run("FROM a:1\n", "t:1", &json!(null), Some("linux/amd64"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("darwin/arm64") && e.contains("MAC_PLATFORM_UNSUPPORTED"),
+            "{e}"
+        );
+        let w = build_dry_run(
+            "FROM a:1\n",
+            "t:1",
+            &json!({"X": "1"}),
+            Some("darwin/arm64"),
+        )
+        .unwrap();
+        assert!(w.contains("warning: --build-arg X is not used"), "{w}");
     }
 
     #[test]

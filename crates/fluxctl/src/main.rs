@@ -141,6 +141,7 @@ mod mac_reap;
 mod mac_runner;
 mod mac_runner_life;
 mod mac_runner_pool;
+mod mac_secrets;
 mod mac_since;
 mod mac_store;
 mod mac_supervise;

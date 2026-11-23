@@ -1527,6 +1527,11 @@ fn build_command(tag: &str, b: &BuildPlan, wait: u64) -> crate::mac_cmd::MacComm
         wait,
         build_arg: b.args.clone(),
         no_cache: false,
+        label: Vec::new(),
+        secret: Vec::new(),
+        ssh: Vec::new(),
+        platform: None,
+        target: None,
         context: b.context.clone(),
     }
 }

@@ -68,6 +68,23 @@ pub enum MacCommand {
         /// Ignore the build cache and run every step from FROM (the cache is also not written). See `mac cache`.
         #[arg(long)]
         no_cache: bool,
+        /// Add an image label: `KEY=VALUE`. Repeatable. Overrides a `LABEL` of the same key in the Macfile.
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        label: Vec<String>,
+        /// Make a secret available to `RUN --mount=type=secret,id=NAME` steps: `id=NAME,src=FILE` or `id=NAME,env=VARIABLE`.
+        /// It is copied into the guest for that one step and removed before the step ends; it is never in the image, the
+        /// cache, the plan or this command's output. Repeatable.
+        #[arg(long = "secret", value_name = "id=NAME,src=FILE")]
+        secret: Vec<String>,
+        /// Forward this shell's SSH agent to `RUN --mount=type=ssh` steps: `--ssh default`. No key is copied into the guest.
+        #[arg(long = "ssh", value_name = "default")]
+        ssh: Vec<String>,
+        /// Only `darwin/arm64` (Apple silicon) exists for macOS images; accepted so Docker scripts keep working.
+        #[arg(long, value_name = "darwin/arm64")]
+        platform: Option<String>,
+        /// Docker's multi-stage `--target`. A Macfile has one stage, so this is refused with an explanation.
+        #[arg(long, value_name = "STAGE")]
+        target: Option<String>,
         /// Build context directory: COPY sources are relative to it.
         // Own id: `context` is the global --context flag (a String) and clap panics on the clash.
         #[arg(id = "build_context", value_name = "CONTEXT", default_value = ".")]
@@ -479,15 +496,32 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             wait,
             build_arg,
             no_cache,
+            label,
+            secret,
+            ssh,
+            platform,
+            target,
             ..
         } => {
             let src = read_macfile(file, &context)?;
             let key = mac_store::normalize(&tag)?;
-            let (steps, config) = crate::mac_build::plan_with(
-                &crate::mac_build::parse(&src)?,
-                &parse_build_args(&build_arg)?,
-            );
+            let macfile = crate::mac_build::parse(&src)?;
+            let build_args = parse_build_args(&build_arg)?;
+            let (steps, mut config) = crate::mac_build::plan_with(&macfile, &build_args);
             crate::mac_build_exec::check_supported(&steps)?;
+            let (secrets, ssh_forward) = check_build_flags(
+                &macfile,
+                &steps,
+                &build_args,
+                &BuildFlags {
+                    target: target.as_deref(),
+                    platform: platform.as_deref(),
+                    label: &label,
+                    secret: &secret,
+                    ssh: &ssh,
+                },
+                &mut config,
+            )?;
             let mut host = DaemonHost {
                 r,
                 store: Store::open(mac_store::default_root()?)?,
@@ -495,12 +529,16 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
                 context,
                 wait,
                 instance: None,
+                secrets,
+                ssh_forward,
             };
-            if no_cache {
-                crate::mac_build_exec::execute(&mut host, &steps).await?;
+            let built = if no_cache {
+                crate::mac_build_exec::execute(&mut host, &steps).await
             } else {
-                run_cached_build(&mut host, &steps).await?;
-            }
+                run_cached_build(&mut host, &steps).await
+            };
+            // A last guard: no secret value may reach the terminal through an error message of ours.
+            built.map_err(|e| anyhow::anyhow!("{}", host.secrets.redact(&format!("{e:#}"))))?;
             crate::mac_image_ops::write_build_config(&host.store, &key, config)?;
             println!("built {key}");
             Ok(())
@@ -525,6 +563,76 @@ struct DaemonHost<'a> {
     wait: u64,
     /// `(id, guest address once SSH answers)`.
     instance: Option<(String, Option<String>)>,
+    /// `--secret` files for `RUN --mount=type=secret` steps.
+    secrets: crate::mac_secrets::Secrets,
+    /// `--ssh default` was given.
+    ssh_forward: bool,
+}
+
+/// The guest end of a mounted step: `scp` a file in, `ssh` a command, with the agent forwarded when asked.
+struct GuestIo {
+    ip: String,
+}
+
+impl crate::mac_secrets::MountIo for GuestIo {
+    async fn put(&mut self, user: &str, local: &Path, dst: &str) -> Result<()> {
+        scp_to(&self.ip, user, local, dst).await
+    }
+    async fn run(&mut self, user: &str, command: &str, forward_agent: bool) -> Result<()> {
+        crate::run::ssh_to_agent(
+            &self.ip,
+            user,
+            22,
+            true,
+            forward_agent,
+            &[command.to_string()],
+        )
+        .await
+    }
+}
+
+/// What the Docker-style build flags asked for.
+struct BuildFlags<'a> {
+    target: Option<&'a str>,
+    platform: Option<&'a str>,
+    label: &'a [String],
+    secret: &'a [String],
+    ssh: &'a [String],
+}
+
+/// Check every build flag before anything is created, apply `--label` to `config`, and print the warnings that do not stop a
+/// build. Returns the secrets and whether the SSH agent is forwarded.
+fn check_build_flags(
+    macfile: &crate::mac_build::Macfile,
+    steps: &[crate::mac_build::Step],
+    build_args: &std::collections::BTreeMap<String, String>,
+    f: &BuildFlags<'_>,
+    config: &mut crate::mac_config::ImageConfig,
+) -> Result<(crate::mac_secrets::Secrets, bool)> {
+    use crate::mac_errors::coded;
+    if let Some(t) = f.target {
+        return Err(coded(
+            format!(
+                "--target {t}: a Macfile has a single stage (one FROM), so there is no stage to stop at. Build the whole Macfile, or split it into two Macfiles and build the first one as its own image (`fluxctl mac build -t base:1 -f Macfile.base .`, then `FROM base:1`)"
+            ),
+            "MAC_BUILD_TARGET_UNSUPPORTED",
+        ));
+    }
+    if let Some(p) = f.platform {
+        crate::mac_build::check_platform(p).map_err(|m| coded(m, "MAC_PLATFORM_UNSUPPORTED"))?;
+    }
+    crate::mac_build::apply_labels(config, f.label)
+        .map_err(|m| coded(m, "MAC_BUILD_FLAG_INVALID"))?;
+    for w in crate::mac_build::check_build_args(macfile, build_args) {
+        eprintln!("warning: {w}\n  more: fluxctl explain MAC_BUILD_ARG_UNUSED");
+    }
+    let secrets = crate::mac_secrets::Secrets::from_flags(f.secret, &|k| std::env::var(k).ok())?;
+    let ssh = crate::mac_secrets::parse_ssh(f.ssh)?;
+    let sock = std::env::var("SSH_AUTH_SOCK").ok();
+    for w in crate::mac_secrets::preflight(steps, &secrets, ssh, sock.as_deref())? {
+        eprintln!("warning: {w}");
+    }
+    Ok((secrets, ssh))
 }
 
 impl DaemonHost<'_> {
@@ -583,6 +691,21 @@ impl crate::mac_build_exec::BuildHost for DaemonHost<'_> {
     async fn run(&mut self, user: &str, command: &str) -> Result<()> {
         let (_, ip) = self.ready()?;
         crate::run::ssh_to(ip, user, 22, true, &[command.to_string()]).await
+    }
+
+    async fn run_mounted(
+        &mut self,
+        user: &str,
+        command: &str,
+        mounts: &[crate::mac_build::Mount],
+    ) -> Result<()> {
+        if mounts.is_empty() {
+            return self.run(user, command).await;
+        }
+        let mut io = GuestIo {
+            ip: self.ready()?.1.to_string(),
+        };
+        crate::mac_secrets::run_mounted(&mut io, &self.secrets, user, command, mounts).await
     }
 
     async fn copy(&mut self, user: &str, src: &str, dst: &str) -> Result<()> {
@@ -861,6 +984,11 @@ pub async fn run(command: MacCommand) -> Result<()> {
             dry_run,
             context,
             build_arg,
+            label,
+            secret,
+            ssh,
+            platform,
+            target,
             ..
         } => {
             ensure!(
@@ -868,10 +996,34 @@ pub async fn run(command: MacCommand) -> Result<()> {
                 "a real build needs the daemon: pass --server (or select a context)"
             );
             let src = read_macfile(file, &context)?;
-            print!(
-                "{}",
-                build_plan_text_with(&src, &tag, &parse_build_args(&build_arg)?)?
-            );
+            let build_args = parse_build_args(&build_arg)?;
+            let macfile = crate::mac_build::parse(&src)?;
+            let (steps, mut config) = crate::mac_build::plan_with(&macfile, &build_args);
+            check_build_flags(
+                &macfile,
+                &steps,
+                &build_args,
+                &BuildFlags {
+                    target: target.as_deref(),
+                    platform: platform.as_deref(),
+                    label: &label,
+                    secret: &secret,
+                    ssh: &ssh,
+                },
+                &mut config,
+            )?;
+            print!("{}", build_plan_text_with(&src, &tag, &build_args)?);
+            if !config.labels.is_empty() {
+                println!(
+                    "labels: {}",
+                    config
+                        .labels
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
         MacCommand::More(m) => return crate::mac_more::run_client(m),
         MacCommand::Plus(p) => return crate::mac_plus::run(&store, p).await,
