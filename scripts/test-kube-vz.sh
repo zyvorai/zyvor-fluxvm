@@ -53,7 +53,7 @@ kubec() { "${KUBE[@]}" "$1" "${C[@]}" "${@:2}"; }
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || { echo "needs macOS on Apple Silicon" >&2; exit 2; }
 command -v "$FLUXCTL" >/dev/null 2>&1 || [ -x "$FLUXCTL" ] || { echo "fluxctl not found (set FLUXCTL)" >&2; exit 2; }
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 2; }
-DOCTOR="$("$FLUXCTL" doctor 2>&1 || true)"
+DOCTOR="$("$FLUXCTL" doctor --classic 2>&1 || true)"
 echo "$DOCTOR" | grep -q "^ok    daemon" || { echo "the FluxVM daemon is not healthy:"; echo "$DOCTOR"; exit 2; }
 if echo "$DOCTOR" | grep -qE "^warn  login session"; then
     echo "the login session is locked or absent: unlock the Mac first (sleep/wake restores need it)"; exit 2

@@ -70,6 +70,7 @@ mod mac_view;
 mod mac_fleet_api;
 mod mac_disk_api;
 mod macos_pool_api;
+mod setup_doctor;
 mod speculate_api;
 mod studio;
 mod support_bundle;
@@ -1063,6 +1064,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(mac_view::routes())
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
+        .merge(setup_doctor::routes())
         .merge(support_bundle::routes())
         .merge(image_security::routes())
         .merge(up_plan::routes())

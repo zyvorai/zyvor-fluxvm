@@ -142,3 +142,5 @@ branch report for what was run on a real machine.
 ## Related
 
 [mac-fleet-quickstart.md](mac-fleet-quickstart.md), [macos-host.md](macos-host.md), [ui.md](ui.md).
+
+See also [fluxctl doctor](doctor.md): the same model as one short list for the whole setup, with `--fix`.
