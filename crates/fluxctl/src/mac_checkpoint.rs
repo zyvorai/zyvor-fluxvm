@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     fn tags_default_to_a_timestamp_and_are_checked_in_plain_words() {
-        assert_eq!(default_tag(T0), "ckpt-20261117-141640");
+        assert_eq!(default_tag(T0), "ckpt-20261118-110640");
         assert!(check_tag("before-upgrade_1.2").is_ok());
         for bad in ["", ".hidden", "a b", "a/b", "a:b", &"x".repeat(129)] {
             let e = check_tag(bad).unwrap_err().to_string();
@@ -1104,7 +1104,7 @@ mod tests {
             [
                 "save 1 warm memory=true",
                 "save 1 cold memory=false",
-                "save 2 ckpt-20261117-141640 memory=false"
+                "save 2 ckpt-20261118-110640 memory=false"
             ]
         );
     }
@@ -1190,18 +1190,18 @@ mod tests {
             .borrow_mut()
             .push(("1".into(), ck("warm", true, 100)));
         *f.restore_reply.borrow_mut() = Some(Ok(
-            json!({"id": "1", "safety_checkpoint": "auto-before-restore-20261117-141640", "safety_checkpoint_memory": true}),
+            json!({"id": "1", "safety_checkpoint": "auto-before-restore-20261118-110640", "safety_checkpoint_memory": true}),
         ));
         let r = restore(&f, "ci", "warm", true).await.unwrap();
         assert!(r.memory);
         let t = restored_text(&r);
         assert!(t.contains("resumed from saved memory"), "{t}");
         assert!(
-            t.contains("saved as ci:auto-before-restore-20261117-141640"),
+            t.contains("saved as ci:auto-before-restore-20261118-110640"),
             "{t}"
         );
         assert!(
-            t.contains("fluxctl mac checkpoint restore ci auto-before-restore-20261117-141640"),
+            t.contains("fluxctl mac checkpoint restore ci auto-before-restore-20261118-110640"),
             "{t}"
         );
         assert_eq!(*f.calls.borrow(), ["restore 1 warm safety=true"]);

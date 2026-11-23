@@ -778,9 +778,22 @@ pub fn find(query: &str) -> Vec<&'static MacCode> {
 /// The code that explains an error message, matched on the text ssh, the daemon and fluxctl print.
 pub fn hint_for(message: &str) -> Option<&'static MacCode> {
     let m = message.to_ascii_lowercase();
+    // The most specific signature wins: a generic status line such as "409 conflict" must not hide a precise reason.
     CODES
         .iter()
-        .find(|c| c.signatures.iter().any(|s| m.contains(s)))
+        .filter_map(|c| {
+            c.signatures
+                .iter()
+                .filter(|s| m.contains(**s))
+                .map(|s| s.len())
+                .max()
+                .map(|len| (len, c))
+        })
+        .fold(None, |best: Option<(usize, &'static MacCode)>, (len, c)| match best {
+            Some((b, _)) if b >= len => best,
+            _ => Some((len, c)),
+        })
+        .map(|(_, c)| c)
 }
 
 /// `explain MAC_SLOT_LIMIT` card text.
