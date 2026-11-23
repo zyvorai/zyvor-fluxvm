@@ -99,7 +99,10 @@ mod tests {
     fn a_world_readable_login_file_is_not_forwarded() {
         let d = tempfile::tempdir().unwrap();
         let p = write_login(d.path(), 0o644);
-        let e = saved_in(&p, "ghcr.io/acme/xcode:15").unwrap_err();
+        let e = match saved_in(&p, "ghcr.io/acme/xcode:15") {
+            Ok(_) => panic!("a world-readable login file must be refused"),
+            Err(e) => e,
+        };
         assert!(format!("{e:#}").contains("chmod 600"), "{e:#}");
     }
 
