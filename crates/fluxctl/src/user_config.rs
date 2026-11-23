@@ -395,7 +395,10 @@ mod tests {
         assert_eq!(get(&out, "usage.cpu_hour").unwrap(), "0.04");
         assert_eq!(get(&out, "usage.currency").unwrap(), "\"EUR\"");
         assert!(get("", "usage.disk_gib").unwrap().contains("default"));
-        assert!(apply_set("", "usage.cpu_hours", "1").is_err(), "a misspelled key is refused");
+        assert!(
+            apply_set("", "usage.cpu_hours", "1").is_err(),
+            "a misspelled key is refused"
+        );
     }
 
     #[test]

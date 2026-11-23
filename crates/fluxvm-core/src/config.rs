@@ -324,9 +324,14 @@ impl UsageConfig {
     }
 
     pub fn any_set(&self) -> bool {
-        [self.cpu_hour, self.memory_gib_hour, self.disk_gib, self.network_gib]
-            .iter()
-            .any(|r| self.rate(*r) > 0.0)
+        [
+            self.cpu_hour,
+            self.memory_gib_hour,
+            self.disk_gib,
+            self.network_gib,
+        ]
+        .iter()
+        .any(|r| self.rate(*r) > 0.0)
     }
 
     pub fn currency_or_default(&self) -> String {
