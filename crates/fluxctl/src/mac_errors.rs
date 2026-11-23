@@ -597,6 +597,8 @@ pub const CODES: &[MacCode] = &[
         ],
         aliases: &["manifest-unreadable", "manifest-inspect"],
         signatures: &["could not read the manifest of"],
+    },
+    MacCode {
         code: "MAC_CHECKPOINT_EXISTS",
         status: None,
         summary: "The instance already has a checkpoint with that name.",
@@ -746,6 +748,8 @@ pub const CODES: &[MacCode] = &[
             "mac_from_checkpoint",
             "--from-checkpoint brings an existing instance",
         ],
+    },
+    MacCode {
         code: "MAC_SECRET_MISSING",
         status: None,
         summary: "A build step asks for a secret that was not given, or its source cannot be read.",
@@ -855,6 +859,8 @@ pub const CODES: &[MacCode] = &[
         ],
         aliases: &["build-flag"],
         signatures: &["mac_build_flag_invalid"],
+    },
+    MacCode {
         code: "FLEET_ADD_BLOCKED",
         status: None,
         summary: "`fluxctl mac-fleet add` stopped on a Mac before it could take jobs; the fix is printed under the step that failed.",
@@ -917,6 +923,8 @@ pub const CODES: &[MacCode] = &[
         ],
         aliases: &["fleet-disk-low", "host-disk-low"],
         signatures: &["fleet_disk_low"],
+    },
+    MacCode {
         code: "MAC_VOLUME_NAME",
         status: None,
         summary: "That is not a valid volume name.",

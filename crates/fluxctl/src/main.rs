@@ -6578,6 +6578,8 @@ async fn main() -> Result<()> {
         };
         let code = tokio::task::block_in_place(|| kube_app_cmd::run(cmd));
         std::process::exit(code);
+    }
+
     // Listing, verifying, pruning and scheduling k3s backups only read and write files: no daemon needed.
     if let Command::Kube { command } = &cli.command {
         match command {
