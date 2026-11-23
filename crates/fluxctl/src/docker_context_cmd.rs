@@ -15,6 +15,9 @@ pub struct ContextArgs {
     /// The engine socket the context points at (default: the one `fluxctl docker up` publishes).
     #[arg(long)]
     pub socket: Option<PathBuf>,
+    /// Point at the daemon's built-in Docker socket instead (`docker build` there is forwarded to the Mac builder).
+    #[arg(long, conflicts_with = "socket")]
+    pub builtin: bool,
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -30,6 +33,9 @@ pub enum ContextCommand {
     },
     /// Remove the `fluxvm` context. If it was current, `docker` goes back to its default context.
     Uninstall,
+    /// Fix a `fluxvm` context whose socket is dead: point it at the FluxVM socket that answers (the engine from `fluxctl docker
+    /// up`, or the daemon's built-in one). Does nothing when the context already works.
+    Repair,
     /// Whether the context exists, is current, and the engine socket answers; says what to run next.
     Status {
         #[command(flatten)]
@@ -41,7 +47,54 @@ pub enum ContextCommand {
 }
 
 fn socket_of(a: &ContextArgs) -> PathBuf {
+    if a.builtin {
+        return docker_host::builtin_socket();
+    }
     a.socket.clone().unwrap_or_else(docker_host::default_socket)
+}
+
+/// What `repair` did, in one sentence (and an error when nothing can be fixed).
+fn repair(dir: &Path) -> Result<String> {
+    let meta = ctx::meta_path(dir);
+    let host = std::fs::read_to_string(&meta)
+        .ok()
+        .and_then(|t| ctx::host_in_meta(&t));
+    let first_builtin = host
+        .as_deref()
+        .and_then(ctx::socket_of_host)
+        .is_some_and(|p| p.file_name().is_some_and(|n| n == "docker.sock"));
+    let mut cands = vec![docker_host::default_socket(), docker_host::builtin_socket()];
+    if first_builtin {
+        cands.reverse();
+    }
+    Ok(
+        match ctx::plan_repair(host.as_deref(), &|s| docker_host::ping(s), &cands) {
+            ctx::Repair::NoContext => format!(
+                "there is no docker context `{NAME}` to repair. Create it with `fluxctl docker context install`"
+            ),
+            ctx::Repair::Foreign(h) => format!(
+                "docker context `{NAME}` points at {h}, not at a FluxVM socket, so it was left alone. Reset it with `fluxctl docker context install`"
+            ),
+            ctx::Repair::Healthy(s) => format!(
+                "docker context `{NAME}` already works ({}); nothing to repair",
+                s.display()
+            ),
+            ctx::Repair::Repoint { from, to } => {
+                let i = ctx::install(dir, &to, false)?;
+                format!(
+                    "docker context `{NAME}` pointed at {}, which does not answer. It now points at {} ({}). Try: docker --context {NAME} ps",
+                    from.display(),
+                    to.display(),
+                    i.host
+                )
+            }
+            ctx::Repair::NothingAnswers { from } => bail!(
+                "docker context `{NAME}` points at {}, which does not answer, and no other FluxVM Docker socket answers either. \
+             Start one: `fluxctl docker up` for the full engine, or start the daemon (`fluxvmd`) for the built-in socket, then run `fluxctl docker context repair` again",
+                from.display()
+            ),
+        },
+    )
 }
 
 fn cli_present() -> bool {
@@ -129,6 +182,9 @@ fn status_text(v: &serde_json::Value) -> String {
     if let Some(n) = v["next"].as_str() {
         out.push_str(&format!("next: {n}\n"));
     }
+    if matches!(v["state"].as_str(), Some("stale" | "socket-down")) {
+        out.push_str("or, if another FluxVM socket answers: fluxctl docker context repair\n");
+    }
     out
 }
 
@@ -143,6 +199,18 @@ pub fn run(command: ContextCommand) -> Result<()> {
                 bail!("{}", no_config_dir());
             };
             println!("{}", install(&dir, &socket_of(&args), use_current)?);
+            if args.builtin {
+                println!(
+                    "note: the docker command builds with BuildKit by default, which this socket does not serve. Use `DOCKER_BUILDKIT=0 docker build -t NAME:TAG .` \
+                     (or `export DOCKER_BUILDKIT=0`), or `fluxctl mac build -t NAME:TAG .`"
+                );
+            }
+        }
+        ContextCommand::Repair => {
+            let Some(dir) = ctx::config_dir_from_env() else {
+                bail!("{}", no_config_dir());
+            };
+            println!("{}", repair(&dir)?);
         }
         ContextCommand::Uninstall => {
             let Some(dir) = ctx::config_dir_from_env() else {
@@ -217,5 +285,38 @@ mod tests {
         let t = status_text(&v);
         assert!(t.contains("does not answer") && t.contains("next: fluxctl docker up"));
         assert!(t.contains("exists, not current"));
+        assert!(t.contains("fluxctl docker context repair"));
+    }
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    #[test]
+    fn repair_with_no_context_says_how_to_make_one() {
+        let d = tempfile::tempdir().unwrap();
+        let t = repair(d.path()).unwrap();
+        assert!(t.contains("no docker context") && t.contains("fluxctl docker context install"));
+    }
+
+    #[test]
+    fn repair_of_a_dead_socket_explains_what_to_start() {
+        let d = tempfile::tempdir().unwrap();
+        ctx::install(d.path(), Path::new("/nonexistent-dir/dead.sock"), false).unwrap();
+        let e = repair(d.path()).unwrap_err().to_string();
+        assert!(
+            e.contains("does not answer") && e.contains("fluxctl docker up"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn builtin_socket_sits_next_to_the_engine_socket() {
+        assert_eq!(
+            docker_host::builtin_socket().parent(),
+            docker_host::default_socket().parent()
+        );
+        assert!(docker_host::builtin_socket().ends_with("docker.sock"));
     }
 }
