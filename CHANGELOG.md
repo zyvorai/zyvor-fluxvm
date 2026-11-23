@@ -165,6 +165,7 @@ Mac fleet operations: clean shutdown, shared leases, richer status, aggregated l
 - Compose: `build:` (runs `mac build`, `up --build`), `profiles:` with `--profile`/`COMPOSE_PROFILES`, `compose logs|exec|restart`, `-p/--project-name` on every subcommand; the 2-VM refusal counts selected services.
 - `mac images --usage` (allocated and apparent size, last use), `allocated_bytes`/`last_used_unix` in `--json`, `mac image prune --keep-last N`.
 - `FROM IPSW /abs/path.ipsw` parses; new `mac ipsw [latest|PATH]` validates and prints the unattended install order, marking what needs hardware. `mac build` still refuses IPSW bases.
+- Fix: a debug (non-release) `fluxctl` overflowed its stack on every command. `main` was one 2,400-line async function whose unoptimized frame is about 3.9 MiB, and it built the clap tree (another 2 to 3 MiB of nested `augment_subcommands` frames) on top of that, past the 8 MiB main-thread stack. Parsing now runs in its own `parse_cli()` before the async runtime starts, so the two no longer stack. Release builds were not affected. Regression test: `crates/fluxctl/tests/stack.rs`.
 
 `fluxctl mac host`: the Mac that runs FluxVM, as a server. Parsers tested on output captured from one Mac, decisions and apply paths on a fake host; the read-only commands were run on that Mac; **`keepawake install` and `tune --apply` were not run**.
 

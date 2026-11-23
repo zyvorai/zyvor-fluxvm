@@ -6195,8 +6195,42 @@ fn write_copy_from_response(local: &Path, content_base64: &str, _mode: u32) -> R
     Ok(bytes.len())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Parse the command line. This is its own function, and runs before the async runtime starts, because building the clap
+/// tree (`Cli::command()`) needs several MiB of stack in a debug build. Called from inside `run`, whose own frame is
+/// about 4 MiB in a debug build, it overflowed the 8 MiB main-thread stack.
+#[inline(never)]
+fn parse_cli() -> (Cli, bool) {
+    let color = if std::env::var_os("NO_COLOR").is_some() {
+        ColorChoice::Never
+    } else if std::env::var_os("FORCE_COLOR").is_some()
+        || std::env::var_os("CLICOLOR_FORCE").is_some()
+        || std::io::stdout().is_terminal()
+    {
+        ColorChoice::Always
+    } else {
+        ColorChoice::Auto
+    };
+    let mut cmd = Cli::command()
+        .color(color)
+        .override_usage("fluxctl [OPTIONS] <COMMAND>")
+        .after_help(styles::after_help())
+        // Clap cannot group subcommands into sections (Cobra can). Hide the
+        // flat Commands list so our Cilium-style grouped after_help is the
+        // only command listing; parsing/completions are unaffected.
+        .mut_subcommands(|s| s.hide(true));
+    let matches = cmd.get_matches_mut();
+    // `fleet` prints tables on a terminal unless `-o`/`FLUXCTL_OUTPUT` asks for a format.
+    let explicit = !matches!(
+        matches.value_source("output_format"),
+        None | Some(clap::parser::ValueSource::DefaultValue)
+    );
+    (
+        Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit()),
+        explicit,
+    )
+}
+
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -6204,39 +6238,20 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "fluxvm=info,tower_http=info".into()),
         )
         .init();
-    if let Some(r) = remote::from_argv_env() {
-        output::seed_vm_index(r.vm_index().await);
-    }
-    let (cli, output_explicit) = {
-        let color = if std::env::var_os("NO_COLOR").is_some() {
-            ColorChoice::Never
-        } else if std::env::var_os("FORCE_COLOR").is_some()
-            || std::env::var_os("CLICOLOR_FORCE").is_some()
-            || std::io::stdout().is_terminal()
-        {
-            ColorChoice::Always
-        } else {
-            ColorChoice::Auto
-        };
-        let mut cmd = Cli::command()
-            .color(color)
-            .override_usage("fluxctl [OPTIONS] <COMMAND>")
-            .after_help(styles::after_help())
-            // Clap cannot group subcommands into sections (Cobra can). Hide the
-            // flat Commands list so our Cilium-style grouped after_help is the
-            // only command listing; parsing/completions are unaffected.
-            .mut_subcommands(|s| s.hide(true));
-        let matches = cmd.get_matches_mut();
-        // `fleet` prints tables on a terminal unless `-o`/`FLUXCTL_OUTPUT` asks for a format.
-        let explicit = !matches!(
-            matches.value_source("output_format"),
-            None | Some(clap::parser::ValueSource::DefaultValue)
-        );
-        (
-            Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit()),
-            explicit,
-        )
-    };
+    let (cli, output_explicit) = parse_cli();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(async move {
+            if let Some(r) = remote::from_argv_env() {
+                output::seed_vm_index(r.vm_index().await);
+            }
+            run(cli, output_explicit).await
+        })
+}
+
+async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     // `vm <verb>` becomes the command it names; a user still typing the old hyphenated name gets a one-line pointer at the
     // new one on a terminal (nothing is printed to a pipe or a script's captured output).
     let cli = {
