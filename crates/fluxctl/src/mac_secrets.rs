@@ -458,7 +458,10 @@ mod tests {
         let e = Secrets::from_flags(&["id=a,env=NOPE".into()], &|_| None)
             .unwrap_err()
             .to_string();
-        assert!(e.contains("NOPE") && e.to_lowercase().contains("export"), "{e}");
+        assert!(
+            e.contains("NOPE") && e.to_lowercase().contains("export"),
+            "{e}"
+        );
     }
 
     #[test]
