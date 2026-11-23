@@ -62,6 +62,8 @@ pub struct RunOpts {
     pub detach: bool,
     #[command(flatten)]
     pub life: crate::mac_lifecycle::LifeOpts,
+    #[command(flatten)]
+    pub tty: crate::mac_exec::TtyFlags,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +383,10 @@ pub struct GuestJob {
     pub command: Option<String>,
     pub mounts: Vec<Mount>,
     pub detach: bool,
+    /// Terminal for the foreground command.
+    pub tty: crate::mac_exec::Tty,
+    /// No command, but the user asked for one (`run -it`): open the guest's login shell.
+    pub shell: bool,
 }
 
 /// Wait for SSH, link the shares, run the command (foreground, or background with `detach`). Returns the guest address.
@@ -398,9 +404,19 @@ pub async fn run_in_guest(r: &crate::remote::Remote, id: &str, job: &GuestJob) -
         } else {
             cmd.clone()
         };
-        crate::run::ssh_to(&ip, &job.user, 22, true, &[text]).await?;
+        run_ssh(&ip, job, &[text]).await?;
+    } else if job.shell {
+        run_ssh(&ip, job, &[]).await?;
     }
     Ok(ip)
+}
+
+async fn run_ssh(ip: &str, job: &GuestJob, args: &[String]) -> Result<()> {
+    let code = crate::run::ssh_to_code(ip, &job.user, 22, true, job.tty, args).await?;
+    if code != 0 {
+        bail!("ssh exited with exit status: {code}");
+    }
+    Ok(())
 }
 
 /// What `mac run` did, for `--json` and for the plain output.
@@ -461,7 +477,22 @@ pub async fn run_outcome(
     let env = collect_env(&opts.env, &opts.env_file, host_env)?;
     let command = mac_config::effective_command(&cfg, &cmd, &env, opts.workdir.as_deref());
     ensure!(
-        !rm || command.is_some(),
+        !(opts.detach && (opts.tty.tty || opts.tty.interactive)),
+        "-d runs in the background, so -i/-t do not apply: use `fluxctl mac run -it IMAGE` for a shell, or `fluxctl mac exec -it NAME` later"
+    );
+    // `run -it` with no command is a shell in the new instance, as `docker run -it IMAGE` is.
+    let want_shell = command.is_none() && (opts.tty.tty || opts.tty.interactive);
+    let command = if want_shell {
+        let mut all = cfg.env.clone();
+        all.extend(env.iter().cloned());
+        let wd = opts.workdir.as_deref().or(cfg.workdir.as_deref());
+        crate::mac_exec::shell_args(&all, wd).pop()
+    } else {
+        command
+    };
+    let command_or_shell = command.is_some() || want_shell;
+    ensure!(
+        !rm || command_or_shell,
         "--rm needs a command to run (fluxctl mac run --rm IMAGE -- CMD, or an image with CMD/ENTRYPOINT)"
     );
     ensure!(
@@ -504,11 +535,11 @@ pub async fn run_outcome(
         image: image.clone(),
         ip,
         removed,
-        ran_command: command.is_some(),
+        ran_command: command_or_shell,
         detached: opts.detach,
         print_name,
     };
-    if command.is_none() && mounts.is_empty() {
+    if !command_or_shell && mounts.is_empty() {
         return Ok(outcome(None, false, true));
     }
     let job = GuestJob {
@@ -519,9 +550,15 @@ pub async fn run_outcome(
         command: command.clone(),
         mounts,
         detach: opts.detach,
+        tty: if command_or_shell {
+            crate::mac_exec::resolve_here(opts.tty)
+        } else {
+            Default::default()
+        },
+        shell: want_shell,
     };
     let result = run_in_guest(r, &id, &job).await;
-    if command.is_none() || opts.detach {
+    if !command_or_shell || opts.detach {
         // Nothing to wait for: the instance stays up.
         return Ok(outcome(Some(result?), false, true));
     }

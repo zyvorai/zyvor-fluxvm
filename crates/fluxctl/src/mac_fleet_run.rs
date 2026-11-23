@@ -175,6 +175,7 @@ pub fn mac_run_fleet(
         ("--label", !opts.label.is_empty()),
         ("--restart", opts.restart != "no"),
         ("-d/--detach", opts.detach),
+        ("-i/-t", opts.tty.tty || opts.tty.interactive),
     ] {
         if used {
             unsupported.push(flag);

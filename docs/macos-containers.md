@@ -108,10 +108,33 @@ and `CMD` (from its Macfile) run; with neither, the instance just stays up.
 | `--restart POLICY` | `no`, `always`, `unless-stopped`, `on-failure`. **A label only**: the daemon never restarts a macOS VM. `fluxctl mac reconcile` applies it (run it from launchd or cron). `mac stop` marks an instance so `unless-stopped` leaves it alone. |
 | `--cpus N`, `--memory 8g` | `vcpus` and `memory_mib` of the VM request. |
 | `-d` | With `CMD`: run it in the background in the guest (`nohup`, output in `/tmp/fluxvm-mac-cmd.log` there) and return. Cannot be combined with `--rm`. |
-| `--user U` | SSH user (default: the image's `USER`, else `admin`). |
+| `-u`, `--user U` | SSH user (default: the image's `USER`, else `admin`). |
+| `-i`, `-t` (`-it`) | Interactive, like `docker run -it`: `-t` gives the command a terminal. With no `CMD` (and no image command) you get the guest's login shell in the new instance. Not with `-d` or `--fleet`. |
 
-`mac exec NAME [-e NAME=V] [-w DIR] [--user U] -- CMD` applies the image's `ENV` and `WORKDIR` (while the image is still in the
-store) and then its own flags; it does not use `ENTRYPOINT`.
+`mac exec [-it] [-e NAME=V] [-w DIR] [-u USER] NAME [-- CMD]` applies the image's `ENV` and `WORKDIR` (while the image is still
+in the store) and then its own flags; it does not use `ENTRYPOINT`.
+
+### Interactive access: `exec -it`, `run -it`, `attach`
+
+All three use the `ssh` that `mac exec` and `mac run` always used (generated key, host key not remembered for local guests); there
+is no extra agent or port.
+
+- `fluxctl mac exec -it NAME` opens a login shell; `fluxctl mac exec -it NAME -- top` runs one program with a terminal. `-e`,
+  `-w` and `-u` work as in Docker (`-u` is the guest account that logs in, so it must exist in the guest).
+- Terminal rules: `-t` needs a terminal on this side; from a pipe or CI it prints a warning and runs without one. `-i` alone means
+  pipes. With neither flag you get a terminal only when both stdin and stdout are terminals, so `mac exec NAME -- cmd | grep x`
+  is clean and typing at a prompt just works. (Before, `mac exec` always forced a terminal.)
+- Exit codes: `mac exec` exits with the command's own code (`mac exec NAME -- false; echo $?` prints 1). ssh failing to connect is
+  exit 1 with an explanation (`MAC_GUEST_SSH_FAILED`).
+- `fluxctl mac exec --print NAME -- CMD` prints the exact ssh command and runs nothing, to paste into another tool.
+- `fluxctl mac attach NAME` follows the console log live (read-only; Ctrl-C detaches, the instance keeps running). It is the same
+  stream as `mac logs -f`, with a banner. `mac attach --cmd NAME` follows the output of a command started with `mac run -d`
+  (`/tmp/fluxvm-mac-cmd.log` in the guest, over ssh).
+- A stopped or still-booting instance gets a plain message with the fix (`MAC_EXEC_NOT_RUNNING`; `fluxctl explain` knows both codes).
+
+**Not verified on a real macOS guest or in a real terminal session** (nothing here can run a Mac): the terminal decision, ssh
+arguments, exit-code handling and messages are unit tested with fakes; starting `ssh` and the full-screen behaviour of `-it` are not.
+Studio has no button for this yet; copy the command from this page.
 
 ## Create, kill, update and the run flags (Docker parity)
 
@@ -174,6 +197,8 @@ All need the daemon (`--server` or a context). `NAME` is the instance name from 
 | `mac inspect [-f TEMPLATE] NAME...` | JSON array (or, with `--format`, one templated line each: [subset](#mac-inspect---format)): state, restart policy, network, ports, cpus, memory, mounts, user labels, disk path, the image's config and the raw VM record. |
 | `mac logs [-f] [-t] [--tail N] NAME` | The VM's console log (`GET /v1/vms/{id}/logs`; serial output, not the guest's own logs). `-f` streams until Ctrl-C; `-t` (with `-f`) stamps lines with when they arrived. `--since` is refused: [why](#mac-logs---since-and--t-what-is-and-is-not-possible). |
 | `mac events [--since T] [--filter K=V]... [-f] [--json]` | Recorded `mac.*` and `kube.apple.*` events; [details](#mac-events---since-and---filter). |
+| `mac exec [-it] [-e] [-w] [-u] NAME [-- CMD]` | Run a command, or a login shell, in the guest over ssh; see [Interactive access](#interactive-access-exec--it-run--it-attach). |
+| `mac attach [--cmd] NAME` | Follow the console log live (read-only), or with `--cmd` the output of `mac run -d`. |
 | `mac cp SRC DST` | `NAME:/path` is the guest side; either direction; `scp -r`. Between two instances is refused. |
 | `mac stats [NAME...] [--json]` | One reading of CPU, memory, disk I/O (`GET /v1/vms/{id}/stats`). CPU is averaged over the VM's life, and there is no live stream. |
 | `mac stop`, `start`, `restart NAME...` | `stop` keeps the disk. `start` needs a free macOS slot, and boots an instance made by `mac create`. See also `mac kill` and `mac update` below. |

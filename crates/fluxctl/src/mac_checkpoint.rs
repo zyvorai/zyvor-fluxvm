@@ -894,6 +894,8 @@ pub async fn run_from_checkpoint(
             command: Some(cmd.join(" ")),
             mounts: Vec::new(),
             detach: false,
+            tty: crate::mac_exec::Tty::Force,
+            shell: false,
         };
         Some(crate::mac_instance::run_in_guest(r, &done.id, &job).await?)
     };

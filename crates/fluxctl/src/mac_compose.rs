@@ -1665,6 +1665,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                         command,
                         mounts: spec.mounts.clone(),
                         detach: true,
+                        ..Default::default()
                     };
                     run_in_guest(r, &id, &job)
                         .await
@@ -1944,6 +1945,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 command,
                 mounts: spec.mounts.clone(),
                 detach: false,
+                tty: crate::mac_exec::Tty::Force,
+                shell: false,
             };
             let result = run_in_guest(r, &id, &job).await;
             if rm {

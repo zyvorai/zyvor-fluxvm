@@ -105,8 +105,8 @@ pub enum MacCommand {
         /// Publish a guest port on this Mac: `[ADDR:]HOST:GUEST`. Repeatable.
         #[arg(short = 'p', long = "publish")]
         publish: Vec<String>,
-        /// SSH user inside the guest (default: the image's USER, else `admin`).
-        #[arg(long)]
+        /// SSH user inside the guest (default: the image's USER, else `admin`). Docker's `-u`.
+        #[arg(short = 'u', long)]
         user: Option<String>,
         /// Seconds to wait for the guest to answer on SSH.
         #[arg(long, default_value_t = 900)]
@@ -141,14 +141,20 @@ pub enum MacCommand {
     },
     /// Stop and delete an instance.
     Rm { name: String },
-    /// Run a command in a running instance over SSH: `fluxctl mac exec NAME -- sw_vers`.
+    /// Run a command in a running instance over SSH, like `docker exec`: `fluxctl mac exec NAME -- sw_vers`. `-it` gives a
+    /// terminal (a shell, `top`, an editor); with no command you get the guest's login shell. The command's exit code is yours.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac exec web -- sw_vers\n  fluxctl mac exec -it web                      (a login shell)\n  fluxctl mac exec -it -w /Users/admin/site -e DEBUG=1 web -- zsh\n  fluxctl mac exec -u builder web -- whoami\n  fluxctl mac exec --print web -- uptime        (show the ssh command, run nothing)"
+    )]
     Exec {
         name: String,
-        #[arg(long, default_value = "admin")]
+        /// The guest account to run as (Docker's `-u`). It logs in over SSH, so it must exist in the guest.
+        #[arg(short = 'u', long, default_value = "admin")]
         user: String,
         #[command(flatten)]
         opts: crate::mac_more::ExecOpts,
-        #[arg(last = true, required = true)]
+        /// The command, after `--`. Empty means the login shell.
+        #[arg(last = true)]
         cmd: Vec<String>,
     },
     /// Preflight: Apple silicon, macOS version, free macOS VM slots, free disk and APFS clone volume, login session, daemon,
