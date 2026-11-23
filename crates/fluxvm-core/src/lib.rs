@@ -12,6 +12,7 @@ pub mod gpu;
 pub mod gpu_health;
 pub mod grants;
 pub mod health;
+pub mod kube_app;
 pub mod instancetype;
 pub mod keychain;
 pub mod lifecycle;

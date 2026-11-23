@@ -54,6 +54,7 @@ mod infer;
 mod instancetype_cmd;
 mod kube_addons;
 mod kube_apple;
+mod kube_app_cmd;
 mod kube_apps;
 mod kube_backup;
 mod kube_chaos;
@@ -527,6 +528,9 @@ enum KubeCommand {
         service: Option<String>,
         #[arg(long, default_value = "default")]
         namespace: String,
+        /// The port on this Mac, as a second argument: `fluxctl kube forward web 8080` (same as `--local 8080`).
+        #[arg(conflicts_with = "list")]
+        port: Option<u16>,
         /// Which of the Service's ports, when it has several.
         #[arg(long)]
         service_port: Option<u16>,
@@ -570,8 +574,12 @@ enum KubeCommand {
         /// The service name, or namespace/name.
         service: String,
     },
-    /// The services `kube add` can run, and which of them are running.
+    /// The services `kube add` can run, which of them are running, and the apps you started with `kube run`.
     Apps(KubeArgs),
+    /// Docker-style apps on the cluster: `run IMAGE`, `rm`, `shell`, `scale`, `rollout undo`, `expose`. Logs: `kube logs APP -f`;
+    /// a local port: `kube forward APP`; the list: `kube apps`.
+    #[command(flatten)]
+    App(kube_app_cmd::AppCommand),
     /// Rebuild an image whenever a file in a directory changes, copy it into the cluster and restart the deployment.
     Dev {
         #[command(flatten)]
@@ -6522,6 +6530,21 @@ async fn main() -> Result<()> {
         return kube_addons::run(command);
     }
 
+    // `kube run | rm | shell | scale | rollout | expose` talk to the cluster through kubectl, like `gateway`: no daemon needed.
+    if let Command::Kube {
+        command: KubeCommand::App(_),
+    } = &cli.command
+    {
+        let Command::Kube {
+            command: KubeCommand::App(cmd),
+        } = cli.command
+        else {
+            unreachable!()
+        };
+        let code = tokio::task::block_in_place(|| kube_app_cmd::run(cmd));
+        std::process::exit(code);
+    }
+
     // `kube prompt` runs on every shell prompt: no daemon, no VmManager, nothing slow.
     if let Command::Kube {
         command:
@@ -8997,11 +9020,13 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             cluster,
             service,
             namespace,
+            port,
             service_port,
             local,
             remove,
             list,
         } => {
+            let local = local.or(port);
             let o = cluster.options()?;
             let text = match (list, service) {
                 (true, _) => kube_forward::list(api, &o).await?,
@@ -9157,7 +9182,9 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             )
             .await?;
         }
-        KubeCommand::Prompt { .. } => unreachable!("handled before the daemon is opened"),
+        KubeCommand::Prompt { .. } | KubeCommand::App(_) => {
+            unreachable!("handled before the daemon is opened")
+        }
         KubeCommand::Addons { .. } => unreachable!("handled before the daemon is opened"),
         KubeCommand::Share {
             cluster,
@@ -9254,6 +9281,11 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
         }
         KubeCommand::Apps(cluster) => {
             print!("{}", kube_apps::list(api, &cluster.options()?).await?);
+            let name = cluster.name.clone();
+            print!(
+                "{}",
+                tokio::task::block_in_place(|| kube_app_cmd::apps_section(Some(&name)))
+            );
         }
         KubeCommand::Use(cluster) => {
             let o = cluster.options()?;

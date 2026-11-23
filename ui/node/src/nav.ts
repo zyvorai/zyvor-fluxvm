@@ -32,6 +32,7 @@ export const NAV: NavGroup[] = [
       { to: '/network', label: 'Network', desc: 'Outbound policy and live traffic' },
       { to: '/kubernetes', label: 'Kubernetes', desc: 'Clusters, nodes and pods' },
       { to: '/mac', label: 'Mac', desc: 'macOS instances of fluxctl mac' },
+      { to: '/apps', label: 'Apps', desc: 'Run an image on a cluster' },
       { to: '/docker', label: 'Docker', desc: 'Containers and images of the engine' },
       { to: '/images', label: 'Images', desc: 'Catalog, templates and warm pools' },
       { to: '/volumes', label: 'Volumes', desc: 'Disks that outlive a machine' },
