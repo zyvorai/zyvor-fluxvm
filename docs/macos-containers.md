@@ -14,7 +14,7 @@ Status: the commands below are implemented and unit-tested. Nothing has been run
 |---|---|
 | `fluxctl mac images`, `pull`, `push`, `tag`, `rmi`, `import` | Implemented (this page) |
 | `fluxctl mac run [--rm] [--name N] [--user U] [--wait S] [-p H:G] IMAGE [-- CMD]`, `ps`, `rm`, `exec [--user U]` | Implemented, needs the daemon (`--server` or a context). **Unit-tested only; never run against a real VM.** An instance is a VZ macOS VM, an APFS clone of the image's disk, labelled `fluxvm.mac=instance`. A 409 means the Mac already runs 2 macOS guests; a 503 means its login session is locked. |
-| `fluxctl mac build -t NAME [-f Macfile] [--build-arg K=V] [--dry-run] [--wait SECS] [CONTEXT]` | `--dry-run` parses a Macfile and prints the plan, with line-numbered errors (client-side). Without it the build runs: needs the daemon, and is **unit-tested only with a fake host; never run against a real macOS VM**. `SNAPSHOT` and `FROM IPSW latest` are refused (not supported). A `#` comment must be on its own line (a trailing one after a directive is an error). |
+| `fluxctl mac build -t NAME [-f Macfile] [--build-arg K=V] [--label K=V] [--secret id=,src=] [--ssh default] [--platform darwin/arm64] [--dry-run] [--wait SECS] [CONTEXT]` | `--dry-run` parses a Macfile and prints the plan, with line-numbered errors (client-side). Without it the build runs: needs the daemon, and is **unit-tested only with a fake host; never run against a real macOS VM**. `SNAPSHOT` and `FROM IPSW latest` are refused (not supported). A `#` comment must be on its own line (a trailing one after a directive is an error). |
 
 | `inspect`, `logs [-f]`, `cp`, `stats`, `stop`, `start`, `restart`, `pause`, `unpause`, `rename`, `wait`, `top`, `port`, `prune`, `reconcile` | Implemented (section "Instance commands"), needs the daemon. **Unit-tested on parsing and rendering only; never run against a daemon or a real VM.** |
 | `run -e/--env-file/-v/-w/--label/--restart/--cpus/--memory/-d`, `ps -a/-f/--format/-q`, `exec -e/-w` | Implemented (section "Run options"), same caveat. |
@@ -344,7 +344,29 @@ will run. The build writes `config.json` into the new template's directory.
 context root (`*.md` matches only at the top; `**/*.md` at any depth), `*` and `?` stay inside one path part, `**` spans
 directories, a leading `!` re-includes, the last matching pattern wins, and a pattern that matches a directory excludes what is
 under it. With a `.macignore`, a `COPY` of a directory is sent from a filtered scratch copy (deleted afterwards); a source that is
-itself ignored is an error.
+itself ignored is an error. When there is no `.macignore`, a `.dockerignore` in the context is read with the same rules, so a Docker
+project's ignore file works unchanged (`.macignore` wins if both exist).
+
+### Docker-style build flags: secrets, SSH, labels, platform, build-arg checks
+
+All of these work with no set-up; each one is checked **before** the build instance is created, and a failure says what to run next
+(`fluxctl explain CODE`).
+
+| Flag | What it does |
+|---|---|
+| `--secret id=NAME,src=FILE` or `id=NAME,env=VARIABLE` | Makes a secret available to `RUN --mount=type=secret,id=NAME CMD` steps. The file is copied into the guest as `/private/tmp/fluxvm-secrets/NAME` (mode 600, directory mode 700; or the mount's `target=/abs/path`), the variable `FLUXVM_SECRET_NAME` holds that **path** (never the value), and the file is removed before the step ends and before the build cache takes its disk snapshot. If it cannot be removed the build fails and the image is not stored (`MAC_SECRET_CLEANUP`). The value is not in the plan, `--dry-run`, the cache key (which secrets a step can read is, their content is not, as in Docker), the image history or config, or any message from `fluxctl`; error text is also run through a redaction of the secret values as a last guard. `env=` values are written to a private (0600) temporary file on this Mac and deleted when the command ends. A step that mounts a secret you did not pass, or a missing file or variable, is refused up front (`MAC_SECRET_MISSING`); a `--secret` no step uses is a warning and is not sent. |
+| `--ssh default` | Forwards this shell's SSH agent (`ssh -A`) to `RUN --mount=type=ssh CMD` steps only. No private key is copied into the guest. Needs a running agent (`SSH_AUTH_SOCK`; `MAC_SSH_AGENT_MISSING`). Only `default` is accepted. Add the host's key in the step (`ssh-keyscan github.com >> ~/.ssh/known_hosts`) because the guest has none. |
+| `--label KEY=VALUE` | Adds an image label; overrides a `LABEL` of the same key in the Macfile. `--dry-run` prints the labels. |
+| `--platform darwin/arm64` | Accepted for Docker scripts (`darwin/arm64`, `macos/arm64`, `arm64`); any other value is refused (`MAC_PLATFORM_UNSUPPORTED`) because macOS guests are Apple silicon only. |
+| `--build-arg K=V` checks | A warning (the build still runs) when the Macfile has no `ARG K` (with a spelling hint for `VERSON` vs `ARG VERSION`), when an `ARG` has no default and no value but is used in a later `$NAME`, and when the name looks like a credential (`TOKEN`, `PASSWORD`, `SECRET`, `API_KEY`...) with the advice to use `--secret`. `MAC_BUILD_ARG_UNUSED`. |
+| `--target STAGE` | **Not supported.** A Macfile has one `FROM`, so there are no stages. The flag exists only to answer in plain English (`MAC_BUILD_TARGET_UNSUPPORTED`) with the two-Macfile alternative. |
+
+Limits, stated plainly: output a `RUN` step prints in the guest goes straight to your terminal and is **not** filtered, so a command
+that prints the secret (`cat` of the file) shows it; do not do that. Build args are still visible in `--dry-run` and in the plan's
+`export` text; use `--secret` for credentials. A changed secret does not rebuild a cached step (the same as Docker): use `--no-cache`.
+`RUN --mount` types other than `secret` and `ssh` (`cache`, `bind`, `tmpfs`) are refused. Studio has no page that builds Mac images;
+the MCP tool `mac_build_dry_run` takes `platform` and reports the build-arg warnings, and the same command line works from a
+terminal. Compose `build:` has no `target`, `secrets` or `ssh` keys.
 
 ## Compose
 
@@ -830,6 +852,7 @@ check, the Studio Protect tab): unit-tested with a fake daemon, temporary files 
 and builds. Never run against a real daemon or a macOS guest, so these are unchecked: that a memory checkpoint of a running guest then
 resumes, the pause length, the `auto-before-restore` save on a real restore (and its pruning), the size of a memory checkpoint, `mac diff` on
 a multi-GiB disk, and the Studio tab in a browser.
+The Docker-style build flags (`--secret`, `--ssh`, `RUN --mount`, `--label`, `--platform`) are unit-tested with a fake guest and temporary files only: the real `scp` of a secret, `ssh -A` agent forwarding into a macOS guest, file modes and the removal on a real VM, and a git clone through the forwarded agent were never run.
 
 The observability options (`inspect --format`, `images --format`, `events --since/--filter`, `logs -t`, `system info/version`) were never run against a daemon or a Mac: the template engine, filters, time parsing, line stamping and the info document are unit-tested; the HTTP calls (`/v1/events?since=`, `/v1/openapi.json`, the two log requests) are not. The daemon's version is read from the OpenAPI document and has not been checked against a running daemon.
 

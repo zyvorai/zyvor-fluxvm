@@ -305,6 +305,78 @@ fn parse_healthcheck(line: usize, rest: &str) -> Result<Option<Healthcheck>, Par
     }))
 }
 
+/// What a `RUN --mount=...` hands to one step. Nothing here holds a secret's value, only its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mount {
+    /// `type=secret,id=NAME[,target=/path]`: the `--secret id=NAME,...` file, present in the guest for this step only.
+    Secret { id: String, target: Option<String> },
+    /// `type=ssh`: the host's SSH agent is forwarded into the guest for this step (`--ssh default`).
+    Ssh,
+}
+
+fn mount_word_ok(s: &str, extra: &[char]) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') || extra.contains(&c)
+        })
+}
+
+/// Split the leading `--mount=...` flags off a `RUN` line. Returns the mounts and the command that follows them.
+pub fn split_mounts(cmd: &str) -> Result<(Vec<Mount>, &str), String> {
+    let mut rest = cmd.trim_start();
+    let mut mounts = Vec::new();
+    while let Some(after) = rest.strip_prefix("--mount=") {
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        let (spec, tail) = after.split_at(end);
+        let (mut ty, mut id, mut target) = (None, None, None);
+        for kv in spec.split(',') {
+            match kv.split_once('=') {
+                Some(("type", v)) => ty = Some(v),
+                Some(("id", v)) => id = Some(v),
+                Some(("target" | "dst" | "destination", v)) => target = Some(v),
+                // Docker accepts these on secret mounts; they change nothing here.
+                Some(("required" | "mode" | "uid" | "gid", _)) => {}
+                _ => {
+                    return Err(format!(
+                        "RUN --mount={spec}: '{kv}' is not understood; use type=secret,id=NAME[,target=/path] or type=ssh"
+                    ));
+                }
+            }
+        }
+        match ty {
+            Some("secret") => {
+                let id = id
+                    .filter(|i| mount_word_ok(i, &[]))
+                    .ok_or("RUN --mount=type=secret needs id=NAME (letters, digits, _ . -)")?;
+                if let Some(t) = target
+                    && !(t.starts_with('/') && mount_word_ok(&t[1..], &['/']) && !t.contains(".."))
+                {
+                    return Err(format!(
+                        "RUN --mount target {t:?} must be an absolute path of letters, digits, _ . - and /"
+                    ));
+                }
+                mounts.push(Mount::Secret {
+                    id: id.to_string(),
+                    target: target.map(str::to_string),
+                });
+            }
+            Some("ssh") => {
+                if !mounts.contains(&Mount::Ssh) {
+                    mounts.push(Mount::Ssh)
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "RUN --mount=type={other} is not supported on macOS builds; only type=secret and type=ssh are"
+                ));
+            }
+            None => return Err("RUN --mount needs type=secret or type=ssh".into()),
+        }
+        rest = tail.trim_start();
+    }
+    Ok((mounts, rest))
+}
+
 /// The text after the directive keyword, trimmed.
 fn rest_of(text: &str) -> &str {
     text.split_once(char::is_whitespace)
@@ -380,7 +452,11 @@ pub fn parse(src: &str) -> Result<Macfile, ParseError> {
             }
             "RUN" => {
                 let cmd = rest_of(&text);
-                if cmd.is_empty() {
+                let (_, body) = match split_mounts(cmd) {
+                    Ok(x) => x,
+                    Err(m) => return err(n, m),
+                };
+                if body.is_empty() {
                     return err(n, "RUN needs a command");
                 }
                 lines.push(Line {
@@ -549,6 +625,8 @@ pub enum Step {
         line: usize,
         user: Option<String>,
         command: String,
+        /// Secrets and the SSH agent handed to this step only (`RUN --mount=...`).
+        mounts: Vec<Mount>,
     },
     /// Copy `src` (relative to the build context) to `dst` in the guest.
     Copy {
@@ -615,12 +693,14 @@ pub fn plan_with(
             }
             Directive::Run(c) => {
                 history(&mut cfg, format!("RUN {c}"));
+                let (mounts, body) = split_mounts(c).unwrap_or((Vec::new(), c));
                 let mut env = args.clone();
                 env.extend(cfg.env.iter().cloned());
                 steps.push(Step::Run {
                     line: l.line,
                     user: user.clone(),
-                    command: format!("{}{c}", prefix(&env, workdir.as_deref())),
+                    command: format!("{}{body}", prefix(&env, workdir.as_deref())),
+                    mounts,
                 })
             }
             Directive::Copy { src, dst } => {
@@ -649,6 +729,7 @@ pub fn plan_with(
                             sq(&src),
                             sq(&dst)
                         ),
+                        mounts: Vec::new(),
                     });
                 } else {
                     steps.push(Step::Copy {
@@ -745,6 +826,148 @@ pub fn plan_with(
     (steps, cfg)
 }
 
+/// ` [secret NAME, ssh agent]`, naming what a step mounts. Never a value.
+fn mount_note(mounts: &[Mount]) -> String {
+    if mounts.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = mounts
+        .iter()
+        .map(|m| match m {
+            Mount::Secret { id, .. } => format!("secret {id}"),
+            Mount::Ssh => "ssh agent".to_string(),
+        })
+        .collect();
+    format!(" [{}]", parts.join(", "))
+}
+
+/// The only platform a macOS image runs on: Apple silicon, as `darwin/arm64`.
+pub const PLATFORM: &str = "darwin/arm64";
+
+/// Check a `--platform` value. `darwin/arm64`, `macos/arm64`, `darwin`, `macos` and `arm64` all mean this Mac's guests.
+pub fn check_platform(p: &str) -> Result<(), String> {
+    let p = p.trim().to_ascii_lowercase();
+    let ok = matches!(
+        p.as_str(),
+        "darwin"
+            | "macos"
+            | "arm64"
+            | "aarch64"
+            | "darwin/arm64"
+            | "macos/arm64"
+            | "darwin/aarch64"
+    );
+    if ok {
+        return Ok(());
+    }
+    Err(format!(
+        "--platform {p}: a macOS image can only be {PLATFORM} (Apple silicon). Use --platform {PLATFORM}, or leave it out. \
+         For a Linux image use `docker build --platform {p}` instead"
+    ))
+}
+
+/// Problems with `--build-arg` that are worth telling the user about before a long build starts. None stops the build.
+pub fn check_build_args(file: &Macfile, args: &BTreeMap<String, String>) -> Vec<String> {
+    let declared: Vec<&str> = file
+        .lines
+        .iter()
+        .filter_map(|l| match &l.directive {
+            Directive::Arg { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut out = Vec::new();
+    for (k, _) in args {
+        if !declared.contains(&k.as_str()) {
+            let near = declared
+                .iter()
+                .find(|d| d.eq_ignore_ascii_case(k) || edit_distance_1(d, k));
+            out.push(match near {
+                Some(d) => format!(
+                    "--build-arg {k} is not used: the Macfile declares ARG {d}. Check the spelling (names are case-sensitive)"
+                ),
+                None => format!(
+                    "--build-arg {k} is not used: the Macfile has no `ARG {k}` line. Add `ARG {k}` before the step that needs it, or drop the flag"
+                ),
+            });
+        }
+        let up = k.to_ascii_uppercase();
+        if [
+            "TOKEN",
+            "PASSWORD",
+            "PASSWD",
+            "SECRET",
+            "APIKEY",
+            "API_KEY",
+            "PRIVATE_KEY",
+        ]
+        .iter()
+        .any(|w| up.contains(w))
+        {
+            out.push(format!(
+                "--build-arg {k} looks like a secret. Build args are visible to every RUN and to anyone who can read the build command; pass it with `--secret id={},src=FILE` and `RUN --mount=type=secret,id={}` instead",
+                k.to_ascii_lowercase(),
+                k.to_ascii_lowercase()
+            ));
+        }
+    }
+    // An ARG with no default, no --build-arg, that a later line expands: it silently becomes empty.
+    let text: String = file
+        .lines
+        .iter()
+        .filter(|l| !matches!(l.directive, Directive::Arg { .. }))
+        .map(|l| format!("{:?}\n", l.directive))
+        .collect();
+    for l in &file.lines {
+        if let Directive::Arg {
+            name,
+            default: None,
+        } = &l.directive
+            && !args.contains_key(name)
+            && (text.contains(&format!("${name}")) || text.contains(&format!("${{{name}")))
+        {
+            out.push(format!(
+                "line {}: ARG {name} has no default and no --build-arg {name}=..., so it expands to an empty string. Pass --build-arg {name}=VALUE or give the ARG a default",
+                l.line
+            ));
+        }
+    }
+    out
+}
+
+fn edit_distance_1(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let i = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let (ta, tb) = (&a[i..], &b[i..]);
+    match ta.len().cmp(&tb.len()) {
+        std::cmp::Ordering::Equal => ta.get(1..) == tb.get(1..),
+        std::cmp::Ordering::Less => ta == &tb[1..],
+        std::cmp::Ordering::Greater => &ta[1..] == tb,
+    }
+}
+
+/// `--label KEY=VALUE` on the command line: they override LABEL lines of the same name, as in Docker.
+pub fn apply_labels(cfg: &mut ImageConfig, labels: &[String]) -> Result<(), String> {
+    for l in labels {
+        let (k, v) = l
+            .split_once('=')
+            .filter(|(k, _)| !k.is_empty() && !k.contains(char::is_whitespace))
+            .ok_or_else(|| {
+                format!("--label {l:?} must be KEY=VALUE, with no spaces in KEY (for example --label team=ci)")
+            })?;
+        cfg.history.push(HistoryEntry {
+            created_unix: 0,
+            created_by: format!("LABEL {k}={v}"),
+            comment: String::new(),
+        });
+        cfg.labels.insert(k.to_string(), v.to_string());
+    }
+    Ok(())
+}
+
 /// Human-readable dry-run listing, one numbered step per line.
 pub fn render_dry_run(steps: &[Step]) -> String {
     let who = |u: &Option<String>| u.as_deref().map(|u| format!(" as {u}")).unwrap_or_default();
@@ -758,7 +981,12 @@ pub fn render_dry_run(steps: &[Step]) -> String {
                 line,
                 user,
                 command,
-            } => format!("run{} (line {line}): {command}", who(user)),
+                mounts,
+            } => format!(
+                "run{} (line {line}): {command}{}",
+                who(user),
+                mount_note(mounts)
+            ),
             Step::Copy {
                 line,
                 user,
@@ -993,7 +1221,8 @@ mod tests {
                 Step::Run {
                     line: 2,
                     user: None,
-                    command: "a".into()
+                    command: "a".into(),
+                    mounts: Vec::new()
                 },
                 Step::Copy {
                     line: 4,
@@ -1004,12 +1233,14 @@ mod tests {
                 Step::Run {
                     line: 5,
                     user: Some("builder".into()),
-                    command: "b".into()
+                    command: "b".into(),
+                    mounts: Vec::new()
                 },
                 Step::Run {
                     line: 7,
                     user: Some("root".into()),
-                    command: "c".into()
+                    command: "c".into(),
+                    mounts: Vec::new()
                 },
                 Step::StoreTemplate,
                 Step::Snapshot {
@@ -1088,7 +1319,8 @@ mod tests {
             Step::Run {
                 line: 2,
                 user: None,
-                command: "x".into()
+                command: "x".into(),
+                mounts: Vec::new()
             }
         );
         assert!(cfg.is_blank());
@@ -1210,5 +1442,114 @@ mod tests {
     fn continuation_lines_work_for_new_directives() {
         let f = parse("FROM a\nENV A=1 \\\n    B=2\n").unwrap();
         assert_eq!(plan_with(&f, &BTreeMap::new()).1.env.len(), 2);
+    }
+
+    #[test]
+    fn run_mount_flags_become_step_mounts_and_leave_the_command_alone() {
+        let f = parse(
+            "FROM b\nRUN --mount=type=secret,id=npm --mount=type=ssh npm ci\nRUN --mount=type=secret,id=k,target=/opt/k.txt use\n",
+        )
+        .unwrap();
+        let steps = plan(&f);
+        let Step::Run {
+            command, mounts, ..
+        } = &steps[1]
+        else {
+            panic!()
+        };
+        assert_eq!(command, "npm ci");
+        assert_eq!(
+            mounts,
+            &[
+                Mount::Secret {
+                    id: "npm".into(),
+                    target: None
+                },
+                Mount::Ssh
+            ]
+        );
+        let text = render_dry_run(&steps);
+        assert!(text.contains("npm ci [secret npm, ssh agent]"), "{text}");
+        // A plain RUN is unchanged.
+        let Step::Run { mounts, .. } = &plan(&parse("FROM b\nRUN x\n").unwrap())[1] else {
+            panic!()
+        };
+        assert!(mounts.is_empty());
+    }
+
+    #[test]
+    fn bad_mounts_are_refused_with_the_line() {
+        for (src, want) in [
+            (
+                "FROM b\nRUN --mount=type=cache,target=/x y\n",
+                "not supported",
+            ),
+            ("FROM b\nRUN --mount=type=secret y\n", "needs id="),
+            (
+                "FROM b\nRUN --mount=type=secret,id=a,target=rel y\n",
+                "absolute path",
+            ),
+            ("FROM b\nRUN --mount=type=secret,id=a\n", "needs a command"),
+            ("FROM b\nRUN --mount=id=a y\n", "needs type="),
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(e.line, 2, "{src}");
+            assert!(e.message.contains(want), "{src}: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn platform_accepts_this_macs_guests_only() {
+        for ok in ["darwin/arm64", "macos/arm64", "arm64", "Darwin/ARM64"] {
+            assert!(check_platform(ok).is_ok(), "{ok}");
+        }
+        for bad in ["linux/amd64", "darwin/amd64", "windows/arm64", ""] {
+            let e = check_platform(bad).unwrap_err();
+            assert!(
+                e.contains("darwin/arm64") && e.contains("docker build"),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_arg_checks_name_the_fix() {
+        let f = parse("FROM b\nARG VERSION\nARG NEEDED\nWORKDIR /app/$NEEDED\nRUN x\n").unwrap();
+        let mut a = BTreeMap::new();
+        a.insert("VERSON".to_string(), "1".to_string());
+        a.insert("Z".to_string(), "1".to_string());
+        a.insert("NPM_TOKEN".to_string(), "x".to_string());
+        let w = check_build_args(&f, &a).join("\n");
+        assert!(w.contains("declares ARG VERSION"), "{w}");
+        assert!(w.contains("no `ARG Z` line"), "{w}");
+        assert!(
+            w.contains("looks like a secret") && w.contains("--secret id=npm_token"),
+            "{w}"
+        );
+        assert!(w.contains("line 3: ARG NEEDED has no default"), "{w}");
+        // Declared, supplied, no warnings.
+        let mut ok = BTreeMap::new();
+        ok.insert("VERSION".to_string(), "1".to_string());
+        ok.insert("NEEDED".to_string(), "n".to_string());
+        assert!(check_build_args(&f, &ok).is_empty());
+    }
+
+    #[test]
+    fn cli_labels_override_macfile_labels_and_are_checked() {
+        let (_, mut cfg) = plan_with(
+            &parse("FROM b\nLABEL team=old keep=1\n").unwrap(),
+            &BTreeMap::new(),
+        );
+        apply_labels(&mut cfg, &["team=ci".into(), "org.x.v=2".into()]).unwrap();
+        assert_eq!(cfg.labels["team"], "ci");
+        assert_eq!(cfg.labels["keep"], "1");
+        assert_eq!(cfg.labels["org.x.v"], "2");
+        for bad in ["novalue", "=x", "a b=c"] {
+            assert!(
+                apply_labels(&mut cfg, &[bad.into()])
+                    .unwrap_err()
+                    .contains("KEY=VALUE")
+            );
+        }
     }
 }

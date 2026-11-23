@@ -6,7 +6,7 @@
 //! The order of steps and the cleanup on failure live here, behind the small [`BuildHost`] trait, so they are unit tested with
 //! a fake host. The real host (daemon clone, SSH, scp, store) is `DaemonHost` in `mac_cmd.rs`.
 
-use crate::mac_build::{Step, render_dry_run};
+use crate::mac_build::{Mount, Step, render_dry_run};
 use anyhow::{Result, bail};
 
 /// SSH account used when the Macfile has no `USER` line (the same default as `mac run`).
@@ -19,6 +19,13 @@ pub trait BuildHost {
     /// Block until the guest answers on SSH.
     async fn wait_ready(&mut self) -> Result<()>;
     async fn run(&mut self, user: &str, command: &str) -> Result<()>;
+    /// `run` with the secrets and SSH agent a `RUN --mount=...` asks for. Hosts that cannot mount refuse.
+    async fn run_mounted(&mut self, user: &str, command: &str, mounts: &[Mount]) -> Result<()> {
+        if mounts.is_empty() {
+            return self.run(user, command).await;
+        }
+        bail!("this build host cannot mount secrets or the SSH agent")
+    }
     async fn copy(&mut self, user: &str, src: &str, dst: &str) -> Result<()>;
     /// Stop the instance and store its disk, hardware model and auxiliary storage as the new template.
     async fn stop_and_store(&mut self) -> Result<()>;
@@ -66,8 +73,13 @@ pub async fn execute<H: BuildHost>(host: &mut H, steps: &[Step]) -> Result<()> {
                 }
                 Err(e) => Err(e),
             },
-            Step::Run { user, command, .. } => {
-                host.run(user.as_deref().unwrap_or(DEFAULT_USER), command)
+            Step::Run {
+                user,
+                command,
+                mounts,
+                ..
+            } => {
+                host.run_mounted(user.as_deref().unwrap_or(DEFAULT_USER), command, mounts)
                     .await
             }
             Step::Copy { user, src, dst, .. } => {

@@ -91,8 +91,20 @@ pub fn chain_keys(
     let mut parent = sha(&["base", base]);
     for s in work {
         let step = match s {
-            Step::Run { user, command, .. } => {
-                sha(&["run", user.as_deref().unwrap_or(""), command])
+            Step::Run {
+                user,
+                command,
+                mounts,
+                ..
+            } => {
+                let user = user.as_deref().unwrap_or("");
+                if mounts.is_empty() {
+                    sha(&["run", user, command])
+                } else {
+                    // Which secrets a step can read is part of what it does; their contents are not (as in Docker).
+                    let m = format!("{mounts:?}");
+                    sha(&["run", user, command, &m])
+                }
             }
             Step::Copy { user, src, dst, .. } => {
                 sha(&["copy", user.as_deref().unwrap_or(""), src, dst, &ctx(src)?])
@@ -226,11 +238,17 @@ pub async fn execute_cached<H: CachedHost>(
             let what = describe(&work[i]);
             eprintln!("step {}/{n}: {what}", i + 1);
             let r = match &work[i] {
-                Step::Run { user, command, .. } => {
-                    host.run(
+                Step::Run {
+                    user,
+                    command,
+                    mounts,
+                    ..
+                } => {
+                    host.run_mounted(
                         user.as_deref()
                             .unwrap_or(crate::mac_build_exec::DEFAULT_USER),
                         command,
+                        mounts,
                     )
                     .await
                 }
@@ -429,6 +447,7 @@ mod tests {
             line: 1,
             user: None,
             command: c.into(),
+            mounts: Vec::new(),
         }
     }
 
@@ -481,6 +500,7 @@ mod tests {
                 line: 99,
                 user: None,
                 command: "a".into(),
+                mounts: Vec::new(),
             },
             copy("src"),
             run("b"),

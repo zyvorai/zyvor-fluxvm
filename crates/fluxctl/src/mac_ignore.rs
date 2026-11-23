@@ -14,6 +14,8 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 
 pub const IGNORE_FILE: &str = ".macignore";
+/// Docker's name for the same file. Used when the context has no `.macignore`, so a Docker project builds unchanged.
+pub const DOCKER_IGNORE_FILE: &str = ".dockerignore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rule {
@@ -98,15 +100,18 @@ fn glob(p: &[u8], s: &[u8]) -> bool {
     }
 }
 
-/// Read `CONTEXT/.macignore` (empty when absent).
+/// Read `CONTEXT/.macignore`, else `CONTEXT/.dockerignore` (empty when neither exists).
 pub fn load(context: &Path) -> Result<Ignore> {
-    match std::fs::read_to_string(context.join(IGNORE_FILE)) {
-        Ok(t) => Ok(Ignore::parse(&t)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ignore::default()),
-        Err(e) => {
-            Err(e).with_context(|| format!("reading {}", context.join(IGNORE_FILE).display()))
+    for name in [IGNORE_FILE, DOCKER_IGNORE_FILE] {
+        match std::fs::read_to_string(context.join(name)) {
+            Ok(t) => return Ok(Ignore::parse(&t)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading {}", context.join(name).display()));
+            }
         }
     }
+    Ok(Ignore::default())
 }
 
 /// A path ready for `scp`, plus the scratch copy to delete afterwards when a filtered copy was made.
@@ -137,7 +142,9 @@ pub fn stage(context: &Path, src: &str) -> Result<Staged> {
     }
     let rel = rel_to_context(context, &full)?;
     if !rel.is_empty() && ig.is_ignored(&rel) {
-        bail!("COPY source {src} is excluded by {IGNORE_FILE}");
+        bail!(
+            "COPY source {src} is excluded by the context's {IGNORE_FILE} / {DOCKER_IGNORE_FILE}: remove its pattern there, or COPY a different source"
+        );
     }
     if !full.is_dir() {
         return Ok(Staged {
@@ -302,8 +309,18 @@ mod tests {
         let d = tree();
         std::fs::write(d.path().join(IGNORE_FILE), "other.txt\n").unwrap();
         let e = stage(d.path(), "other.txt").unwrap_err().to_string();
-        assert!(e.contains("excluded by .macignore"), "{e}");
+        assert!(e.contains("excluded by the context"), "{e}");
         assert!(stage(d.path(), "app/main.swift").is_ok());
+    }
+
+    #[test]
+    fn a_dockerignore_is_read_when_there_is_no_macignore() {
+        let d = tree();
+        std::fs::write(d.path().join(DOCKER_IGNORE_FILE), "other.txt\n").unwrap();
+        assert!(stage(d.path(), "other.txt").is_err());
+        // `.macignore` wins when both exist.
+        std::fs::write(d.path().join(IGNORE_FILE), "zzz\n").unwrap();
+        assert!(stage(d.path(), "other.txt").is_ok());
     }
 
     #[test]
