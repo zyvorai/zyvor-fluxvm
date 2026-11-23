@@ -789,10 +789,13 @@ pub fn hint_for(message: &str) -> Option<&'static MacCode> {
                 .max()
                 .map(|len| (len, c))
         })
-        .fold(None, |best: Option<(usize, &'static MacCode)>, (len, c)| match best {
-            Some((b, _)) if b >= len => best,
-            _ => Some((len, c)),
-        })
+        .fold(
+            None,
+            |best: Option<(usize, &'static MacCode)>, (len, c)| match best {
+                Some((b, _)) if b >= len => best,
+                _ => Some((len, c)),
+            },
+        )
         .map(|(_, c)| c)
 }
 
