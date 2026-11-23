@@ -650,6 +650,22 @@ fn ops() -> Vec<Op> {
             ]),
         op(
             "get",
+            "/v1/audit",
+            "Audit log: what was changed, by whom, when and how it ended (newest first, paginated; admin)",
+            EVENTS,
+        )
+        .query(&[
+            ("since", "RFC 3339 timestamp"),
+            ("until", "RFC 3339 timestamp"),
+            ("action", "Action prefix, e.g. mac. or mac.run"),
+            ("target", "Part of the target name"),
+            ("actor", "Who did it"),
+            ("result", "ok, failed or denied"),
+            ("limit", "Page size (default 100, at most 1000)"),
+            ("offset", "Records to skip (use next_offset)"),
+        ]),
+        op(
+            "get",
             "/v1/events/stream",
             "Lifecycle events as Server-Sent Events",
             EVENTS,

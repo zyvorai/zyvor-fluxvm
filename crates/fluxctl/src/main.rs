@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod agent_session;
+mod audit_cmd;
 mod backup_verify_cmd;
 mod cli_errors;
 mod cloud;
@@ -2089,6 +2090,12 @@ enum Command {
     },
     /// Snapshot of identities, groups, CNPs, and labeled VMs.
     Observe,
+    /// The audit log: what was changed, by whom, when, and whether it worked. `ls` to look, `export` to keep a copy.
+    /// REST: `GET /v1/audit`.
+    Audit {
+        #[command(subcommand)]
+        command: audit_cmd::AuditCommand,
+    },
     /// VM lifecycle / audit events from `state_dir/events.jsonl`. REST:
     /// `GET /v1/events`, `GET /v1/events/stream` (SSE).
     Events {
@@ -6304,6 +6311,14 @@ fn main() -> Result<()> {
         )
         .init();
     let (cli, output_explicit) = parse_cli();
+    // A command that changes something leaves one record in the audit log when it ends (`fluxctl audit ls`). Against a
+    // remote daemon the daemon records it instead.
+    let audit_action = fluxvm_scheduler::audit::describe_cli(&std::env::args().collect::<Vec<_>>());
+    let audit_dir = audit_action
+        .as_ref()
+        .filter(|_| remote::from_argv_env().is_none())
+        .and_then(|_| load_cfg(&cli).ok())
+        .map(|c| c.state_dir);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -6312,7 +6327,11 @@ fn main() -> Result<()> {
             if let Some(r) = remote::from_argv_env() {
                 output::seed_vm_index(r.vm_index().await);
             }
-            run(cli, output_explicit).await
+            let result = run(cli, output_explicit).await;
+            if let (Some(a), Some(dir)) = (&audit_action, &audit_dir) {
+                audit_cmd::record_cli(dir, a, &result);
+            }
+            result
         })
 }
 
@@ -6629,6 +6648,23 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             unreachable!()
         };
         return mac_cmd::run(command).await;
+    }
+    if matches!(cli.command, Command::Audit { .. }) {
+        let r = remote::endpoint(
+            cli.server.clone(),
+            cli.server_token.clone(),
+            cli.context.as_deref(),
+        )?;
+        let cfg = if r.is_none() { Some(load_cfg(&cli)?) } else { None };
+        let Command::Audit { command } = cli.command else {
+            unreachable!()
+        };
+        let src = match (&r, &cfg) {
+            (Some(r), _) => audit_cmd::Source::Remote(r),
+            (None, Some(c)) => audit_cmd::Source::Local(&c.state_dir),
+            (None, None) => unreachable!("a local read always loads the config"),
+        };
+        return audit_cmd::run(command, src).await;
     }
     if let Command::Image { command } = cli.command {
         return run_image(command, format, cli.state_dir.clone()).await;
@@ -6984,6 +7020,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Cluster { .. }
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
+        | Command::Audit { .. }
         | Command::Events { .. }
         | Command::Context { .. }
         | Command::Usage(_)

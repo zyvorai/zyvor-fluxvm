@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 pub mod apple_placement;
 pub mod apple_rebalance;
+pub mod audit;
 pub mod backup;
 pub mod backup_verify;
 pub mod branch;
@@ -1063,6 +1064,7 @@ impl VmManager {
         let store = Arc::new(Store::load(&cfg.state_dir)?);
         let pools = Arc::new(PoolStore::load(&cfg.state_dir)?);
         events::init(&cfg.state_dir);
+        audit::init(&cfg.state_dir);
         // Best-effort: delegating cgroup controllers needs to write under
         // /sys/fs/cgroup, which isn't available in every environment this
         // constructor runs in (e.g. an unprivileged `cargo test`) — a
