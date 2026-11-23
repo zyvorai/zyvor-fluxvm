@@ -1,0 +1,9 @@
+{
+  "name": "train-1",
+  "backend": "qemu",
+  "image": "/var/lib/fluxvm/images/ubuntu-24.04.qcow2",
+  "vcpus": 8,
+  "memory_mib": 16384,
+  "hugepages": true,
+  "vfio_devices": ["0000:3b:00.0"]
+}

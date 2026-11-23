@@ -1636,7 +1636,7 @@ mod tests {
         let hs = jsonwebtoken::encode(
             &Header::new(Algorithm::HS256),
             &claims("n1"),
-            &EncodingKey::from_secret(b"secret"),
+            &EncodingKey::from_secret(b"secret").unwrap(),
         )
         .unwrap();
         assert!(verify_signature(&hs, &keys(), ISS, CLIENT).is_err());

@@ -114,7 +114,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Contract + example tests
         working-directory: examples/devops
         run: python3 -m unittest test_contract.py test_examples.py -v
@@ -177,7 +177,7 @@ jobs:
           fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install Python deps for static gates
         run: pip install pyyaml
       - name: Shell syntax for build/install helpers
@@ -339,7 +339,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: SDK unit tests
         run: python3 -m unittest discover -s python/tests -v
 

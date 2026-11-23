@@ -1,0 +1,9 @@
+{
+  "schema": "fluxvm-bench/1",
+  "name": "firecracker cold boot, baseline",
+  "host": { "name": "host-a", "cpu_model": "Intel(R) Xeon(R) Gold 6338", "kernel": "6.8.0", "vcpus": 16, "memory_mib": 131072 },
+  "method": { "clock_start": "api_create", "clock_stop": "guest_ready", "page_cache": "warm", "backend": "firecracker", "guest_image": "ubuntu-24.04-minimal", "density_per_vcpu": 1.0 },
+  "series": {
+    "boot_ms": { "unit": "ms", "samples": [118.2, 121.0, 119.5, 123.1, 117.8, 120.4, 122.9, 119.0, 121.7, 120.1, 118.9, 124.0] }
+  }
+}

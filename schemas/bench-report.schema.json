@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FluxVM benchmark report fluxvm-bench/1",
+  "type": "object",
+  "required": [
+    "schema",
+    "series"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fluxvm-bench/1"
+    },
+    "name": {
+      "type": "string"
+    },
+    "host": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "cpu_model": {
+          "type": "string"
+        },
+        "kernel": {
+          "type": "string"
+        },
+        "vcpus": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memory_mib": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "method": {
+      "type": "object",
+      "properties": {
+        "clock_start": {
+          "type": "string"
+        },
+        "clock_stop": {
+          "type": "string"
+        },
+        "page_cache": {
+          "enum": [
+            "warm",
+            "cold"
+          ]
+        },
+        "backend": {
+          "type": "string"
+        },
+        "guest_image": {
+          "type": "string"
+        },
+        "density_per_vcpu": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "series": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string"
+          },
+          "lower_is_better": {
+            "type": "boolean",
+            "default": true
+          },
+          "samples": {
+            "type": "array",
+            "maxItems": 200000,
+            "items": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

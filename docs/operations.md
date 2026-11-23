@@ -1568,6 +1568,8 @@ authorization, inline registry passwords) are never printed. What it checks:
 Rules live in `crates/fluxvm-core/src/config_lint.rs` and each has a test. The shipped `config.example.toml` and
 `configs/` files are linted in CI-run unit tests and must stay free of errors and unknown keys.
 
+Before moving a VM or placing one, see [host-planning.md](host-planning.md) (`host-compat`, `place`, `bench-report`).
+
 ## Checking a VM spec: `fluxctl vm-spec check`
 
 A VM spec (the JSON of `fluxctl create --spec` and `POST /v1/vms`) is parsed leniently too: a misspelled key such as `memory_mb` is dropped and the default

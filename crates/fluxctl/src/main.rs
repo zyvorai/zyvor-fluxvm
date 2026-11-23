@@ -50,6 +50,7 @@ mod fleet_client;
 mod gateway;
 mod guard_cmd;
 mod guest_cmd;
+mod host_plan;
 mod image_mgmt;
 mod image_supply;
 mod infer;
@@ -2016,6 +2017,23 @@ enum Command {
     VmSpec {
         #[command(subcommand)]
         command: vm_spec::VmSpecCommand,
+    },
+    /// Offline check of whether a VM can move between two hosts (`host-compat check SRC DST [--spec VM]`): CPU vendor
+    /// and flags, hypervisor versions, passthrough devices, huge pages, NUMA nodes.
+    HostCompat {
+        #[command(subcommand)]
+        command: host_plan::HostCompatCommand,
+    },
+    /// Offline placement advice for one VM on a saved host graph (`place advise --host H --spec S`): NUMA node,
+    /// whole-core cpuset, huge pages, IOMMU groups.
+    Place {
+        #[command(subcommand)]
+        command: host_plan::PlaceCommand,
+    },
+    /// Validate boot-time and density benchmark reports and compare two of them (`bench-report check|compare`).
+    BenchReport {
+        #[command(subcommand)]
+        command: host_plan::BenchReportCommand,
     },
     #[command(next_help_heading = "Network Policy")]
     /// Per-VM network policy and dataplane introspection
@@ -6368,6 +6386,15 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     if let Command::VmSpec { command } = &cli.command {
         std::process::exit(vm_spec::run(command)?);
     }
+    if let Command::HostCompat { command } = &cli.command {
+        std::process::exit(host_plan::run_host_compat(command)?);
+    }
+    if let Command::Place { command } = &cli.command {
+        std::process::exit(host_plan::run_place(command)?);
+    }
+    if let Command::BenchReport { command } = &cli.command {
+        std::process::exit(host_plan::run_bench(command)?);
+    }
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
     }
@@ -6934,6 +6961,9 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Fix(_)
         | Command::SupportBundle(_)
         | Command::VmSpec { .. }
+        | Command::HostCompat { .. }
+        | Command::Place { .. }
+        | Command::BenchReport { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
@@ -11401,6 +11431,35 @@ mod backlog_tier1_cli_tests {
         assert!(matches!(
             cli(&["vm-spec", "check", "vm.json", "--offline", "--strict"]).command,
             Command::VmSpec { .. }
+        ));
+        assert!(matches!(
+            cli(&[
+                "host-compat",
+                "check",
+                "a.json",
+                "b.json",
+                "--spec",
+                "vm.json",
+                "--strict"
+            ])
+            .command,
+            Command::HostCompat { .. }
+        ));
+        assert!(matches!(
+            cli(&["place", "advise", "--host", "h.json", "--spec", "vm.json"]).command,
+            Command::Place { .. }
+        ));
+        assert!(matches!(
+            cli(&[
+                "bench-report",
+                "compare",
+                "a.json",
+                "b.json",
+                "--threshold-pct",
+                "5"
+            ])
+            .command,
+            Command::BenchReport { .. }
         ));
         assert!(matches!(
             cli(&["cluster", "status", "--json", "-f", "fleet.yaml"]).command,

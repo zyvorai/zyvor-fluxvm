@@ -1,0 +1,17 @@
+{
+  "name": "host-b",
+  "arch": "x86_64",
+  "kernel": "6.8.0-45-generic",
+  "memoryMib": 65536,
+  "freeMemoryMib": 40000,
+  "smt": true,
+  "cpu": {
+    "vendor": "GenuineIntel",
+    "modelName": "Intel(R) Xeon(R) Gold 6248",
+    "family": 6,
+    "model": 85,
+    "stepping": 7,
+    "flags": ["sse4_2", "avx", "avx2", "vmx"]
+  },
+  "backends": { "qemu": "9.1.0", "cloud-hypervisor": "v55.0", "firecracker": "1.10.1" }
+}

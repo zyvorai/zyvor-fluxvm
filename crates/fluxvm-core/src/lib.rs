@@ -3,6 +3,7 @@
 
 pub mod agent_density;
 pub mod backend;
+pub mod bench_report;
 pub mod cheatsheet;
 pub mod config;
 pub mod config_lint;
@@ -13,6 +14,7 @@ pub mod gpu;
 pub mod gpu_health;
 pub mod grants;
 pub mod health;
+pub mod host_compat;
 pub mod instancetype;
 pub mod k3s_backups;
 pub mod keychain;
@@ -26,6 +28,7 @@ pub mod metrics;
 pub mod model;
 pub mod pairing;
 pub mod peer_alias;
+pub mod placement;
 pub mod policy;
 pub mod pressure_admission;
 pub mod process;
