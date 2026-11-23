@@ -2263,6 +2263,15 @@ mod tests {
             "BACKUP_NOT_RESTORABLE",
             "BACKUP_NOT_FOUND",
             "RESTORE_NEEDS_CONFIRM",
+            "APP_IMAGE_PULL",
+            "APP_CRASHING",
+            "APP_OUT_OF_MEMORY",
+            "APP_NOT_READY",
+            "APP_NO_CLUSTER",
+            "APP_CLUSTER_AMBIGUOUS",
+            "APP_PORT_TAKEN",
+            "APP_NAME_TAKEN",
+            "APP_NOT_FOUND",
         ] {
             seen.insert(extra.to_owned());
         }

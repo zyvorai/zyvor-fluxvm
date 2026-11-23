@@ -730,7 +730,9 @@ mod snapshot_tests {
             )
             .unwrap();
         }
-        let removed = prune_auto_checkpoints(ws.path(), 1, &["auto-b"]);
+        let mut removed = prune_auto_checkpoints(ws.path(), 1, &["auto-b"]);
+        // The order the removed tags come back in carries no meaning.
+        removed.sort();
         assert_eq!(removed, vec!["auto-a".to_string(), "auto-c".to_string()]);
         assert!(snapshot_dir(ws.path(), "auto-b").is_dir(), "protected");
         assert!(snapshot_dir(ws.path(), "auto-d").is_dir(), "newest");
