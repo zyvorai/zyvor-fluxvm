@@ -455,7 +455,8 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, Store, VolumeStore) {
         let d = tempfile::tempdir().unwrap();
         let store = Store::open(d.path().join("img")).unwrap();
-        (d, store, VolumeStore::at(d.path().join("vols")))
+        let vols = VolumeStore::at(d.path().join("vols"));
+        (d, store, vols)
     }
 
     fn vm(name: &str, st: &str, disk: Option<&Path>, host: Option<&Path>) -> Value {
