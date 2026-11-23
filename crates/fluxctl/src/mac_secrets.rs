@@ -458,7 +458,7 @@ mod tests {
         let e = Secrets::from_flags(&["id=a,env=NOPE".into()], &|_| None)
             .unwrap_err()
             .to_string();
-        assert!(e.contains("NOPE") && e.contains("export"), "{e}");
+        assert!(e.contains("NOPE") && e.to_lowercase().contains("export"), "{e}");
     }
 
     #[test]
@@ -577,9 +577,11 @@ mod tests {
             Mount::Ssh,
         ];
         block_on(run_mounted(&mut h, &s, "u", "git clone x", &m)).unwrap();
+        // `agent` records only the `run` calls, so index among those, not among every logged step.
         let i = h
             .log
             .iter()
+            .filter(|l| l.starts_with("run "))
             .position(|l| l.contains("git clone x"))
             .unwrap();
         assert!(h.agent[i]);
