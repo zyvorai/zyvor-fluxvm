@@ -708,6 +708,9 @@ pub fn render_drained(st: &FleetState) -> String {
 pub struct RegistryAuth {
     pub user: Secret,
     pub password: Secret,
+    /// Set when the credentials come from the saved `mac login` file: the one-registry login file that goes to the Mac on
+    /// stdin (see `mac_fleet_login`), instead of the two lines of environment values.
+    pub login_file: Option<Secret>,
 }
 
 impl RegistryAuth {
@@ -721,10 +724,14 @@ impl RegistryAuth {
         Some(Self {
             user: Secret::new(u.into_bytes()),
             password: Secret::new(p.into_bytes()),
+            login_file: None,
         })
     }
 
     fn stdin(&self) -> Secret {
+        if let Some(f) = &self.login_file {
+            return f.clone();
+        }
         let mut b = self.user.expose().to_vec();
         b.push(b'\n');
         b.extend_from_slice(self.password.expose());
@@ -805,7 +812,12 @@ pub fn distribute_host(
     let stdin = auth.map(RegistryAuth::stdin);
     let o = match tr.run_timed(
         target,
-        &remote(&pull_script(template, auth.is_some())),
+        &remote(&match auth {
+            Some(a) if a.login_file.is_some() => {
+                crate::mac_fleet_login::pull_script_login_file(template)
+            }
+            _ => pull_script(template, auth.is_some()),
+        }),
         stdin.as_ref(),
         Some(pull_timeout),
     ) {
@@ -1093,7 +1105,8 @@ pub fn templates_cmd(c: TemplatesCommand) -> Result<()> {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
             let t = TemplateRef::parse(&a.template)?;
             t.require_digest()?;
-            let auth = RegistryAuth::from_env();
+            let auth = RegistryAuth::from_env()
+                .or_else(|| crate::mac_fleet_login::from_saved_login(&t.name));
             let tr = transport(&a.conn, inv.as_ref());
             let rs = par_map(&targets, jobs(&a.conn), |h| {
                 distribute_host(
@@ -1423,6 +1436,7 @@ mod tests {
         let auth = RegistryAuth {
             user: Secret::new(b"robot".to_vec()),
             password: Secret::new(b"p4ssw0rd-x".to_vec()),
+            login_file: None,
         };
         let t = TemplateRef::parse(&pinned()).unwrap();
         let r = distribute_host(

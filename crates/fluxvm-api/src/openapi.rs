@@ -417,6 +417,7 @@ fn ops() -> Vec<Op> {
         op("get", "/v1/mac", "The `fluxctl mac` instances on this host (state, image, CPU, memory, ports), their compose projects, the local image store and the registries with a saved login (names only; read-only; admin)", VMS),
         op("post", "/v1/mac/instances/{id}/{action}", "Start, stop, restart, kill or remove (rm) a `fluxctl mac` instance, keeping the labels the CLI keeps (action: start|stop|restart|kill|rm; admin). The answer names the fluxctl command", VMS),
         op("get", "/v1/docker", "The Docker engine `fluxctl docker` runs: reachability, containers and images (read-only; admin)", VMS),
+        op("get", "/v1/mac-fleet", "The Mac fleet as `fluxctl mac-fleet top` last saw it: per Mac the macOS guests against the 2-per-Mac limit, thermal state, free disk and the fluxctl commands to cordon, uncordon and drain (read-only; admin)", HOST),
         op("get", "/v1/docker/context", "The `fluxvm` Docker CLI context: whether it exists, is current and its socket answers, with the command to run next (read-only; admin)", VMS),
         op("get", "/v1/docker/containers/{id}/logs", "Tail of a container's log as text with timestamps (?tail=; admin)", VMS),
         op("get", "/v1/docker/containers/{id}/stats", "One resource reading of a container of the Docker engine: cpu_percent, mem_usage, mem_limit, mem_percent, net_rx, net_tx, pids (admin)", VMS),

@@ -349,10 +349,20 @@ impl Arch {
 }
 
 /// Registry credentials (`Basic` to the token endpoint). Anonymous when absent.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Credentials {
     pub username: String,
     pub password: String,
+}
+
+/// The password never prints: a stray `{:?}`, a log line or a panic message shows `<redacted>` instead.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Bearer tokens by registry, repository and user, shared by every pull in the process so a cached image costs one
@@ -682,6 +692,18 @@ pub(crate) fn parse_bearer_challenge(h: &str) -> Option<Vec<(String, String)>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credentials_debug_never_shows_the_password() {
+        let secret = ["pw", "-", "not", "-", "for", "-", "logs"].concat();
+        let c = Credentials {
+            username: "robot".into(),
+            password: secret.clone(),
+        };
+        let shown = format!("{c:?} {c:#?}");
+        assert!(!shown.contains(&secret), "{shown}");
+        assert!(shown.contains("robot") && shown.contains("<redacted>"));
+    }
+
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};

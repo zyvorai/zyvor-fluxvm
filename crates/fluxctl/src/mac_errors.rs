@@ -855,6 +855,68 @@ pub const CODES: &[MacCode] = &[
         ],
         aliases: &["build-flag"],
         signatures: &["mac_build_flag_invalid"],
+        code: "FLEET_ADD_BLOCKED",
+        status: None,
+        summary: "`fluxctl mac-fleet add` stopped on a Mac before it could take jobs; the fix is printed under the step that failed.",
+        causes: &[
+            "ssh could not connect (key not accepted, host key not trusted, Remote Login off, Mac asleep)",
+            "the preflight found a problem (Intel Mac, old macOS, low disk, no login session)",
+            "the install or the daemon failed, or the Mac cannot list templates yet",
+        ],
+        fixes: &[
+            "do what the `fix:` line under the failed step says, then run `fluxctl mac-fleet add HOST` again (it resumes where it stopped)",
+            "see every check at once: `fluxctl mac-fleet doctor HOST`",
+        ],
+        aliases: &["fleet-add-blocked", "fleet-add"],
+        signatures: &["fleet_add_blocked"],
+    },
+    MacCode {
+        code: "FLEET_DRAIN_TIMEOUT",
+        status: None,
+        summary: "`fluxctl mac-fleet drain --wait` gave up before the Mac emptied (or could not tell). The Mac stays cordoned.",
+        causes: &[
+            "a job or a long-lived guest is still running on the Mac (a macOS guest can run for hours)",
+            "the Mac became unreachable while waiting, so its guest count is unknown",
+        ],
+        fixes: &[
+            "wait longer: `fluxctl mac-fleet drain HOST --wait --wait-timeout 7200`",
+            "see what runs: `fluxctl mac-fleet exec HOST -- fluxctl mac ps`, and stop a guest you do not need: `fluxctl mac stop NAME`",
+            "give the Mac back to the scheduler: `fluxctl mac-fleet uncordon HOST`",
+        ],
+        aliases: &["fleet-drain-timeout", "drain-timeout"],
+        signatures: &["fleet_drain_timeout"],
+    },
+    MacCode {
+        code: "FLEET_HOST_THROTTLED",
+        status: None,
+        summary: "A Mac in the fleet is running slower than normal because macOS is limiting its CPU to stay cool (`fluxctl mac-fleet top`).",
+        causes: &[
+            "poor airflow, a hot room, or a long run of full-load guests",
+            "Low Power Mode, or a Mac mini in a closed rack",
+        ],
+        fixes: &[
+            "check the numbers: `fluxctl mac host status`",
+            "stop sending jobs while it cools: `fluxctl mac-fleet cordon HOST`, then `fluxctl mac-fleet uncordon HOST`",
+            "fix the cooling; jobs that time out on a throttled Mac are slower, not broken",
+        ],
+        aliases: &["fleet-throttled", "host-throttled"],
+        signatures: &["fleet_host_throttled"],
+    },
+    MacCode {
+        code: "FLEET_DISK_LOW",
+        status: None,
+        summary: "A Mac in the fleet has little free disk; each macOS guest clones a template of tens of GB (`fluxctl mac-fleet top`).",
+        causes: &[
+            "old templates and stopped guests pile up",
+            "a template was distributed to a Mac with a small disk",
+        ],
+        fixes: &[
+            "see what uses it: `fluxctl mac-fleet exec HOST -- fluxctl mac system df`",
+            "remove what is unused: `fluxctl mac-fleet exec HOST -- fluxctl mac system prune --all`",
+            "keep jobs away meanwhile: `fluxctl mac-fleet cordon HOST`",
+        ],
+        aliases: &["fleet-disk-low", "host-disk-low"],
+        signatures: &["fleet_disk_low"],
     },
 ];
 
