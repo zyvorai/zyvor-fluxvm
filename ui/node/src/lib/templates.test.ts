@@ -21,8 +21,8 @@ describe('template helpers', () => {
     expect(kindWord('compose')).toBe('Compose');
   });
   it('builds the run path from a safe name', () => {
-    expect(runPath('redis')).toBe('/v1/templates/redis/run');
-    expect(runPath('a/b')).toBe('/v1/templates/a%2Fb/run');
+    expect(runPath('redis')).toBe('/v1/stack-templates/redis/run');
+    expect(runPath('a/b')).toBe('/v1/stack-templates/a%2Fb/run');
   });
 });
 

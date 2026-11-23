@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-// The shape of `GET /v1/templates` and `GET /v1/cheatsheet` (schema 1): the one-command stacks built into fluxctl and its
+// The shape of `GET /v1/stack-templates` and `GET /v1/cheatsheet` (schema 1): the one-command stacks built into fluxctl and its
 // grouped commands. The same data as `fluxctl templates ls --json` and `fluxctl cheatsheet --json`.
 
 export type TemplateKind = 'compose' | 'k3s';
@@ -31,7 +31,7 @@ export interface Cheatsheet {
   groups: CheatGroup[];
 }
 
-export const templatesPath = '/v1/templates';
+export const templatesPath = '/v1/stack-templates';
 export const cheatsheetPath = '/v1/cheatsheet';
 export const runPath = (name: string) => `${templatesPath}/${encodeURIComponent(name)}/run`;
 

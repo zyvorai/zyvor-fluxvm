@@ -3,9 +3,9 @@
 
 //! Studio's Templates gallery and Cheatsheet pages.
 //!
-//! * `GET  /v1/templates` lists the one-command stacks built into `fluxctl` (the same data as `fluxctl templates ls --json`),
-//! * `GET  /v1/templates/{name}` returns one with its file,
-//! * `POST /v1/templates/{name}/run` (admin) starts it by running `fluxctl templates run NAME --yes --json`, found next to the
+//! * `GET  /v1/stack-templates` lists the one-command stacks built into `fluxctl` (the same data as `fluxctl templates ls --json`),
+//! * `GET  /v1/stack-templates/{name}` returns one with its file,
+//! * `POST /v1/stack-templates/{name}/run` (admin) starts it by running `fluxctl templates run NAME --yes --json`, found next to the
 //!   daemon or on PATH, so the Studio and the terminal do exactly the same thing. A Compose template needs a Docker engine
 //!   and a k3s one needs a FluxVM cluster; when they are missing the answer says so in words (422) and changes nothing.
 //! * `GET  /v1/cheatsheet` returns the grouped commands of `fluxctl cheatsheet --json`.
@@ -22,9 +22,9 @@ use std::sync::Arc;
 pub(crate) fn routes() -> axum::Router<Arc<VmManager>> {
     use axum::routing::{get, post};
     axum::Router::new()
-        .route("/v1/templates", get(list))
-        .route("/v1/templates/{name}", get(one))
-        .route("/v1/templates/{name}/run", post(run))
+        .route("/v1/stack-templates", get(list))
+        .route("/v1/stack-templates/{name}", get(one))
+        .route("/v1/stack-templates/{name}/run", post(run))
         .route("/v1/cheatsheet", get(cheatsheet))
 }
 
