@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
+pub mod advisory;
 pub mod builtin;
 pub mod catalog;
 pub mod cloudinit;
@@ -15,7 +16,9 @@ pub mod ova;
 mod qcow2;
 pub mod qga;
 pub mod raw_ext4;
+pub mod sbom;
 pub mod storage;
+pub mod supply;
 pub mod tart;
 pub mod vm_artifact;
 mod vmdk;

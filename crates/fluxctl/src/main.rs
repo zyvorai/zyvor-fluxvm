@@ -49,6 +49,7 @@ mod gateway;
 mod guard_cmd;
 mod guest_cmd;
 mod image_mgmt;
+mod image_supply;
 mod infer;
 mod instancetype_cmd;
 mod kube_addons;
@@ -160,6 +161,7 @@ mod stack;
 mod stack_fleet;
 mod status;
 mod styles;
+mod supply_errors;
 mod support_cmd;
 mod up;
 mod vm_net;
@@ -3903,12 +3905,20 @@ enum ImageCommand {
     /// Registry management: inspect, tags, tag, rm, referrers, attach, index create. See docs/oci-registry-tools.md.
     #[command(flatten)]
     Mgmt(image_mgmt::ImageCommand),
+    /// Supply-chain checks: sbom, sign, verify, scan, policy. See docs/image-supply-chain.md.
+    #[command(flatten)]
+    Supply(image_supply::SupplyCommand),
 }
 
 /// `fluxctl image`: client-side only (registry and local files), so it never needs the daemon.
-async fn run_image(command: ImageCommand, format: output::OutputFormat) -> Result<()> {
+async fn run_image(
+    command: ImageCommand,
+    format: output::OutputFormat,
+    state_dir: Option<PathBuf>,
+) -> Result<()> {
     let out = match command {
         ImageCommand::Mgmt(c) => return image_mgmt::run(c, format).await,
+        ImageCommand::Supply(c) => return image_supply::run(c, format, state_dir).await,
         ImageCommand::Push {
             file,
             reference,
@@ -6458,7 +6468,7 @@ async fn main() -> Result<()> {
         return mac_cmd::run(command).await;
     }
     if let Command::Image { command } = cli.command {
-        return run_image(command, format).await;
+        return run_image(command, format, cli.state_dir.clone()).await;
     }
     if !matches!(cli.command, Command::Serve)
         && let Some(r) = remote::endpoint(
@@ -8470,7 +8480,9 @@ async fn main() -> Result<()> {
         Command::Mac { .. } => anyhow::bail!(
             "`fluxctl mac run/ps/rm/exec` need the daemon: pass --server (or select a context)"
         ),
-        Command::Image { command } => run_image(command, format).await?,
+        Command::Image { command } => {
+            run_image(command, format, Some(cfg.state_dir.clone())).await?
+        }
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image, platform } => {

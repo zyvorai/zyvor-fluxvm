@@ -48,6 +48,7 @@ pub mod live_migration;
 mod migration_relay;
 pub mod node_stats;
 pub mod oci_images;
+mod oci_policy;
 mod oci_pool;
 pub use oci_pool::{WARM_LABEL as OCI_WARM_LABEL, listed as vm_listed};
 pub mod macos_pool;

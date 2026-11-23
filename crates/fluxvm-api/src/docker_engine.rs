@@ -434,6 +434,7 @@ fn map_create_request(
         secret_env: BTreeMap::new(),
         networks: Vec::new(),
         hosts: Vec::new(),
+        policy_override: false,
     };
     let _ = body.labels; // OCI create path sets its own labels; user labels via PATCH later
     let mut req: SandboxCreateRequest = serde_json::from_value(json!({}))

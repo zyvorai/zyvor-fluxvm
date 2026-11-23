@@ -663,6 +663,7 @@ impl VmManager {
         self.enforce_token_quotas(created_by_token, &create).await?;
 
         let image = oci_images::pull(&self.cfg, &oci.image, arch).await?;
+        crate::oci_policy::enforce(&self.cfg, &image, oci.policy_override, created_by_token)?;
         let cfg2 = self.cfg.clone();
         let img2 = image.clone();
         let cache = tokio::task::spawn_blocking(move || ensure_cache(&cfg2, &img2, !rootless))

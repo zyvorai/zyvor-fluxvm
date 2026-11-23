@@ -58,6 +58,9 @@ pub struct RunArgs {
     /// Mount the sandbox's own copy of the image read-write (default: read-only; `/tmp` and `/run` are tmpfs either way).
     #[arg(long)]
     pub writable_root: bool,
+    /// Start the image although the image policy refuses it (`fluxctl image policy`). Logged loudly in the audit log.
+    #[arg(long)]
+    pub policy_override: bool,
     /// Publish a TCP port, `HOST:CONTAINER` (repeatable): the Mac's 127.0.0.1:HOST reaches the container.
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,
@@ -131,6 +134,9 @@ impl RunArgs {
         });
         if !self.command.is_empty() {
             oci["command"] = json!(self.command);
+        }
+        if self.policy_override {
+            oci["policy_override"] = json!(true);
         }
         if let Some(p) = &self.platform {
             oci["platform"] = json!(p);
@@ -683,6 +689,7 @@ mod tests {
             user: None,
             entrypoint: Some("/bin/sh -c".into()),
             writable_root: false,
+            policy_override: false,
             publish: vec!["8080:80".into()],
             volumes: vec!["data:/data".into(), "cfg:/srv/cfg:ro".into()],
             restart: Some("on-failure".into()),
