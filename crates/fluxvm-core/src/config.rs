@@ -71,6 +71,9 @@ pub struct Config {
     /// Settings of the `fluxctl` command line itself (`fluxctl config set cli.upgrade_url ...`). The daemon ignores them.
     #[serde(default)]
     pub cli: CliConfig,
+    /// Per-unit prices for `fluxctl usage` and Studio's Usage page. All zero (the default) means no prices: units only.
+    #[serde(default)]
+    pub usage: UsageConfig,
     pub jailer: JailerConfig,
     pub catalog: CatalogConfig,
     pub storage: StorageConfig,
@@ -285,6 +288,61 @@ pub struct CliConfig {
     pub completion_offered: bool,
 }
 
+/// Prices for the usage report (`fluxctl config set usage.cpu_hour 0.04`). A rate of 0 (or less) is "not set"; with all of
+/// them unset the report shows units only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UsageConfig {
+    /// Shown next to costs; no conversion is done.
+    pub currency: String,
+    /// Per CPU-hour actually used.
+    pub cpu_hour: f64,
+    /// Per GiB of memory given to a running VM, per hour.
+    pub memory_gib_hour: f64,
+    /// Per GiB read or written on the VM disk.
+    pub disk_gib: f64,
+    /// Per GiB sent or received over the network.
+    pub network_gib: f64,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            currency: "USD".into(),
+            cpu_hour: 0.0,
+            memory_gib_hour: 0.0,
+            disk_gib: 0.0,
+            network_gib: 0.0,
+        }
+    }
+}
+
+impl UsageConfig {
+    /// A usable rate: positive and finite, else 0.
+    pub fn rate(&self, r: f64) -> f64 {
+        if r.is_finite() && r > 0.0 { r } else { 0.0 }
+    }
+
+    pub fn any_set(&self) -> bool {
+        [
+            self.cpu_hour,
+            self.memory_gib_hour,
+            self.disk_gib,
+            self.network_gib,
+        ]
+        .iter()
+        .any(|r| self.rate(*r) > 0.0)
+    }
+
+    pub fn currency_or_default(&self) -> String {
+        if self.currency.trim().is_empty() {
+            "USD".into()
+        } else {
+            self.currency.trim().to_owned()
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -314,6 +372,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             tls: TlsConfig::default(),
             cli: CliConfig::default(),
+            usage: UsageConfig::default(),
             jailer: JailerConfig::default(),
             catalog: CatalogConfig::default(),
             storage: StorageConfig::default(),

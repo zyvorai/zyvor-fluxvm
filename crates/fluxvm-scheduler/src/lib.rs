@@ -65,6 +65,7 @@ pub mod speculate;
 pub mod storage_report;
 pub mod supervisor;
 pub mod templates;
+pub mod usage;
 pub mod vm_restore;
 pub mod vz_devices;
 mod vz_disks;

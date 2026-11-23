@@ -41,5 +41,6 @@ pub mod support_bundle;
 pub mod support_collect;
 pub mod topology;
 pub mod up;
+pub mod usage;
 pub mod virtiofs;
 pub mod vmm_seccomp;
