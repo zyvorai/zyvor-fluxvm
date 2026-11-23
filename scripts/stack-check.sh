@@ -41,7 +41,7 @@ fi
 
 echo "2. Login session"
 if command -v "$FLUXCTL" >/dev/null 2>&1; then
-    DOC="$("$FLUXCTL" doctor 2>&1 || true)"
+    DOC="$("$FLUXCTL" doctor --classic 2>&1 || true)"
     if grep -q "login session" <<<"$DOC" && grep -E "^warn +login session" <<<"$DOC" >/dev/null; then
         bad session "locked or nobody logged in: a sleeping VM cannot be restored" "unlock the Mac, or use a dedicated auto-login user with the screen lock off (deploy/launchd-notes.md)"
     elif grep -E "^ok +login session" <<<"$DOC" >/dev/null; then ok session "a user is logged in and the screen is unlocked"

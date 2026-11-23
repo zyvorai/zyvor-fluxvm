@@ -190,7 +190,7 @@ if [ "$DO_S3" = 1 ]; then
         echo "--s3 needs S3_CREDENTIALS_FILE (mode 600) or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY" >&2; exit 2
     fi
 fi
-DOCTOR="$("$FLUXCTL" doctor 2>&1)" || { echo "fluxctl doctor failed:"; echo "$DOCTOR"; exit 2; }
+DOCTOR="$("$FLUXCTL" doctor --classic 2>&1)" || { echo "fluxctl doctor failed:"; echo "$DOCTOR"; exit 2; }
 echo "$DOCTOR" | grep -q "^ok    daemon" || { echo "the FluxVM daemon is not healthy:"; echo "$DOCTOR"; exit 2; }
 if echo "$DOCTOR" | grep -qE "^warn  login session"; then echo "the login session is locked: unlock the Mac first"; exit 2; fi
 if KA status "$NAME" >/dev/null 2>&1; then echo "a cluster named $NAME already exists; set FLUXVM_E2E_NAME" >&2; exit 2; fi

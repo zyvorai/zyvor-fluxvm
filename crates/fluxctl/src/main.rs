@@ -172,6 +172,7 @@ mod recipes;
 mod remote;
 mod run;
 mod sandbox_run;
+mod setup_doctor_cmd;
 mod stable_exe;
 mod stack;
 mod stack_fleet;
@@ -1162,8 +1163,10 @@ enum Command {
         command: config_check::ConfigCommand,
     },
     #[command(next_help_heading = "Basic Commands")]
-    /// Check that this host is ready: daemon, binaries, KVM or the vz runner entitlement, disk,
-    /// and client entries left pointing at a removed Homebrew path. Read-only; exits 1 on a failure.
+    /// Check your whole setup and fix what is safe: this machine (virtualization, disk, heat, login session), the daemon,
+    /// the docker context, registry logins, Kubernetes, a Mac fleet (`-f`), the gateway add-on, and offer a support bundle
+    /// when something is red. One green/yellow/red line each, with the exact next command. `--fix` applies the safe fixes;
+    /// `--json` is for Studio. Exits 1 when something is red.
     Doctor {
         /// Check only this machine's prerequisites and skip the daemon check, for a host before FluxVM is installed
         /// (what `scripts/preflight.sh` runs).
@@ -1174,6 +1177,8 @@ enum Command {
         /// is changed; without this flag doctor never writes.
         #[arg(long)]
         fix: bool,
+        #[command(flatten)]
+        more: setup_doctor_cmd::More,
     },
     /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
     Healthz,
@@ -6654,7 +6659,33 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     }
 
     // `doctor` only reads: it must work when the daemon is down and without a VmManager.
-    if let Command::Doctor { host_only, fix } = cli.command {
+    // The whole-setup report (the default) reads this machine like `cluster status`; `--classic` and `--host-only` keep
+    // the older per-check report below.
+    if let Command::Doctor {
+        host_only,
+        fix,
+        more,
+    } = &cli.command
+        && !host_only
+        && !more.classic
+    {
+        let env = cluster_cmd::Env {
+            listen: cfg.listen.clone(),
+            state_dir: cfg.state_dir.clone(),
+            remote: remote::Remote::new(&cfg.listen, cli.server_token.clone()),
+        };
+        let mut more = more.clone();
+        more.json = more.json || (output_explicit && cli.output == output::OutputFormat::Json);
+        let code = setup_doctor_cmd::run(&more, *fix, &env, &cfg).await?;
+        std::process::exit(code);
+    }
+    if let Command::Doctor {
+        host_only,
+        fix,
+        more,
+    } = cli.command
+    {
+        let json = more.json;
         let mut fixed = Vec::new();
         if fix {
             let exe = stable_exe::stable_exe().context("locating fluxctl")?;
@@ -6663,7 +6694,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         // After a repair the report is taken again, so it shows the state the user is left with.
         let checks = doctor::gather(&cfg.listen, &cfg.state_dir, host_only).await;
         // Readable text unless JSON was asked for (`-o json` or FLUXCTL_OUTPUT); `-o` defaults to json.
-        if output_explicit && cli.output == output::OutputFormat::Json {
+        if json || (output_explicit && cli.output == output::OutputFormat::Json) {
             let mut report = doctor::to_json(&checks);
             report["fixed"] = serde_json::Value::Array(fixed);
             println!("{}", serde_json::to_string_pretty(&report)?);

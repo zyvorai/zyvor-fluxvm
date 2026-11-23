@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useState } from 'react';
-import { Copy, Download, Rocket } from 'lucide-react';
+import { Copy, Download, ListChecks, Rocket } from 'lucide-react';
 import { Button, Card, EmptyState, Hero, Pill, Reveal, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
@@ -11,6 +11,7 @@ import { BackupsCard } from './Backups';
 import { useAct } from '../lib/act';
 import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle } from '../lib/bundle';
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
+import { checkTone, checkWord, needsAttention, notChecked, type SetupReport } from '../lib/doctor';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
 function ItemRow({ i, notify }: { i: HealthItem; notify: Notify }) {
@@ -82,6 +83,50 @@ function Machine({ m, notify }: { m: MachineHealth; notify: Notify }) {
   );
 }
 
+/** "Check my setup": the whole-setup list of `fluxctl doctor`, one green/yellow/red line each, run when the button is pressed. */
+function CheckMySetup({ notify }: { notify: Notify }) {
+  const { busy, run } = useAct(notify);
+  const [r, setR] = useState<SetupReport | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const check = () => void run('doctor', async () => {
+    try {
+      setR(await api.get<SetupReport>('/v1/doctor'));
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  });
+  const bundle = () => void run('bundle2', async () => {
+    const d = await downloadSupportBundle();
+    notify(bundleSummary(d.name, d.bytes, d.skipped));
+  });
+  return (
+    <Card title="Check my setup" action={<Button size="sm" onClick={check} busy={busy === 'doctor'}><ListChecks size={14} /> {r ? 'Check again' : 'Check my setup'}</Button>}>
+      {!r && !err ? <p className="fx-muted">One check of this machine, the service, Kubernetes and the rest, in plain English. It changes nothing. For the full check (Docker, registry logins, a Mac fleet), run <code className="fx-mono">fluxctl doctor</code> in a terminal; <code className="fx-mono">fluxctl doctor --fix</code> applies the safe fixes.</p> : null}
+      {err ? <p className="fx-muted">Could not run the check: {err}. An older FluxVM daemon does not have it; run <code className="fx-mono">fluxctl doctor</code> on the machine instead.</p> : null}
+      {r ? (
+        <>
+          <p><Pill tone={checkTone({ light: r.light, checked: true })}>{checkWord({ light: r.light, checked: true })}</Pill> {r.headline}</p>
+          <ul className="fx-feed">
+            {r.checks.filter((c) => c.checked).map((c) => (
+              <li key={c.area}>
+                <Pill tone={checkTone(c)}>{checkWord(c)}</Pill>
+                <span>
+                  {c.title}: {c.message}
+                  {c.next && c.light !== 'ok' ? <div className="fx-muted">Next: {c.next}</div> : null}
+                </span>
+                {c.command && c.light !== 'ok' ? <CopyCmd notify={notify} cmd={c.command} /> : null}
+              </li>
+            ))}
+          </ul>
+          {notChecked(r).map((n) => <p key={n.command} className="fx-muted">Not checked here: {n.titles.join(', ')}. Run <code className="fx-mono">{n.command}</code> in a terminal.</p>)}
+          {r.offer_support_bundle ? <p><Button size="sm" variant="ghost" onClick={bundle} busy={busy === 'bundle2'}><Download size={14} /> Download support bundle</Button> <span className="fx-muted">Something is red; send this file to whoever helps you. {needsAttention(r).length} line(s) need attention.</span></p> : null}
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
 /** Download the support bundle: versions, health, recent logs, instances, config and host facts with secrets removed. */
 function SupportBundle({ notify }: { notify: Notify }) {
   const { busy, run } = useAct(notify);
@@ -110,6 +155,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <>
         <Hero eyebrow="Home" title="Cluster health is not available" lede="This node did not answer the health request." />
         <EmptyState title="Could not read the health report" body={`${h.error?.message ?? 'No answer'}. An older FluxVM daemon does not have this page's data; run fluxctl cluster status on the machine instead.`} action={<Button onClick={() => void copy('fluxctl cluster status')}><Copy size={14} /> Copy as fluxctl</Button>} />
+        <div className="fx-section"><CheckMySetup notify={notify} /></div>
         <div className="fx-section"><SupportBundle notify={notify} /></div>
       </>
     );
@@ -136,6 +182,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       </div>
       <MacHomeCard notify={notify} />
       <BackupsCard notify={notify} />
+      <div className="fx-section"><CheckMySetup notify={notify} /></div>
       <div className="fx-section"><SupportBundle notify={notify} /></div>
       <p className="fx-muted fx-section">This page shows the node you are connected to. For every Mac of a fleet, run <code className="fx-mono">fluxctl cluster status -f inventory.yaml</code>.</p>
     </>

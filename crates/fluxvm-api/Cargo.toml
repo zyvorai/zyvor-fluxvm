@@ -10,6 +10,7 @@ description = "REST API for Zyvor FluxVM"
 
 [dependencies]
 fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-apple = { path = "../fluxvm-apple" }
 fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 fluxvm-image = { path = "../fluxvm-image" }
 fluxvm-intelligence = { path = "../fluxvm-intelligence" }
