@@ -552,6 +552,52 @@ pub const CODES: &[MacCode] = &[
         aliases: &["kill-unavailable"],
         signatures: &["mac_kill_unavailable"],
     },
+    MacCode {
+        code: "MAC_ARCHIVE_CHECKSUM",
+        status: None,
+        summary: "An image archive does not match its `.sha256` file, so `mac load` / `mac import` refused to unpack it.",
+        causes: &[
+            "the copy was cut short or damaged (a full disk, an interrupted transfer)",
+            "the archive was changed after `mac save` / `mac export` wrote the checksum",
+            "the `.sha256` file belongs to a different archive",
+        ],
+        fixes: &[
+            "copy the archive again and compare: `shasum -a 256 FILE` should print the digest in `FILE.sha256`",
+            "make a fresh one on the source Mac: `fluxctl mac save IMAGE --output FILE`",
+            "if you made the change on purpose, delete `FILE.sha256` and load again (the archive is then not checked)",
+        ],
+        aliases: &["archive-checksum", "bad-checksum"],
+        signatures: &["does not match its checksum file"],
+    },
+    MacCode {
+        code: "MAC_EXPORT_RUNNING",
+        status: None,
+        summary: "`mac export` needs a stopped instance: the disk of a running one is changing and would not be consistent.",
+        causes: &["the instance is running, starting or paused"],
+        fixes: &[
+            "stop it first: `fluxctl mac stop NAME`",
+            "then export: `fluxctl mac export NAME --output NAME.tar`",
+        ],
+        aliases: &["export-running"],
+        signatures: &["cannot be exported"],
+    },
+    MacCode {
+        code: "MAC_MANIFEST_UNREADABLE",
+        status: None,
+        summary: "`mac manifest inspect` could not read the image's manifest from the registry.",
+        causes: &[
+            "the reference is misspelled, or the tag does not exist",
+            "the registry needs a login you have not saved (private image)",
+            "the registry is unreachable from this Mac (network, proxy, TLS)",
+        ],
+        fixes: &[
+            "check the name and tag: `fluxctl mac search REGISTRY TERM --tags`",
+            "log in: `fluxctl mac login REGISTRY -u USER --password-stdin`",
+            "test reachability: `curl -I https://REGISTRY/v2/`",
+        ],
+        aliases: &["manifest-unreadable", "manifest-inspect"],
+        signatures: &["could not read the manifest of"],
+    },
 ];
 
 fn norm(s: &str) -> String {

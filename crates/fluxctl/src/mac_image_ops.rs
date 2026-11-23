@@ -449,11 +449,13 @@ pub fn save(store: &Store, reference: &str, out: &Path) -> Result<()> {
         ];
         args.extend(files.iter().map(|f| std::ffi::OsStr::new(*f)));
         args.extend(["-C".as_ref(), scratch.as_os_str(), MANIFEST.as_ref()]);
-        run_tar(&args).map(|_| ())
+        run_tar(&args)?;
+        crate::mac_imgx::write_sidecar(out).map(|_| ())
     })();
     std::fs::remove_dir_all(&scratch).ok();
     if result.is_err() {
         std::fs::remove_file(out).ok();
+        std::fs::remove_file(crate::mac_imgx::sidecar_path(out)).ok();
     }
     result
 }
@@ -461,6 +463,7 @@ pub fn save(store: &Store, reference: &str, out: &Path) -> Result<()> {
 /// `mac load -i FILE [REF]`: unpack a `save` archive into the store. Returns the reference it was stored under.
 pub fn load(store: &Store, archive: &Path, as_ref: Option<&str>) -> Result<String> {
     ensure!(archive.is_file(), "{} is not a file", archive.display());
+    crate::mac_imgx::verify_sidecar(archive)?;
     let listing = run_tar(&["-tf".as_ref(), archive.as_os_str()])?;
     let entries: Vec<String> = String::from_utf8_lossy(&listing.stdout)
         .lines()

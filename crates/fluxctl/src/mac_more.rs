@@ -187,10 +187,22 @@ compare it with.")]
     },
     /// CPU, memory and disk I/O of instances (all running ones when no name is given). One reading, not a live stream; CPU is the
     /// average over the VM's whole life.
+    #[command(after_help = "Examples:
+  fluxctl mac stats --no-stream
+  fluxctl mac stats --format 'table {{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}'
+
+--no-stream is accepted for Docker scripts: stats is always one reading. --format uses the `mac inspect --format` template subset;
+fields: Name, CPUPerc, CPUPercent, MemUsage, MemBytes, DiskRead, DiskWrite, DiskReadBytes, DiskWriteBytes.")]
     Stats {
         names: Vec<String>,
         #[arg(long)]
         json: bool,
+        /// Docker's flag for one reading instead of a live stream; stats here is always one reading.
+        #[arg(long)]
+        no_stream: bool,
+        /// Print each instance with a template (or `table ...`) instead of the default table.
+        #[arg(long, value_name = "TEMPLATE", conflicts_with = "json")]
+        format: Option<String>,
     },
     /// Stop instances (the disk is kept; `mac start` boots them again).
     Stop {
@@ -888,7 +900,12 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                 .context("the instance has no address yet")?;
             crate::mac_cp::copy(&t, &user, ip).await?;
         }
-        MacMore::Stats { names, json } => {
+        MacMore::Stats {
+            names,
+            json,
+            no_stream: _,
+            format,
+        } => {
             let vms = if names.is_empty() {
                 instances(r)
                     .await?
@@ -904,6 +921,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
             };
             let mut table = view::stats_header();
             let mut raw = Vec::new();
+            let mut docs = Vec::new();
             for vm in &vms {
                 let m = r
                     .call(Method::GET, &format!("/v1/vms/{}/stats", id_of(vm)?), None)
@@ -911,8 +929,11 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                     .map_err(|e| explain(e, &format!("read stats of {}", name_of(vm))))?;
                 table.push_str(&view::stats_row(name_of(vm), &m));
                 raw.push(json!({"name": name_of(vm), "stats": m}));
+                docs.push(crate::mac_imgx::stats_doc(name_of(vm), &m));
             }
-            if json {
+            if let Some(f) = format {
+                print!("{}", crate::mac_imgx::render_stats(&docs, &f)?);
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&raw)?);
             } else if vms.is_empty() {
                 println!("no running instances");
