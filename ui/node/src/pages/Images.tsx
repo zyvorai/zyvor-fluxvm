@@ -7,9 +7,10 @@ import { Button, Card, EmptyState, Field, Hero, Pill, Sheet, Skeleton, Tabs, ago
 import type { Notify } from '../App';
 import { useAct } from '../lib/act';
 import { rowsOf } from '../lib/generic';
+import { ImageSecurityTab } from './ImageSecurity';
 import { fluxctlFor, isSource, nameProblem, sizeProblem } from '../lib/images';
 
-type Tab = 'catalog' | 'oci' | 'templates' | 'pools';
+type Tab = 'catalog' | 'oci' | 'security' | 'templates' | 'pools';
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -284,9 +285,9 @@ export function ImagesPage({ notify, macos }: { notify: Notify; macos: boolean }
   return (
     <>
       <Hero eyebrow="Images" title="Start from something" accent="you trust." lede="Checksum-pinned base images, reusable machine templates and warm pools that make a new machine instant." />
-      <Tabs<Tab> value={tab} onChange={setTab} tabs={[{ value: 'catalog', label: 'Catalog' }, { value: 'templates', label: 'Templates' }, { value: 'pools', label: 'Pools' }, { value: 'oci', label: 'OCI images' }]} />
+      <Tabs<Tab> value={tab} onChange={setTab} tabs={[{ value: 'catalog', label: 'Catalog' }, { value: 'templates', label: 'Templates' }, { value: 'pools', label: 'Pools' }, { value: 'oci', label: 'OCI images' }, { value: 'security', label: 'Security' }]} />
       <div className="fx-section">
-        {tab === 'catalog' ? <CatalogTab notify={notify} /> : tab === 'templates' ? <TemplatesTab notify={notify} /> : tab === 'pools' ? <PoolsTab notify={notify} /> : <OciTab notify={notify} macos={macos} />}
+        {tab === 'catalog' ? <CatalogTab notify={notify} /> : tab === 'templates' ? <TemplatesTab notify={notify} /> : tab === 'pools' ? <PoolsTab notify={notify} /> : tab === 'security' ? <ImageSecurityTab notify={notify} /> : <OciTab notify={notify} macos={macos} />}
       </div>
     </>
   );

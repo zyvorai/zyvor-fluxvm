@@ -123,6 +123,8 @@ POST   /v1/images/catalog/clean
 GET    /v1/oci/images                    # cached OCI rootfs images for vz sandboxes; see oci-sandboxes.md
 POST   /v1/oci/images                    # {"image": "alpine:3.22", "platform"?: "linux/amd64"}; admin; pull and build the rootfs
 DELETE /v1/oci/images/{digest|reference} # admin
+GET    /v1/oci/security                  # verdict per cached image (signature, findings, policy), advisory age, recent overrides; see image-supply-chain.md
+GET    /v1/oci/images/{digest|reference}/sbom?format=spdx|cyclonedx   # SBOM JSON read from the layers
 POST   /v1/oci/prune                     # admin; drop images no sandbox was started from, and unused blobs
 GET    /v1/vznets                        # private vz networks (apple.networks): subnet, members, switch_running; see macos.md
 POST   /v1/pools

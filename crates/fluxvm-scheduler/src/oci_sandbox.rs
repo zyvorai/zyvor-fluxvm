@@ -100,6 +100,10 @@ pub struct OciSandboxSpec {
     /// Extra `/etc/hosts` entries, e.g. the private-network addresses of the other services in a stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<init::HostEntry>,
+    /// Start the image although the image policy (`<state_dir>/oci/policy.toml`) refuses it. Loud: logged on the audit
+    /// target and in `policy-overrides.log`. See docs/image-supply-chain.md.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub policy_override: bool,
 }
 
 /// Most secrets per sandbox, and their combined size.
@@ -569,6 +573,7 @@ impl VmManager {
             );
         }
         let image = oci_images::pull(&self.cfg, &oci.image, arch).await?;
+        crate::oci_policy::enforce(&self.cfg, &image, oci.policy_override, created_by_token)?;
         let process = init::resolve_process(&image_process(&image), &oci.overrides())?;
         let rootfs = oci_images::ensure_rootfs(&self.cfg, &image).await?;
 

@@ -39,6 +39,7 @@ pub mod docker_engine;
 pub mod event_sinks;
 mod grants;
 mod idempotency;
+mod image_security;
 mod instancetypes_api;
 mod mfa;
 pub mod mtls;
@@ -121,6 +122,13 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
         {
             return Self {
                 status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
+        // The image policy refused the image (`fluxctl explain IMAGE_POLICY_UNSIGNED`).
+        if e.downcast_ref::<fluxvm_image::supply::PolicyBlocked>().is_some() {
+            return Self {
+                status: StatusCode::FORBIDDEN,
                 message: format!("{:#}", e),
             };
         }
@@ -1038,6 +1046,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(mac_view::routes())
         .merge(cluster_health::routes())
         .merge(support_bundle::routes())
+        .merge(image_security::routes())
         .merge(up_plan::routes())
         .merge(vz_api::routes())
         .merge(volumes_api::routes())
