@@ -70,9 +70,9 @@ pub(crate) fn report(vms: &[Value], store: Option<&Path>, volumes: Option<&Path>
     let mut stopped = Vec::new();
     let mut inst_bytes = 0u64;
     for v in &instances {
-        let b = v["disk"].as_str().map_or(0, |d| {
-            std::fs::metadata(d).map_or(0, |m| m.blocks() * 512)
-        });
+        let b = v["disk"]
+            .as_str()
+            .map_or(0, |d| std::fs::metadata(d).map_or(0, |m| m.blocks() * 512));
         inst_bytes += b;
         if matches!(v["status"].as_str(), Some("stopped") | Some("failed")) {
             stopped.push(json!({"name": v["name"], "bytes": b}));
@@ -110,7 +110,10 @@ pub(crate) fn report(vms: &[Value], store: Option<&Path>, volumes: Option<&Path>
         .filter(|v| v["used_by"].as_array().is_some_and(|a| a.is_empty()))
         .map(|v| v["bytes"].as_u64().unwrap_or(0))
         .sum();
-    let stopped_bytes: u64 = stopped.iter().map(|s| s["bytes"].as_u64().unwrap_or(0)).sum();
+    let stopped_bytes: u64 = stopped
+        .iter()
+        .map(|s| s["bytes"].as_u64().unwrap_or(0))
+        .sum();
     let images_bytes = store.map_or(0, tree_alloc);
     let probe = store.or(volumes);
     let disk = probe.and_then(disk_of);
@@ -183,14 +186,25 @@ mod tests {
         assert_eq!(v[0]["used_by"][0], "live");
         assert!(v[1]["used_by"].as_array().unwrap().is_empty());
         let a = r["prune_preview"]["would_free_bytes"].as_u64().unwrap();
-        let b = r["prune_preview"]["with_volumes_would_free_bytes"].as_u64().unwrap();
+        let b = r["prune_preview"]["with_volumes_would_free_bytes"]
+            .as_u64()
+            .unwrap();
         assert!(a >= 50_000 && b >= a + 30_000);
-        assert!(r["fluxctl"]["prune_preview"].as_str().unwrap().contains("--dry-run"));
+        assert!(
+            r["fluxctl"]["prune_preview"]
+                .as_str()
+                .unwrap()
+                .contains("--dry-run")
+        );
     }
 
     #[test]
     fn a_missing_folder_is_an_empty_report_not_an_error() {
-        let r = report(&[], Some(Path::new("/nonexistent/x")), Some(Path::new("/nonexistent/y")));
+        let r = report(
+            &[],
+            Some(Path::new("/nonexistent/x")),
+            Some(Path::new("/nonexistent/y")),
+        );
         assert_eq!(r["volumes"].as_array().unwrap().len(), 0);
         assert_eq!(r["images_bytes"], 0);
     }
