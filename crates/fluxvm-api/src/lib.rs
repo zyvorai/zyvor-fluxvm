@@ -63,6 +63,7 @@ mod kube_gateways;
 mod kube_metrics;
 mod kube_pod;
 mod kube_workloads;
+mod mac_view;
 mod macos_pool_api;
 mod speculate_api;
 mod studio;
@@ -1034,6 +1035,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             )),
         )
         .merge(macos_pool_api::routes())
+        .merge(mac_view::routes())
         .merge(cluster_health::routes())
         .merge(support_bundle::routes())
         .merge(up_plan::routes())

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Archive, Bot, Boxes, Container, Cpu, Disc3, GitBranch, HardDrive, Home, LayoutDashboard, LogOut, Moon, Network, Package, ScrollText, Server } from 'lucide-react';
+import { Archive, Bot, Boxes, Container, Cpu, Disc3, GitBranch, HardDrive, Home, LayoutDashboard, LogOut, Moon, Network, Laptop, Package, ScrollText, Server } from 'lucide-react';
 import {
   CommandPalette, GlobalNav, LoginCard, Toasts, api, navigate, onUnauthorized, setToken, toggleTheme,
   useCapabilities, useRoute, type Command, type NavGroup, type ToastItem, type Vm,
@@ -21,11 +21,12 @@ import { AccessPage } from './pages/Access';
 import { BranchesPage } from './pages/Branches';
 import { VolumesPage } from './pages/Volumes';
 import { DockerPage } from './pages/Docker';
+import { MacPage } from './pages/Mac';
 import { KubernetesPage } from './pages/Kubernetes';
 
 export type Notify = (text: string, tone?: 'ok' | 'bad') => void;
 
-const icons: Record<string, ReactNode> = { '/': <Home size={16} />, '/overview': <LayoutDashboard size={16} />, '/machines': <Server size={16} />, '/network': <Network size={16} />, '/backups': <Archive size={16} />, '/branches': <GitBranch size={16} />, '/volumes': <HardDrive size={16} />, '/kubernetes': <Container size={16} />, '/docker': <Package size={16} />, '/sandboxes': <Boxes size={16} />, '/agents': <Bot size={16} />, '/images': <Disc3 size={16} />, '/host': <Cpu size={16} />, '/access': <ScrollText size={16} /> };
+const icons: Record<string, ReactNode> = { '/': <Home size={16} />, '/overview': <LayoutDashboard size={16} />, '/machines': <Server size={16} />, '/network': <Network size={16} />, '/backups': <Archive size={16} />, '/branches': <GitBranch size={16} />, '/volumes': <HardDrive size={16} />, '/kubernetes': <Container size={16} />, '/docker': <Package size={16} />, '/mac': <Laptop size={16} />, '/sandboxes': <Boxes size={16} />, '/agents': <Bot size={16} />, '/images': <Disc3 size={16} />, '/host': <Cpu size={16} />, '/access': <ScrollText size={16} /> };
 
 export function App() {
   const route = useRoute();
@@ -83,7 +84,7 @@ export function App() {
 
   const detailId = route.segs[0] === 'machines' && route.segs[1] ? route.segs[1] : '';
   const subId = route.segs[1] ?? '';
-  const page = detailId ? <MachineDetail id={detailId} notify={notify} /> : route.segs[0] === 'sandboxes' && subId ? <SandboxDetail id={subId} notify={notify} /> : route.segs[0] === 'agents' && subId ? <AgentDetail id={subId} notify={notify} /> : route.path === '/sandboxes' ? <SandboxesPage notify={notify} /> : route.path === '/agents' ? <AgentsPage notify={notify} /> : route.path === '/' ? <HomePage notify={notify} /> : route.path === '/overview' ? <Overview vms={vms} setVms={setVms} /> : route.path === '/network' ? <NetworkPage notify={notify} /> : route.path === '/backups' ? <BackupsPage notify={notify} /> : route.path === '/branches' ? <BranchesPage notify={notify} /> : route.path === '/volumes' ? <VolumesPage notify={notify} /> : route.path === '/kubernetes' ? <KubernetesPage notify={notify} /> : route.path === '/docker' ? <DockerPage notify={notify} /> : route.path === '/images' ? <ImagesPage notify={notify} macos={caps.os === 'macos'} /> : route.path === '/host' ? <HostPage notify={notify} os={caps.os} /> : route.path === '/access' ? <AccessPage notify={notify} /> : route.path.startsWith('/machines') ? <Machines vms={vms} setVms={setVms} notify={notify} q={route.query.get('q') ?? ''} /> : <HomePage notify={notify} />;
+  const page = detailId ? <MachineDetail id={detailId} notify={notify} /> : route.segs[0] === 'sandboxes' && subId ? <SandboxDetail id={subId} notify={notify} /> : route.segs[0] === 'agents' && subId ? <AgentDetail id={subId} notify={notify} /> : route.path === '/sandboxes' ? <SandboxesPage notify={notify} /> : route.path === '/agents' ? <AgentsPage notify={notify} /> : route.path === '/' ? <HomePage notify={notify} /> : route.path === '/overview' ? <Overview vms={vms} setVms={setVms} /> : route.path === '/network' ? <NetworkPage notify={notify} /> : route.path === '/backups' ? <BackupsPage notify={notify} /> : route.path === '/branches' ? <BranchesPage notify={notify} /> : route.path === '/volumes' ? <VolumesPage notify={notify} /> : route.path === '/kubernetes' ? <KubernetesPage notify={notify} /> : route.path === '/docker' ? <DockerPage notify={notify} /> : route.path === '/mac' ? <MacPage notify={notify} /> : route.path === '/images' ? <ImagesPage notify={notify} macos={caps.os === 'macos'} /> : route.path === '/host' ? <HostPage notify={notify} os={caps.os} /> : route.path === '/access' ? <AccessPage notify={notify} /> : route.path.startsWith('/machines') ? <Machines vms={vms} setVms={setVms} notify={notify} q={route.query.get('q') ?? ''} /> : <HomePage notify={notify} />;
   return (
     <>
       <GlobalNav

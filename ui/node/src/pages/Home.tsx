@@ -6,6 +6,7 @@ import { Copy, Download, Rocket } from 'lucide-react';
 import { Button, Card, EmptyState, Hero, Pill, Reveal, Skeleton, api, usePoll } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
+import { MacHomeCard } from './Mac';
 import { useAct } from '../lib/act';
 import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle } from '../lib/bundle';
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
@@ -132,6 +133,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <div className="fx-grid cols-2 fx-section">
         {d.machines.map((m, n) => <Reveal key={m.name} delay={n * 60}><Machine m={m} notify={notify} /></Reveal>)}
       </div>
+      <MacHomeCard notify={notify} />
       <div className="fx-section"><SupportBundle notify={notify} /></div>
       <p className="fx-muted fx-section">This page shows the node you are connected to. For every Mac of a fleet, run <code className="fx-mono">fluxctl cluster status -f inventory.yaml</code>.</p>
     </>
