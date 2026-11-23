@@ -11,6 +11,7 @@ Every feature area and every document, in one place.
 | A Mac with Apple silicon | [install-macos.md](install-macos.md) (Homebrew) or [install.md](install.md) (`curl \| bash`, no sudo), then [macos.md](macos.md) |
 | A Linux x86_64 host with KVM | [install.md](install.md), then [getting-started.md](getting-started.md) |
 | FluxVM just installed and you want a working cluster with one command | `fluxctl up` ([up.md](up.md)) |
+| Back up, verify and restore the k3s cluster | `fluxctl kube backup`, `kube restore` ([kube-backups.md](kube-backups.md)) |
 | A Kubernetes cluster | [kubernetes-operator.md](kubernetes-operator.md) |
 | Something that is not working | [troubleshooting.md](troubleshooting.md), or `fluxctl cluster status` and `fluxctl fix` ([cluster-home.md](cluster-home.md)) |
 | Need help from a maintainer | `fluxctl support-bundle` (secrets removed, works with the daemon down), or Studio Home, [support-bundle.md](support-bundle.md) |

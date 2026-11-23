@@ -613,6 +613,63 @@ pub const CODES: &[HealthCode] = &[
         ]
     ),
     hc!(
+        "BACKUP_DISK_LOW",
+        "There is not enough free disk space to take a cluster backup safely.",
+        [
+            "less than the size of the last backup plus 2 GiB is free where the backups live",
+            "old backups, VM disks or images fill the disk"
+        ],
+        [
+            "free space: `fluxctl kube backups` shows what the backups use; old scheduled ones are removed automatically when room is needed",
+            "send backups to a bigger disk with `--to DIR`"
+        ]
+    ),
+    hc!(
+        "BACKUP_CHECKSUM_MISMATCH",
+        "A cluster backup does not match its recorded checksum, so it is not trusted.",
+        [
+            "the file was edited, truncated or corrupted after it was made",
+            "the .sha256 file belongs to a different backup"
+        ],
+        [
+            "restore from an earlier backup: `fluxctl kube backups`",
+            "check each with `fluxctl kube backup verify BACKUP`"
+        ]
+    ),
+    hc!(
+        "BACKUP_NOT_RESTORABLE",
+        "A cluster backup is missing something a restore needs, or is not a complete archive.",
+        [
+            "the copy was cut short (disk full, interrupted transfer)",
+            "it holds the wrong datastore for this cluster, or no cluster token",
+            "it has no .sha256 file next to it"
+        ],
+        [
+            "take a new one: `fluxctl kube backup`",
+            "see which check failed: `fluxctl kube backup verify BACKUP`"
+        ]
+    ),
+    hc!(
+        "BACKUP_NOT_FOUND",
+        "No cluster backup with that name exists.",
+        [
+            "the name is mistyped, or retention removed the backup",
+            "the backups folder was moved"
+        ],
+        ["list them: `fluxctl kube backups`"]
+    ),
+    hc!(
+        "RESTORE_NEEDS_CONFIRM",
+        "A restore replaces the whole cluster state, so it asks for confirmation first.",
+        [
+            "--yes was not given (CLI), or the backup name was not repeated to confirm (Studio and API)"
+        ],
+        [
+            "check the backup first: `fluxctl kube backup verify BACKUP`",
+            "then `fluxctl kube restore BACKUP --yes`; a backup of the current state is taken first"
+        ]
+    ),
+    hc!(
         "CHECK_FAILED",
         "A host check reported a problem that has no dedicated explanation.",
         ["see the check's own message"],
@@ -2201,6 +2258,11 @@ mod tests {
             "BACKEND_NO_READY_ENDPOINTS",
             "SUPPORT_BUNDLE_SECRET_LEFT",
             "SUPPORT_BUNDLE_WRITE_FAILED",
+            "BACKUP_DISK_LOW",
+            "BACKUP_CHECKSUM_MISMATCH",
+            "BACKUP_NOT_RESTORABLE",
+            "BACKUP_NOT_FOUND",
+            "RESTORE_NEEDS_CONFIRM",
         ] {
             seen.insert(extra.to_owned());
         }

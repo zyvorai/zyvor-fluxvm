@@ -205,6 +205,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ### Get started (`fluxctl up`, Studio Home)
 
 - `fluxctl up`: checks the host, reuses or starts the daemon, creates the default single-server k3s cluster (`kube cluster create default`, k3s verified by SHA-256), waits until healthy, prints the next three commands; idempotent; `--dry-run`, `--yes`, `--json`; every failure names its fix and a `fluxctl explain` code. Studio Home has a **Get started** button backed by `GET /v1/up/plan`. Unit-tested with fakes; not run end to end ([docs/up.md](docs/up.md)).
+- `fluxctl kube backup`, `kube backups`, `kube backup verify`, `kube restore BACKUP`: verified, scheduled-by-default, disk-safe backups of a k3s cluster with retention, a backup before every upgrade and restore, optional `--to DIR` or S3 copy; Studio Home Backups card with a two-step restore. Unit-tested; not run against a real cluster ([docs/kube-backups.md](docs/kube-backups.md)).
 
 ### Cluster home (`fluxctl cluster status`, `fluxctl fix`, Studio Home)
 
