@@ -39,6 +39,7 @@ export const NAV: NavGroup[] = [
       { to: '/images', label: 'Images', desc: 'Catalog, templates and warm pools' },
       { to: '/volumes', label: 'Volumes', desc: 'Disks that outlive a machine' },
       { to: '/backups', label: 'Backups', desc: 'Standalone disk copies' },
+      { to: '/usage', label: 'Usage', desc: 'CPU, memory and cost per machine' },
       { to: '/host', label: 'Host', desc: 'Memory, GPUs and topology' },
       { to: '/access', label: 'Access & audit', desc: 'Quota, events and the API' },
       { to: '/cheatsheet', label: 'Cheatsheet', desc: 'The commands you will want' },

@@ -317,6 +317,12 @@ fn ops() -> Vec<Op> {
         ),
         op(
             "get",
+            "/v1/usage",
+            "Per-VM usage (CPU seconds, memory GiB-hours, disk and network bytes) summed by vm, day or label:KEY, with costs when usage rates are set; query: by, since, label",
+            HOST,
+        ),
+        op(
+            "get",
             "/v1/stats",
             "One sample of the host (CPU ticks, memory, disk free, VM counts) and every VM (CPU seconds, memory, disk and network byte counters) for the fleet metrics collector",
             HOST,

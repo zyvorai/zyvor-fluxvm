@@ -57,6 +57,10 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
                 "change one, checked before it is written",
             ),
             ("fluxctl config path", "which file holds them"),
+            (
+                "fluxctl usage --by day --since 7d",
+                "what each machine used and cost (set rates with `config set usage.cpu_hour 0.04`)",
+            ),
         ],
     ),
     (

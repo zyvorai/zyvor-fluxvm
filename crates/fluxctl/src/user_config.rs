@@ -388,6 +388,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn usage_rates_can_be_set_and_read() {
+        let out = apply_set("", "usage.cpu_hour", "0.04").unwrap();
+        assert!(out.contains("cpu_hour = 0.04"), "{out}");
+        let out = apply_set(&out, "usage.currency", "EUR").unwrap();
+        assert_eq!(get(&out, "usage.cpu_hour").unwrap(), "0.04");
+        assert_eq!(get(&out, "usage.currency").unwrap(), "\"EUR\"");
+        assert!(get("", "usage.disk_gib").unwrap().contains("default"));
+        assert!(apply_set("", "usage.cpu_hours", "1").is_err(), "a misspelled key is refused");
+    }
+
+    #[test]
     fn set_keeps_comments_and_other_keys() {
         let out = apply_set(
             "# mine\nlisten = \"127.0.0.1:7788\"\n",

@@ -540,6 +540,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 
 pub fn router(manager: Arc<VmManager>) -> Router {
     fluxvm_scheduler::history::start_sampler(&manager);
+    fluxvm_scheduler::usage::start_sampler(&manager);
     agent_sessions::start_sweeper(&manager);
     k3s_backups::start_scheduler();
     let oidc = build_oidc(&manager.cfg.auth);

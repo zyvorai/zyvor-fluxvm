@@ -8,6 +8,39 @@ use crate::mac_errors::MacCode;
 
 pub const CODES: &[MacCode] = &[
     MacCode {
+        code: "USAGE_BAD_QUERY",
+        status: Some(400),
+        summary: "`fluxctl usage` (or the Usage page) was asked for something it cannot group or filter by.",
+        causes: &[
+            "`--by` was not `vm`, `day` or `label:KEY` (a bare `label` needs the label name)",
+            "`--since` was not a length like `7d`, `24h`, `2w` or a date like `2026-11-01`",
+            "the label filter is not written like `env=dev,team`",
+        ],
+        fixes: &[
+            "group by a label: `fluxctl usage --by label:team`",
+            "go back a week: `fluxctl usage --since 7d`",
+            "see which labels exist: `fluxctl ps --json`",
+        ],
+        aliases: &["usage-bad-query"],
+        signatures: &[],
+    },
+    MacCode {
+        code: "USAGE_UNAVAILABLE",
+        status: None,
+        summary: "The usage numbers could not be read from the daemon.",
+        causes: &[
+            "the FluxVM daemon is not running or not reachable at the address in use",
+            "the daemon is older than this fluxctl and has no usage report",
+            "a token is needed (`--server-token`)",
+        ],
+        fixes: &[
+            "check the daemon: `fluxctl doctor`",
+            "update the daemon to the same version as fluxctl: `fluxctl upgrade`",
+        ],
+        aliases: &["usage-unavailable"],
+        signatures: &[],
+    },
+    MacCode {
         code: "CONFIG_UNKNOWN_KEY",
         status: None,
         summary: "That setting does not exist, so `fluxctl config set` did not write it (the daemon would silently ignore it).",

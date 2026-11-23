@@ -188,6 +188,7 @@ mod support_cmd;
 mod templates_cmd;
 mod up;
 mod upgrade_cmd;
+mod usage_cmd;
 mod user_config;
 mod vm_net;
 mod vm_spec;
@@ -1899,6 +1900,10 @@ enum Command {
         #[command(subcommand)]
         command: VzCommand,
     },
+    /// What each VM used (CPU, memory GiB-hours, disk, network) and, when you set rates with `fluxctl config set
+    /// usage.cpu_hour 0.04`, what it cost. `--by vm|day|label:KEY`, `--since 7d`, `--label env=dev`. REST: `GET /v1/usage`.
+    /// Counted automatically while VMs run; also in Studio's Usage page.
+    Usage(usage_cmd::UsageArgs),
     /// Guest-network observability: flows, DNS, roll-ups, packet capture. REST: `/v1/netobs/*`. Always talks to the
     /// daemon (`--server`, the current context, or the local `listen`). See docs/netobs.md.
     Netobs {
@@ -6865,6 +6870,11 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         return Ok(());
     }
 
+    if let Command::Usage(a) = &cli.command {
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        return usage_cmd::run(&r, a, &cfg.usage).await;
+    }
+
     if let Command::Netobs { command } = cli.command {
         // The observer lives in the daemon process: talk to the local daemon's `listen` address.
         let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
@@ -6976,6 +6986,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
+        | Command::Usage(_)
         | Command::Netobs { .. }
         | Command::Agent { .. }
         | Command::Infer { .. }

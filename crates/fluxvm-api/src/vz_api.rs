@@ -8,6 +8,7 @@
 //! * `GET  /v1/host/apple/capabilities`
 //! * `GET  /v1/host/overview`
 //! * `GET  /v1/stats`
+//! * `GET  /v1/usage`
 //! * `GET|POST /v1/host/apple/ipsw`
 //! * `GET  /v1/vms/{id}/vz/secure-boot`
 //! * `GET  /v1/vms/{id}/vz/custom-virtio`
@@ -42,6 +43,7 @@ pub(crate) fn routes() -> Router<Arc<VmManager>> {
         .route("/v1/host/overview", get(host_overview))
         .route("/v1/host/history", get(host_history))
         .route("/v1/stats", get(node_stats))
+        .route("/v1/usage", get(usage_report))
         .route("/v1/host/storage", get(host_storage))
         .route("/v1/host/images", get(host_images))
         .route(
@@ -148,6 +150,53 @@ async fn node_stats(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>> {
             message: format!("stats sampler failed: {e}"),
         })?;
     Ok(Json(json!(s)))
+}
+
+#[derive(Deserialize)]
+struct UsageQuery {
+    /// `vm` (default), `day` or `label:KEY`.
+    by: Option<String>,
+    /// `7d`, `24h`, `2w` or `2026-11-01`.
+    since: Option<String>,
+    /// A label selector (`env=dev,team`), the same as `GET /v1/vms?label=`.
+    label: Option<String>,
+}
+
+/// Per-VM usage (CPU seconds, memory GiB-hours, disk and network bytes) summed by VM, day or label, with costs when
+/// `[usage]` rates are set in the daemon config. Filled by the sampler in `fluxvm_scheduler::usage`.
+async fn usage_report(
+    State(m): State<Arc<VmManager>>,
+    Query(q): Query<UsageQuery>,
+) -> ApiResult<Json<Value>> {
+    let bad = |message: String| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        message: format!("{message}\n  more: fluxctl explain USAGE_BAD_QUERY"),
+    };
+    let by = fluxvm_core::usage::GroupBy::parse(q.by.as_deref().unwrap_or("vm")).map_err(bad)?;
+    let since_day = q
+        .since
+        .as_deref()
+        .map(|s| fluxvm_core::usage::parse_since(s, chrono::Utc::now()))
+        .transpose()
+        .map_err(bad)?;
+    let selector = q
+        .label
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(fluxvm_core::model::LabelSelector::parse)
+        .transpose()
+        .map_err(|e| bad(format!("{e}")))?;
+    let query = fluxvm_core::usage::Query {
+        by,
+        since_day,
+        selector,
+    };
+    let ledger = fluxvm_scheduler::usage::global();
+    let report = ledger
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .report(&query, &m.cfg.usage);
+    Ok(Json(json!(report)))
 }
 
 /// The egress policy of a usernet guest as stored.
