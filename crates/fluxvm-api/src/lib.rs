@@ -63,6 +63,7 @@ mod kube_actions;
 mod kube_apps;
 mod kube_flows;
 mod kube_gateways;
+mod kube_inventory;
 mod kube_metrics;
 mod kube_pod;
 mod kube_workloads;
@@ -1005,6 +1006,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/kube/{name}/events", get(kube_workloads::get_events))
         .route("/v1/kube/{name}/gateways", get(kube_gateways::get_gateways))
+        .route("/v1/kube/{name}/secrets", get(kube_inventory::get_secrets))
+        .route("/v1/kube/{name}/certs", get(kube_inventory::get_certs))
         .route(
             "/v1/kube/{name}/apps",
             get(kube_apps::get_apps).post(kube_apps::run_app),

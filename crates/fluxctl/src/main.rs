@@ -83,6 +83,7 @@ mod kube_policy;
 mod kube_preflight;
 mod kube_project;
 mod kube_prompt;
+mod kube_ops;
 mod kube_ps;
 mod kube_recipes;
 mod kube_registry;
@@ -91,6 +92,7 @@ mod kube_secrets;
 mod kube_share;
 mod kube_sync;
 mod kube_tls;
+mod kube_upgrade;
 mod kube_trim;
 mod launch_agent;
 mod mac_build;
@@ -594,6 +596,12 @@ enum KubeCommand {
     /// a local port: `kube forward APP`; the list: `kube apps`.
     #[command(flatten)]
     App(kube_app_cmd::AppCommand),
+    /// Secrets, ConfigMaps, certificates, events and CPU/memory: `secrets`, `config`, `certs`, `events`, `top`.
+    #[command(flatten)]
+    Ops(kube_ops::OpsCommand),
+    /// k3s upgrade (plan, backup first) and nodes: `upgrade`, `node`.
+    #[command(flatten)]
+    Lifecycle(kube_upgrade::LifecycleCommand),
     /// Rebuild an image whenever a file in a directory changes, copy it into the cluster and restart the deployment.
     Dev {
         #[command(flatten)]
@@ -6604,6 +6612,21 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         std::process::exit(code);
     }
 
+    // `kube secrets | config | certs | events | top` talk to the cluster through kubectl: no daemon needed.
+    if let Command::Kube {
+        command: KubeCommand::Ops(_),
+    } = &cli.command
+    {
+        let Command::Kube {
+            command: KubeCommand::Ops(cmd),
+        } = cli.command
+        else {
+            unreachable!()
+        };
+        let code = tokio::task::block_in_place(|| kube_ops::run(cmd));
+        std::process::exit(code);
+    }
+
     // Listing, verifying, pruning and scheduling k3s backups only read and write files: no daemon needed.
     if let Command::Kube { command } = &cli.command {
         match command {
@@ -9051,6 +9074,8 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
             kube_backups::cmd_backup(api, a, json).await?;
         }
         KubeCommand::Backups { .. } => unreachable!("listed before the daemon is needed"),
+        KubeCommand::Ops(_) => unreachable!("run before the daemon is needed"),
+        KubeCommand::Lifecycle(cmd) => kube_upgrade::run(api, cmd).await?,
         KubeCommand::Checkpoints { cluster } => {
             println!(
                 "{}",
