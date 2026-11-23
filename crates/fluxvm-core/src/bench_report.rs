@@ -202,15 +202,15 @@ pub fn validate(r: &BenchReport) -> Vec<Finding> {
             None,
         ));
     }
-    if let Some(d) = r.method.density_per_vcpu {
-        if !d.is_finite() || d <= 0.0 {
-            out.push(fi(
-                Severity::Error,
-                "method.density_per_vcpu",
-                "must be a positive number".into(),
-                None,
-            ));
-        }
+    if let Some(d) = r.method.density_per_vcpu
+        && (!d.is_finite() || d <= 0.0)
+    {
+        out.push(fi(
+            Severity::Error,
+            "method.density_per_vcpu",
+            "must be a positive number".into(),
+            None,
+        ));
     }
     for (name, s) in r.series.iter().take(MAX_SERIES) {
         let key = format!("series.{}", clip(name));

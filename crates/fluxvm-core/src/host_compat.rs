@@ -261,9 +261,10 @@ pub fn check(src: &HostDescription, dst: &HostDescription, vm: Option<&VmNeeds>)
     if let Some(vm) = vm {
         resource_rules(dst, vm, &mut f);
     }
-    if let (Some(a), Some(b)) = (src.smt, dst.smt) {
-        if a != b {
-            f.push(finding(
+    if let (Some(a), Some(b)) = (src.smt, dst.smt)
+        && a != b
+    {
+        f.push(finding(
                 Severity::Info,
                 "smt",
                 format!(
@@ -273,7 +274,6 @@ pub fn check(src: &HostDescription, dst: &HostDescription, vm: Option<&VmNeeds>)
                 ),
                 None,
             ));
-        }
     }
     f.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.key.cmp(&b.key)));
     let verdict = if f.iter().any(|x| x.severity == Severity::Error) {
@@ -417,19 +417,19 @@ fn cpu_rules(
             None,
         ));
     }
-    if let (Some(a), Some(b)) = (&src.cpu.microcode, &dst.cpu.microcode) {
-        if a != b {
-            f.push(finding(
-                Severity::Info,
-                "cpu.microcode",
-                format!(
-                    "microcode differs ({} to {}); host-passthrough guests can see it",
-                    clip(a),
-                    clip(b)
-                ),
-                None,
-            ));
-        }
+    if let (Some(a), Some(b)) = (&src.cpu.microcode, &dst.cpu.microcode)
+        && a != b
+    {
+        f.push(finding(
+            Severity::Info,
+            "cpu.microcode",
+            format!(
+                "microcode differs ({} to {}); host-passthrough guests can see it",
+                clip(a),
+                clip(b)
+            ),
+            None,
+        ));
     }
 }
 
@@ -626,9 +626,10 @@ fn firecracker_rules(
             Some("set cpu_template (T2S is documented for Skylake and Cascade Lake) or restore on the same model"),
         ));
     }
-    if let (Some(a), Some(b)) = (parse_version(&src.kernel), parse_version(&dst.kernel)) {
-        if b < a {
-            f.push(finding(
+    if let (Some(a), Some(b)) = (parse_version(&src.kernel), parse_version(&dst.kernel))
+        && b < a
+    {
+        f.push(finding(
                 Severity::Warning,
                 "kernel",
                 format!(
@@ -638,23 +639,22 @@ fn firecracker_rules(
                 ),
                 None,
             ));
-        }
     }
 }
 
 fn resource_rules(dst: &HostDescription, vm: &VmNeeds, f: &mut Vec<Finding>) {
-    if let Some(free) = dst.free_memory_mib {
-        if free < vm.memory_mib {
-            f.push(finding(
-                Severity::Error,
-                "freeMemoryMib",
-                format!(
-                    "the destination has {free} MiB free but the VM needs {} MiB",
-                    vm.memory_mib
-                ),
-                Some("free memory there or choose another destination"),
-            ));
-        }
+    if let Some(free) = dst.free_memory_mib
+        && free < vm.memory_mib
+    {
+        f.push(finding(
+            Severity::Error,
+            "freeMemoryMib",
+            format!(
+                "the destination has {free} MiB free but the VM needs {} MiB",
+                vm.memory_mib
+            ),
+            Some("free memory there or choose another destination"),
+        ));
     }
     let topo = dst.topology.as_ref();
     if vm.hugepages {

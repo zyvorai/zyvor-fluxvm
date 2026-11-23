@@ -456,7 +456,10 @@ pub fn advise(topo: &HostTopology, vm: &VmNeeds) -> PlacementAdvice {
                         .into(),
                 ),
             ));
-        } else if sizes.iter().all(|s| (vm.memory_mib * 1024) % s != 0) {
+        } else if sizes
+            .iter()
+            .all(|s| !(vm.memory_mib * 1024).is_multiple_of(*s))
+        {
             findings.push(f(
                 Severity::Warning,
                 "memory_mib",
