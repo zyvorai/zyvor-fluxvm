@@ -26,6 +26,12 @@ pub struct RunExtra {
     /// Does not apply with `--fleet` (the remote Mac runs its own store).
     #[arg(long)]
     pub verify: bool,
+    /// Instead of a new instance, bring an existing one back to a saved checkpoint (`NAME:TAG`, or just TAG when one instance
+    /// has it): instantly when the checkpoint holds memory, otherwise by booting its saved disk. With CMD it then runs CMD in
+    /// the guest. The state you leave is saved first (`auto-before-restore-<time>`) and the message says how to roll back.
+    /// See `fluxctl mac checkpoint --help`.
+    #[arg(long, value_name = "NAME:TAG")]
+    pub from_checkpoint: Option<String>,
 }
 
 impl RunExtra {

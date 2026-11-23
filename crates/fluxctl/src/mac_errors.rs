@@ -597,6 +597,155 @@ pub const CODES: &[MacCode] = &[
         ],
         aliases: &["manifest-unreadable", "manifest-inspect"],
         signatures: &["could not read the manifest of"],
+        code: "MAC_CHECKPOINT_EXISTS",
+        status: None,
+        summary: "The instance already has a checkpoint with that name.",
+        causes: &[
+            "an earlier `mac checkpoint NAME TAG` used the same name",
+            "a checkpoint name is only unique within one instance, and this instance has it already",
+        ],
+        fixes: &[
+            "pick another name: `fluxctl mac checkpoint NAME OTHER-TAG` (leave the tag out to get ckpt-<time>)",
+            "or replace it: `fluxctl mac checkpoint rm NAME TAG`, then save again",
+            "see what exists: `fluxctl mac checkpoints NAME`",
+        ],
+        aliases: &["checkpoint-exists"],
+        signatures: &[
+            "already exists for this vm",
+            "already has a checkpoint called",
+        ],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_MISSING",
+        status: Some(404),
+        summary: "There is no checkpoint with that name (for that instance).",
+        causes: &[
+            "the name is misspelt, or belongs to another instance (a checkpoint belongs to the instance it was taken from)",
+            "it was deleted, or was an automatic one that was replaced (only the newest 3 `auto-` checkpoints are kept)",
+        ],
+        fixes: &[
+            "list what exists, with size and age: `fluxctl mac checkpoints`",
+            "name the instance too: `fluxctl mac run --from-checkpoint NAME:TAG`",
+            "make one: `fluxctl mac checkpoint NAME TAG`",
+        ],
+        aliases: &["checkpoint-missing", "checkpoint-not-found"],
+        signatures: &[
+            "has no checkpoint",
+            "no instance has a checkpoint called",
+            "not found for vm",
+        ],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_AMBIGUOUS",
+        status: None,
+        summary: "More than one instance has a checkpoint with that name.",
+        causes: &[
+            "`--from-checkpoint TAG` was given without an instance name, and the tag exists on several instances",
+        ],
+        fixes: &[
+            "say which: `fluxctl mac run --from-checkpoint NAME:TAG`",
+            "see who has what: `fluxctl mac checkpoints`",
+        ],
+        aliases: &["checkpoint-ambiguous"],
+        signatures: &[
+            "mac_checkpoint_ambiguous",
+            "more than one instance has a checkpoint",
+        ],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_TAG",
+        status: None,
+        summary: "That is not a usable checkpoint name.",
+        causes: &[
+            "names are 1 to 128 letters, digits, '.', '_' or '-', and cannot start with '.' (no spaces, slashes or colons)",
+        ],
+        fixes: &[
+            "use something like `before-upgrade` or `xcode-15.4`: `fluxctl mac checkpoint NAME before-upgrade`",
+        ],
+        aliases: &["checkpoint-tag"],
+        signatures: &["not a usable checkpoint name", "invalid snapshot tag"],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_SAFETY",
+        status: Some(409),
+        summary: "A restore was refused because your current state could not be saved first. Nothing was changed.",
+        causes: &[
+            "a restore saves where you are now as `auto-before-restore-<time>` so it can be undone, and that save failed (usually too little free disk)",
+        ],
+        fixes: &[
+            "free disk space: delete checkpoints you do not need (`fluxctl mac checkpoints`, `fluxctl mac checkpoint rm NAME TAG`) or instances (`fluxctl mac rm NAME`), then retry",
+            "or, if what is running now does not matter, restore without the safety net: `fluxctl mac checkpoint restore NAME TAG --no-safety-checkpoint`",
+        ],
+        aliases: &["checkpoint-safety"],
+        signatures: &["could not save your current state first"],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_NOT_SAVABLE",
+        status: None,
+        summary: "This instance's devices cannot have their memory saved, so a checkpoint with memory is not possible.",
+        causes: &[
+            "Virtualization.framework refuses to save a guest with some device configurations (the reason is in the message above)",
+            "the runner is too old or the Mac's login session is locked, which a memory save needs",
+        ],
+        fixes: &[
+            "save the disk only, which always works: `fluxctl mac checkpoint NAME TAG --disk-only` (coming back boots the guest instead of resuming it)",
+            "unlock the Mac or enable automatic login, then retry: `fluxctl mac host headless-check`",
+        ],
+        aliases: &["checkpoint-not-savable"],
+        signatures: &[
+            "this vm cannot be saved",
+            "the runner could not save the vm",
+        ],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_OS_UPDATED",
+        status: None,
+        summary: "A checkpoint's saved memory was written on a different macOS build than this Mac now runs, so it cannot be resumed.",
+        causes: &[
+            "the Mac was updated after the checkpoint was taken; saved VM memory is only valid on the macOS build that wrote it",
+        ],
+        fixes: &[
+            "by default the instance boots cold from the checkpoint's disk, which still works: nothing to do",
+            "to make that an error instead, set FLUXVM_RESTORE_ON_OS_UPDATE=refuse on the daemon",
+            "take a new checkpoint after updating macOS: `fluxctl mac checkpoint NAME TAG`",
+        ],
+        aliases: &["checkpoint-os-updated"],
+        signatures: &["not portable across macos updates"],
+    },
+    MacCode {
+        code: "MAC_CHECKPOINT_NOT_LOCAL",
+        status: None,
+        summary: "`mac diff` reads the instance's disk files, and they are not on this machine.",
+        causes: &[
+            "fluxctl is talking to a daemon on another Mac, so the files it names are not here",
+            "the checkpoint name does not exist",
+        ],
+        fixes: &[
+            "run `fluxctl mac diff` on the Mac that hosts the instance (over ssh, or at its console)",
+            "check the name: `fluxctl mac checkpoints NAME`",
+        ],
+        aliases: &["checkpoint-not-local"],
+        signatures: &[
+            "mac_checkpoint_not_local",
+            "must run on the mac whose daemon owns",
+        ],
+    },
+    MacCode {
+        code: "MAC_FROM_CHECKPOINT",
+        status: None,
+        summary: "`mac run --from-checkpoint` was combined with a flag that makes a new instance.",
+        causes: &[
+            "--from-checkpoint brings an existing instance back to a saved state; an IMAGE, --name, -p, --rm and --fleet describe a new one",
+        ],
+        fixes: &[
+            "drop the extra flags: `fluxctl mac run --from-checkpoint NAME:TAG [-- CMD]`",
+            "to start a new instance from an image, leave --from-checkpoint out: `fluxctl mac run IMAGE`",
+        ],
+        aliases: &["from-checkpoint"],
+        signatures: &[
+            "mac_from_checkpoint",
+            "--from-checkpoint brings an existing instance",
+        ],
     },
 ];
 
@@ -709,6 +858,22 @@ mod tests {
                 "MAC_SESSION_LOCKED",
             ),
             ("both macOS slots: slot limit reached", "MAC_SLOT_LIMIT"),
+            (
+                "snapshot \"w\" already exists for this VM",
+                "MAC_CHECKPOINT_EXISTS",
+            ),
+            (
+                "POST /v1/vms/1/restore: 409 Conflict: could not save your current state first",
+                "MAC_CHECKPOINT_SAFETY",
+            ),
+            (
+                "not enough free disk to save a checkpoint: 900 MiB free",
+                "MAC_DISK_FULL",
+            ),
+            (
+                "the saved VM state was written on macOS build 1 but this Mac now runs build 2; Virtualization.framework state is not portable across macOS updates",
+                "MAC_CHECKPOINT_OS_UPDATED",
+            ),
         ];
         for (m, want) in cases {
             assert_eq!(hint_for(m).map(|c| c.code), Some(want), "{m}");

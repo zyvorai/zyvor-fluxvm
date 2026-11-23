@@ -557,6 +557,71 @@ fn save_support_reason(reply: &ControlReply) -> Option<String> {
     )
 }
 
+/// Tags that start with this were taken by FluxVM itself, as the safety net before a risky operation (a restore). They are
+/// pruned to the newest [`AUTO_CHECKPOINT_KEEP`]; a checkpoint you name yourself is never pruned.
+pub const AUTO_CHECKPOINT_PREFIX: &str = "auto-";
+/// How many automatic checkpoints a VM keeps.
+pub const AUTO_CHECKPOINT_KEEP: usize = 3;
+
+/// `auto-<what>-<stamp>`, e.g. `auto-before-restore-20261123-101500`. `stamp` is a UTC `YYYYMMDD-HHMMSS`.
+pub fn auto_checkpoint_tag(what: &str, stamp: &str) -> String {
+    format!("{AUTO_CHECKPOINT_PREFIX}{what}-{stamp}")
+}
+
+/// Whether a checkpoint tag was made automatically.
+pub fn is_auto_checkpoint(tag: &str) -> bool {
+    tag.starts_with(AUTO_CHECKPOINT_PREFIX)
+}
+
+/// The tags to delete so that only the newest `keep` automatic checkpoints stay. `autos` is `(tag, modified)`; tags that are not
+/// automatic are ignored, so a checkpoint you named yourself can never be chosen.
+pub fn auto_checkpoints_to_prune(
+    autos: &[(String, std::time::SystemTime)],
+    keep: usize,
+) -> Vec<String> {
+    let mut v: Vec<&(String, std::time::SystemTime)> = autos
+        .iter()
+        .filter(|(t, _)| is_auto_checkpoint(t))
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    v.into_iter().skip(keep).map(|(t, _)| t.clone()).collect()
+}
+
+/// Deletes the oldest automatic checkpoints of this workspace beyond the newest `keep`, except those in `protect` (the one a
+/// restore is about to use). Returns the tags it removed. Best effort: a directory that cannot be removed is left.
+pub fn prune_auto_checkpoints(
+    workspace: &std::path::Path,
+    keep: usize,
+    protect: &[&str],
+) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(workspace.join("snapshots")) else {
+        return Vec::new();
+    };
+    let autos: Vec<(String, std::time::SystemTime)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            m.is_dir().then(|| {
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    m.modified().ok(),
+                )
+            })
+        })
+        .filter_map(|(t, m)| Some((t, m?)))
+        .collect();
+    let mut removed = Vec::new();
+    for tag in auto_checkpoints_to_prune(&autos, keep) {
+        if protect.contains(&tag.as_str()) {
+            continue;
+        }
+        if std::fs::remove_dir_all(snapshot_dir(workspace, &tag)).is_ok() {
+            removed.push(tag);
+        }
+    }
+    removed
+}
+
 /// Whether snapshot `tag` of this workspace carries saved memory and device state (a disk-only snapshot does not).
 pub fn snapshot_has_state(workspace: &std::path::Path, tag: &str) -> bool {
     snapshot_dir(workspace, tag).join(STATE_FILE).is_file()
@@ -619,6 +684,58 @@ mod snapshot_tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn automatic_checkpoints_are_pruned_oldest_first_and_named_ones_never() {
+        use std::time::{Duration, SystemTime};
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let autos = vec![
+            ("auto-before-restore-1".to_string(), at(1)),
+            ("before-upgrade".to_string(), at(0)),
+            ("auto-before-restore-4".to_string(), at(4)),
+            ("auto-before-restore-2".to_string(), at(2)),
+            ("auto-before-restore-3".to_string(), at(3)),
+        ];
+        assert_eq!(
+            auto_checkpoints_to_prune(&autos, 3),
+            vec!["auto-before-restore-1".to_string()]
+        );
+        assert!(auto_checkpoints_to_prune(&autos, 4).is_empty());
+        assert_eq!(auto_checkpoints_to_prune(&autos, 0).len(), 4);
+        assert_eq!(
+            auto_checkpoint_tag("before-restore", "20261123-101500"),
+            "auto-before-restore-20261123-101500"
+        );
+        assert!(is_auto_checkpoint("auto-x") && !is_auto_checkpoint("my-auto"));
+    }
+
+    #[test]
+    fn pruning_removes_old_automatic_directories_and_spares_protected_and_named_ones() {
+        let ws = tempfile::tempdir().unwrap();
+        for t in ["auto-a", "auto-b", "auto-c", "auto-d", "mine"] {
+            std::fs::create_dir_all(snapshot_dir(ws.path(), t)).unwrap();
+            // Distinct modification times: a sleep-free way is to set them explicitly.
+            let f = std::fs::File::open(snapshot_dir(ws.path(), t)).unwrap();
+            let n = match t {
+                "auto-a" => 1,
+                "auto-b" => 2,
+                "auto-c" => 3,
+                "auto-d" => 4,
+                _ => 0,
+            };
+            f.set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + n),
+            )
+            .unwrap();
+        }
+        let removed = prune_auto_checkpoints(ws.path(), 1, &["auto-b"]);
+        assert_eq!(removed, vec!["auto-a".to_string(), "auto-c".to_string()]);
+        assert!(snapshot_dir(ws.path(), "auto-b").is_dir(), "protected");
+        assert!(snapshot_dir(ws.path(), "auto-d").is_dir(), "newest");
+        assert!(snapshot_dir(ws.path(), "mine").is_dir(), "named");
+        assert!(prune_auto_checkpoints(&ws.path().join("none"), 1, &[]).is_empty());
     }
 
     #[test]

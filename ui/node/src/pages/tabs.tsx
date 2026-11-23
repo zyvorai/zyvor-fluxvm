@@ -7,6 +7,7 @@ import { Button, Card, Field, KV, Meter, Pill, Segmented, Sheet, api, ago, fmtMi
 import type { Notify } from '../App';
 import { EgressEditor } from './EgressEditor';
 import { GenericTable, rowsOf } from '../lib/generic';
+import { cliRestore, cliSave, defaultTag, isAuto, kindLabel, restoreText, restoredMessage, saveBody, tagProblem, type Snap } from '../lib/checkpoints';
 
 type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'idle';
 const errMsg = (e: unknown) => (e as Error).message ?? String(e);
@@ -115,35 +116,35 @@ export function StorageTab({ id, notify }: { id: string; notify: Notify }) {
 }
 
 /* ------------------------------------------------------------------ Protect */
-interface Snap { tag: string; created_at?: string | null; size_bytes?: number; memory?: boolean; has_memory?: boolean }
 export function ProtectTab({ id, name, running, notify }: { id: string; name: string; running: boolean; notify: Notify }) {
   const snaps = usePoll(async () => rowsOf(await api.get<unknown>(`/v1/vms/${id}/snapshots`), 'snapshots') as unknown as Snap[], 6000, [id]);
   const backups = usePoll(async () => rowsOf(await api.get<unknown>('/v1/backups'), 'backups').filter((b) => String(b.name ?? '').startsWith(name)), 10000, [id, name]);
   const branches = usePoll(async () => rowsOf(await api.get<unknown>(`/v1/vms/${id}/branches`).catch(() => ({})), 'branches'), 10000, [id]);
   const { busy, run } = useAction(notify, async () => { await Promise.all([snaps.refresh(), backups.refresh(), branches.refresh()]); });
   const [tag, setTag] = useState('');
+  const [diskOnly, setDiskOnly] = useState(false);
   const [sheet, setSheet] = useState<'snap' | 'branch' | 'backup' | null>(null);
   const [confirm, setConfirm] = useState<{ kind: 'restore' | 'delete'; tag: string } | null>(null);
   const [branchName, setBranchName] = useState('');
-  const stamp = () => new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
   return (
     <div className="fx-grid">
-      <Card title="Snapshots" action={<Button size="sm" variant="primary" onClick={() => { setTag(`snap-${stamp()}`); setSheet('snap'); }}><Camera size={14} />Take snapshot</Button>}>
-        {(snaps.data ?? []).length === 0 ? <p className="fx-muted">No snapshots yet. A snapshot of a running machine includes its memory, so restoring resumes exactly where it was.</p> : (
+      <Card title="Checkpoints" action={<Button size="sm" variant="primary" onClick={() => { setTag(defaultTag(new Date())); setDiskOnly(false); setSheet('snap'); }}><Camera size={14} />Save checkpoint</Button>}>
+        {(snaps.data ?? []).length === 0 ? <p className="fx-muted">No checkpoints yet. A checkpoint of a running machine includes its memory, so coming back resumes exactly where it was. CLI: <code>fluxctl mac checkpoint {name}</code></p> : (
           <div className="fx-table-wrap">
             <table className="fx-table">
-              <thead><tr><th>Tag</th><th>Taken</th><th>Size</th><th /></tr></thead>
+              <thead><tr><th>Checkpoint</th><th>Taken</th><th>Size</th><th /></tr></thead>
               <tbody>
                 {(snaps.data ?? []).map((s) => (
                   <tr key={s.tag}>
-                    <td>{s.tag}{s.has_memory || s.memory ? <Pill tone="info" dot={false} raw>with memory</Pill> : null}</td>
+                    <td>{s.tag}{kindLabel(s) ? <Pill tone="info" dot={false} raw>{kindLabel(s)}</Pill> : null}{isAuto(s.tag) ? <Pill tone="idle" dot={false} raw>automatic safety net</Pill> : null}</td>
                     <td className="fx-muted">{s.created_at ? ago(s.created_at) : '—'}</td>
                     <td className="fx-muted">{s.size_bytes != null ? fmtMiB(Math.round(s.size_bytes / 1048576)) : '—'}</td>
-                    <td><span className="fx-row-actions"><Button size="sm" onClick={() => setConfirm({ kind: 'restore', tag: s.tag })}><RotateCcw size={14} />Restore</Button><Button size="sm" variant="ghost" aria-label={`Delete ${s.tag}`} onClick={() => setConfirm({ kind: 'delete', tag: s.tag })}><Trash2 size={14} /></Button></span></td>
+                    <td><span className="fx-row-actions"><Button size="sm" onClick={() => setConfirm({ kind: 'restore', tag: s.tag })}><RotateCcw size={14} />Start from this</Button><Button size="sm" variant="ghost" aria-label={`Delete ${s.tag}`} onClick={() => setConfirm({ kind: 'delete', tag: s.tag })}><Trash2 size={14} /></Button></span></td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            <p className="fx-muted">Sizes are the files' full sizes: the disk part is a copy-on-write clone, so it costs far less until the machine and the checkpoint drift apart. A restore saves where you are now as an <code>auto-</code> checkpoint (the newest 3 are kept).</p>
           </div>
         )}
       </Card>
@@ -154,9 +155,11 @@ export function ProtectTab({ id, name, running, notify }: { id: string; name: st
         <GenericTable rows={branches.data ?? []} empty={running ? 'No branches. A branch captures this VM as a named, restartable fork point.' : 'Branches are created from a running machine.'} />
       </Card>
 
-      <Sheet open={sheet === 'snap'} title="Take snapshot" onClose={() => setSheet(null)}>
-        <Field label="Tag">{(i) => <input id={i} className="fx-input" autoFocus value={tag} onChange={(e) => setTag(e.target.value)} />}</Field>
-        <Button variant="primary" busy={busy === 'snap'} disabled={!tag.trim()} onClick={async () => (await run('snap', () => api.post(`/v1/vms/${id}/snapshot`, { tag: tag.trim() }), 'Snapshot taken')) && setSheet(null)}>Take snapshot</Button>
+      <Sheet open={sheet === 'snap'} title="Save checkpoint" onClose={() => setSheet(null)}>
+        <Field label="Name">{(i) => <input id={i} className="fx-input" autoFocus value={tag} onChange={(e) => setTag(e.target.value)} />}</Field>
+        {running ? <label className="fx-check"><input type="checkbox" checked={diskOnly} onChange={(e) => setDiskOnly(e.target.checked)} /> Disk only (no memory: coming back boots the machine)</label> : <p className="fx-muted">This machine is stopped, so only its disk is saved and coming back boots it. Save while it runs to include memory.</p>}
+        {tagProblem(tag) ? <p className="fx-muted">{tagProblem(tag)}</p> : <p className="fx-muted">CLI: <code>{cliSave(name, tag.trim(), diskOnly)}</code></p>}
+        <Button variant="primary" busy={busy === 'snap'} disabled={!!tagProblem(tag)} onClick={async () => (await run('snap', () => api.post(`/v1/vms/${id}/snapshot`, saveBody(tag, running, diskOnly)), 'Checkpoint saved')) && setSheet(null)}>Save checkpoint</Button>
       </Sheet>
       <Sheet open={sheet === 'backup'} title="Back up" onClose={() => setSheet(null)}>
         <p className="fx-muted">Writes a standalone copy of this machine's disk under the node's backup directory. The guest's filesystems are quiesced first when its agent answers.</p>
@@ -166,10 +169,10 @@ export function ProtectTab({ id, name, running, notify }: { id: string; name: st
         <Field label="Branch name">{(i) => <input id={i} className="fx-input" autoFocus value={branchName} onChange={(e) => setBranchName(e.target.value)} />}</Field>
         <Button variant="primary" busy={busy === 'branch'} disabled={!branchName.trim()} onClick={async () => (await run('branch', () => api.post(`/v1/vms/${id}/branches`, { name: branchName.trim() }), 'Branch created')) && setSheet(null)}><Send size={14} />Create branch</Button>
       </Sheet>
-      <Sheet open={!!confirm} title={confirm?.kind === 'restore' ? 'Restore snapshot' : 'Delete snapshot'} onClose={() => setConfirm(null)}>
-        <p>{confirm?.kind === 'restore' ? <>Restore <b>{confirm.tag}</b>? Changes since the snapshot are lost.</> : <>Delete snapshot <b>{confirm?.tag}</b>?</>}</p>
+      <Sheet open={!!confirm} title={confirm?.kind === 'restore' ? 'Start from checkpoint' : 'Delete checkpoint'} onClose={() => setConfirm(null)}>
+        {confirm?.kind === 'restore' ? <><p>Put this machine back to <b>{confirm.tag}</b>? Changes since then are replaced.</p><p className="fx-muted">{restoreText((snaps.data ?? []).find((x) => x.tag === confirm.tag) ?? { tag: confirm.tag }, running)}</p><p className="fx-muted">CLI: <code>{cliRestore(name, confirm.tag)}</code></p></> : <p>Delete checkpoint <b>{confirm?.tag}</b>?</p>}
         <div className="fx-actions">
-          <Button variant={confirm?.kind === 'delete' ? 'danger' : 'primary'} busy={busy === 'confirm'} onClick={async () => { if (!confirm) return; const ok = await run('confirm', () => (confirm.kind === 'restore' ? api.post(`/v1/vms/${id}/restore`, { tag: confirm.tag }) : api.del(`/v1/vms/${id}/snapshots/${encodeURIComponent(confirm.tag)}`)), confirm.kind === 'restore' ? 'Restored' : 'Snapshot deleted'); if (ok) setConfirm(null); }}>{confirm?.kind === 'restore' ? 'Restore' : 'Delete'}</Button>
+          <Button variant={confirm?.kind === 'delete' ? 'danger' : 'primary'} busy={busy === 'confirm'} onClick={async () => { if (!confirm) return; const t = confirm.tag; let reply: unknown = null; const ok = await run('confirm', async () => { reply = confirm.kind === 'restore' ? await api.post(`/v1/vms/${id}/restore`, { tag: t }) : await api.del(`/v1/vms/${id}/snapshots/${encodeURIComponent(t)}`); }, confirm.kind === 'restore' ? 'Restored' : 'Checkpoint deleted'); if (ok) { if (confirm.kind === 'restore') notify(restoredMessage(reply, t)); setConfirm(null); } }}>{confirm?.kind === 'restore' ? 'Start from this' : 'Delete'}</Button>
           <Button onClick={() => setConfirm(null)}>Cancel</Button>
         </div>
       </Sheet>

@@ -4187,6 +4187,23 @@ impl VmManager {
         memory: bool,
     ) -> Result<()> {
         validate_snapshot_tag(tag)?;
+        // A macOS guest's checkpoint is an APFS clone plus (with memory) the guest's RAM: refuse early, in plain words, when the
+        // volume is too full to take it. An unreadable free-space figure never blocks.
+        if let Ok(vm) = self.get(id).await
+            && vm.backend == BackendKind::Vz
+        {
+            let free = tokio::task::spawn_blocking(fluxvm_apple::host_health::probe_free_disk_mib)
+                .await
+                .ok()
+                .flatten();
+            if let Some(why) = fluxvm_apple::host_health::checkpoint_space_blocker(
+                free,
+                vm.request.memory_mib,
+                memory,
+            ) {
+                bail!(why);
+            }
+        }
         let op = self.begin_snapshot_op(id, tag).await?;
         if memory {
             self.create_vm_snapshot_inner(id, tag).await?;

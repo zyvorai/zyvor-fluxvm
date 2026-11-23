@@ -314,6 +314,7 @@ plus the config is exactly what `mac commit NAME IMAGE:TAG` followed by `mac sav
 
 Studio has no page for `fluxctl mac` instances, images or events, so none of the above has a Studio counterpart and none was added. The
 generic Machines page already has a Console tab and Overview shows live events for every VM; those were not changed or checked here.
+The exception is checkpoints: the machine's Protect tab does them (see [Checkpoints](#checkpoints-save-a-state-come-back-to-it)).
 
 ## Macfile reference
 
@@ -491,6 +492,56 @@ fork gets the source's vCPU count and memory when the daemon recorded them.
   let `mac image prune --all` remove it once no instance uses it.
 - Needs the daemon on the Mac that owns the source instance (it reads the instance's disk path), like `mac commit`.
 - Whether the daemon gives each fork a fresh MAC address and machine identity was not verified; it is created through the same API as `mac run`.
+
+## Checkpoints: save a state, come back to it
+
+A checkpoint is a named saved state of one instance. It is the daemon's existing snapshot (`<workspace>/snapshots/<name>/`:
+`fluxvm_apple::snapshot_save` for a running guest, `snapshot_save_disk` for a stopped one), with friendlier commands on top and
+the same calls Studio makes (`POST /v1/vms/{id}/snapshot`, `GET .../snapshots`, `DELETE .../snapshots/{tag}`,
+`POST .../restore`). Nothing needs turning on.
+
+```sh
+fluxctl mac checkpoint ci warm              # save ci as "warm" (no name: ckpt-<UTC time>)
+fluxctl mac checkpoint ci warm --disk-only  # disk only: no memory, no unlocked screen needed
+fluxctl mac checkpoints [NAME] [--json]     # kind, size and age, newest first
+fluxctl mac run --from-checkpoint ci:warm   # come back to it (add -- CMD to run something in the guest)
+fluxctl mac checkpoint restore ci warm      # the same, without the run
+fluxctl mac checkpoint rm ci warm
+fluxctl mac diff ci warm [OTHER]            # how much of the disk differs from now, or from another checkpoint
+```
+
+- **What is saved.** A running instance is saved with its memory and devices plus an APFS clone of its disk (it pauses for a
+  moment, then carries on), so coming back resumes it where it was, with no boot. A stopped instance, or `--disk-only`, saves the
+  disk and firmware only, and coming back boots it (a macOS boot takes minutes). The list shows which each one is.
+- **Cost.** The disk part is an APFS clone: nearly free until the instance and the checkpoint drift apart. The sizes shown are the
+  files' full sizes, not the extra space used. A checkpoint with memory also writes about the guest's RAM.
+- **Names.** 1 to 128 letters, digits, `.`, `_`, `-`; unique per instance. A checkpoint belongs to the instance it was taken from.
+  `--from-checkpoint` takes `NAME:TAG`, or just `TAG` when exactly one instance has it. It brings an existing instance back, so it
+  refuses an IMAGE, `--name`, `-p`, `--rm` and `--fleet`. An instance cannot be called `rm` or `restore` in `checkpoint NAME`.
+- **The safety net.** A restore first saves where the instance is now as `auto-before-restore-<UTC time>` (with memory when it is
+  running and the runner can, else the disk) and the answer says how to go back:
+  `fluxctl mac checkpoint restore NAME auto-before-restore-...`. Only the newest 3 `auto-` checkpoints are kept; one you named is
+  never pruned. If the safety checkpoint cannot be saved (usually no room) the restore is refused and nothing changes
+  (`MAC_CHECKPOINT_SAFETY`); `--no-safety-checkpoint` skips it. This lives in the daemon (`restore_vm_snapshot_safe`, and the
+  `safety_checkpoint` request field of `/restore`, default true), so Studio gets it too. Other callers of the restore (agent
+  sessions, the self-control socket) are unchanged. `mac update` only edits the restart policy and labels, so it has nothing to
+  roll back and takes no checkpoint.
+- **Host safety.** Before a checkpoint of a macOS instance the daemon checks free disk (at least 4 GiB, plus the guest's memory size
+  when memory is saved; an unreadable figure never blocks) and refuses in plain words with the next step (`MAC_DISK_FULL`);
+  the runner's own `save-support` check still refuses a device set that cannot be saved, with its reason
+  (`MAC_CHECKPOINT_NOT_SAVABLE`; `--disk-only` always works). A restore keeps the checks it had: the unlocked-session check
+  (`FLUXVM_SKIP_SESSION_CHECK`) and the macOS-build check, so saved memory from before a macOS update cold-boots the disk
+  instead of failing (`FLUXVM_RESTORE_ON_OS_UPDATE=refuse` makes that an error).
+- **`mac diff`.** Compares the checkpoint's disk file (and the other saved files) with the instance's current ones, 1 MiB block by block
+  of the disk image: it says how much changed, not which files, and does not compare memory. It reads both files once, so a large
+  disk takes a while, and it must run on the Mac whose daemon owns the instance (`MAC_CHECKPOINT_NOT_LOCAL`). A running guest keeps
+  writing, so stop it for an exact answer.
+- **Studio.** The machine's **Protect** tab lists checkpoints (memory or disk only, automatic ones marked, size, age), saves one
+  (a "disk only" box for a running machine; a stopped one saves its disk), starts from one and deletes one. After a restore the
+  toast names the safety checkpoint. It works for any machine the daemon snapshots, so it applies to macOS instances.
+  There is no Studio view of `mac diff`.
+- `mac build` still refuses `SNAPSHOT`: a saved running state is bound to this Mac and its macOS build and cannot move to
+  another one.
 
 ## Preflight: `fluxctl mac doctor [--json]`
 
@@ -773,6 +824,12 @@ These come from the design and from macOS itself; they apply to the whole workfl
 others, a comparison with `fluxctl mac`, and a prioritised backlog.
 
 ## Not verified
+
+Checkpoints (`mac checkpoint`, `checkpoints`, `diff`, `run --from-checkpoint`, the safety checkpoint before a restore, the disk-space
+check, the Studio Protect tab): unit-tested with a fake daemon, temporary files and the Studio helper tests; the Studio bundle type-checks
+and builds. Never run against a real daemon or a macOS guest, so these are unchecked: that a memory checkpoint of a running guest then
+resumes, the pause length, the `auto-before-restore` save on a real restore (and its pruning), the size of a memory checkpoint, `mac diff` on
+a multi-GiB disk, and the Studio tab in a browser.
 
 The observability options (`inspect --format`, `images --format`, `events --since/--filter`, `logs -t`, `system info/version`) were never run against a daemon or a Mac: the template engine, filters, time parsing, line stamping and the info document are unit-tested; the HTTP calls (`/v1/events?since=`, `/v1/openapi.json`, the two log requests) are not. The daemon's version is read from the OpenAPI document and has not been checked against a running daemon.
 

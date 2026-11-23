@@ -111,6 +111,88 @@ pub(crate) fn retarget_metadata(raw: &[u8], disk: &std::path::Path) -> Result<(V
     Ok((serde_json::to_vec_pretty(&spec)?, clone))
 }
 
+/// What a restore with a safety checkpoint did. `safety_checkpoint` is the tag the VM's state before the restore was saved
+/// under (a macOS guest only); `None` when no checkpoint was taken (another backend, or the caller opted out).
+#[derive(Debug, Clone)]
+pub struct SafeRestore {
+    pub vm: VmRecord,
+    pub safety_checkpoint: Option<String>,
+    /// `true` when that checkpoint holds memory (rolling back resumes the guest where it was), `false` when it is the disk only.
+    pub safety_has_memory: bool,
+}
+
+impl VmManager {
+    /// [`Self::restore_vm_snapshot`], but a macOS (vz) guest first has its CURRENT state saved as an automatic checkpoint
+    /// (`auto-before-restore-<utc>`), so a restore is never one-way. Memory is saved when the guest runs and the runner can;
+    /// otherwise the disk only. If even that cannot be saved the restore is refused and nothing changes: say so plainly.
+    /// Only the newest [`fluxvm_apple::AUTO_CHECKPOINT_KEEP`] automatic checkpoints are kept; named ones never are removed.
+    pub async fn restore_vm_snapshot_safe(
+        self: &Arc<Self>,
+        id: Uuid,
+        tag: &str,
+    ) -> Result<SafeRestore> {
+        let vm = self.get(id).await?;
+        let mut safety: Option<(String, bool)> = None;
+        if vm.backend == BackendKind::Vz && !crate::procbox_sandbox::is_procbox(&vm) {
+            crate::validate_snapshot_tag(tag)?;
+            let dir = fluxvm_apple::snapshot_dir(&vm.workspace, tag);
+            if !dir.join(fluxvm_apple::STATE_FILE).is_file() && !dir.join("disk.raw").is_file() {
+                return Err(RestoreError::NoSnapshot(format!(
+                    "VM {id} has no checkpoint {tag:?}. List them with `fluxctl mac checkpoints`"
+                ))
+                .into());
+            }
+            if matches!(
+                vm.status,
+                VmStatus::Running | VmStatus::Paused | VmStatus::Stopped
+            ) {
+                safety = Some(self.take_safety_checkpoint(&vm).await?);
+            }
+        }
+        let vm = self.restore_vm_snapshot(id, tag).await?;
+        if let Some((saved, _)) = &safety {
+            let removed = fluxvm_apple::prune_auto_checkpoints(
+                &vm.workspace,
+                fluxvm_apple::AUTO_CHECKPOINT_KEEP,
+                &[saved.as_str(), tag],
+            );
+            if !removed.is_empty() {
+                tracing::info!(%id, ?removed, "pruned old automatic checkpoints");
+            }
+        }
+        Ok(SafeRestore {
+            vm,
+            safety_has_memory: safety.as_ref().is_some_and(|(_, m)| *m),
+            safety_checkpoint: safety.map(|(t, _)| t),
+        })
+    }
+
+    async fn take_safety_checkpoint(self: &Arc<Self>, vm: &VmRecord) -> Result<(String, bool)> {
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let tag = fluxvm_apple::auto_checkpoint_tag("before-restore", &stamp);
+        let running = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
+        let mut first_error = None;
+        if running {
+            match self.create_vm_snapshot_with(vm.id, &tag, true).await {
+                Ok(()) => return Ok((tag, true)),
+                Err(e) => first_error = Some(format!("{e:#}")),
+            }
+        }
+        match self.create_vm_snapshot_with(vm.id, &tag, false).await {
+            Ok(()) => Ok((tag, false)),
+            Err(e) => {
+                let why = first_error.unwrap_or_else(|| format!("{e:#}"));
+                Err(RestoreError::Conflict(format!(
+                    "could not save your current state first, so nothing was changed: {why}. Free some disk space \
+                     (`fluxctl mac checkpoints` lists what can go) and retry, or restore without the safety checkpoint \
+                     (`--no-safety-checkpoint`)"
+                ))
+                .into())
+            }
+        }
+    }
+}
+
 impl VmManager {
     /// Restore a VM from a snapshot tag. A running or paused flux-vm VM is
     /// restored in place (memory, CPU, devices and disk); a vz VM is stopped if
