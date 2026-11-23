@@ -23,6 +23,8 @@
 //! never run against a daemon.
 
 use crate::mac_compose_cfg as cfg;
+use crate::mac_compose_ext::{self as ext, Condition, HealthcheckCfg, PlacementCfg};
+use crate::mac_compose_watch::{Develop, WatchRule};
 use crate::mac_config;
 use crate::mac_inspect::{PROJECT_LABEL, SERVICE_LABEL};
 use crate::mac_instance::{LaunchSpec, Restart, parse_label, parse_mount};
@@ -80,6 +82,38 @@ pub enum ComposeCommand {
         /// Also start services with this profile (repeatable; also `COMPOSE_PROFILES=a,b`).
         #[arg(long = "profile", value_name = "NAME")]
         profile: Vec<String>,
+        /// Run SERVICE as N copies (`--scale web=2`, repeatable). Copies are named PROJECT-SERVICE-1, -2, ... and each is a macOS
+        /// VM, so on one Mac the total at the same moment is still at most 2.
+        #[arg(long, value_name = "SERVICE=N")]
+        scale: Vec<String>,
+        /// Spread the project over the Macs of this inventory (see `fluxctl mac-fleet`), at most 2 macOS VMs per Mac. With
+        /// `--dry-run` it only explains where each service would go and why.
+        #[arg(long, value_name = "INVENTORY")]
+        fleet: Option<PathBuf>,
+    },
+    /// Start the project, then watch each service's `develop: watch:` files and apply restart policies until Ctrl-C.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac compose watch\n  fluxctl mac compose watch --no-up     # the project is already up\n\nA rule is {path, action, target, ignore}; actions: sync, sync+restart, restart, rebuild. `restart: on-failure:3` is enforced here (3 restarts, then it stays down)."
+    )]
+    Watch {
+        #[command(flatten)]
+        t: Target,
+        /// Do not run `up` first: watch what is already running.
+        #[arg(long)]
+        no_up: bool,
+        /// Seconds each guest may take to answer on SSH.
+        #[arg(long, default_value_t = 900, value_name = "SECS")]
+        wait: u64,
+        /// Seconds between looks at the files.
+        #[arg(long, default_value_t = 2, value_name = "SECS")]
+        interval: u64,
+        /// Stop after this many looks (0 = until Ctrl-C).
+        #[arg(long, default_value_t = 0, hide = true)]
+        polls: u64,
+        #[arg(long = "profile", value_name = "NAME")]
+        profile: Vec<String>,
+        #[arg(long, value_name = "SERVICE=N")]
+        scale: Vec<String>,
     },
     /// Stop and delete the project's instances (reverse depends_on order).
     Down {
@@ -87,6 +121,9 @@ pub enum ComposeCommand {
         file: Option<PathBuf>,
         #[arg(short = 'p', long = "project-name")]
         project: Option<String>,
+        /// Remove the project from every Mac of this inventory (the project was started with `up --fleet`).
+        #[arg(long, value_name = "INVENTORY")]
+        fleet: Option<PathBuf>,
     },
     /// Show a service's console log (the VM's serial output; `mac logs`).
     Logs {
@@ -123,6 +160,9 @@ pub enum ComposeCommand {
         /// Include stopped instances.
         #[arg(short = 'a', long)]
         all: bool,
+        /// List the project's instances on every Mac of this inventory.
+        #[arg(long, value_name = "INVENTORY")]
+        fleet: Option<PathBuf>,
     },
     /// Print the compose file as it will be used: `${VAR}` filled in (and `.env` read), `include` and `extends` merged, `env_file`
     /// read into `environment`, only the selected profiles. `--quiet` only checks it. Needs no daemon.
@@ -293,6 +333,9 @@ impl ComposeCommand {
         matches!(
             self,
             ComposeCommand::Up { dry_run: true, .. }
+                | ComposeCommand::Up { fleet: Some(_), .. }
+                | ComposeCommand::Down { fleet: Some(_), .. }
+                | ComposeCommand::Ps { fleet: Some(_), .. }
                 | ComposeCommand::Config { .. }
                 | ComposeCommand::Images { .. }
                 | ComposeCommand::Pull { .. }
@@ -357,6 +400,15 @@ struct Service {
     mem_limit: Option<Scalar>,
     #[serde(default)]
     user: Option<String>,
+    /// Replaces the image's HEALTHCHECK (and is what `service_healthy` waits for).
+    #[serde(default)]
+    healthcheck: Option<HealthcheckCfg>,
+    /// `develop: watch:` rules for `compose watch`.
+    #[serde(default)]
+    develop: Option<Develop>,
+    /// Where the service may run in a Mac fleet (`--fleet`); ignored on one Mac.
+    #[serde(default)]
+    placement: Option<PlacementCfg>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -502,11 +554,26 @@ pub struct ServicePlan {
     pub build: Option<BuildPlan>,
     /// Secrets and configs: files from this Mac shared read-only into the guest.
     pub files: Vec<cfg::FileMount>,
+    /// Every `depends_on` entry with its condition.
+    pub conditions: BTreeMap<String, Condition>,
+    /// Copy number (1-based) and how many copies of this service there are (`up --scale`).
+    pub replica: u32,
+    pub replicas: u32,
+    /// `develop: watch:` rules, absolute on this Mac.
+    pub watch: Vec<WatchRule>,
+    pub placement: PlacementCfg,
+    /// Something waits for this service with `service_completed_successfully`: its command runs to the end in the foreground,
+    /// and its VM is stopped when it succeeds (which frees its macOS slot).
+    pub run_to_completion: bool,
+    /// `restart: on-failure:N`: N restarts at most (enforced by `compose watch`).
+    pub restart_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub project: String,
+    /// Most macOS VMs this project holds at the same moment on one Mac (see [`peak_slots`]).
+    pub peak_slots: usize,
     /// In start order.
     pub services: Vec<ServicePlan>,
 }
@@ -624,6 +691,58 @@ pub fn resolve_with(
     lookup: impl Fn(&str) -> Option<String> + Copy,
     profiles: &[String],
 ) -> Result<Resolved> {
+    resolve_ext(
+        file,
+        project,
+        base,
+        home,
+        lookup,
+        profiles,
+        &BTreeMap::new(),
+        false,
+    )
+}
+
+/// The VMs a project holds at the same moment on one Mac, in start order. A service that others wait for with
+/// `service_completed_successfully` is stopped when it succeeds, before those start, so it gives its slot back.
+pub fn peak_slots(services: &[ServicePlan]) -> usize {
+    let mut live: Vec<&ServicePlan> = vec![];
+    let mut peak = 0;
+    for s in services {
+        live.retain(|l| {
+            !(l.run_to_completion && s.conditions.get(&l.service) == Some(&Condition::Completed))
+        });
+        live.push(s);
+        peak = peak.max(live.len());
+    }
+    peak
+}
+
+/// What `depends_on` asks of each dependency (a list means `service_started`).
+fn conditions_of(service: &str, svc: &Service) -> Result<BTreeMap<String, Condition>> {
+    match &svc.depends_on {
+        None => Ok(BTreeMap::new()),
+        Some(DependsOn::List(l)) => Ok(l.iter().map(|d| (d.clone(), Condition::Started)).collect()),
+        Some(DependsOn::Map(m)) => m
+            .iter()
+            .map(|(d, v)| Ok((d.clone(), ext::condition_of(service, d, v)?)))
+            .collect(),
+    }
+}
+
+/// [`resolve_with`] plus `--scale` copies. On one Mac the project may hold at most [`MAX_SERVICES`] VMs at once; with `fleet`
+/// that limit is per Mac and is checked by the fleet planner instead.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_ext(
+    file: &ComposeFile,
+    project: Option<&str>,
+    base: &Path,
+    home: Option<&Path>,
+    lookup: impl Fn(&str) -> Option<String> + Copy,
+    profiles: &[String],
+    scale: &BTreeMap<String, u32>,
+    fleet: bool,
+) -> Result<Resolved> {
     ensure!(
         !file.services.is_empty(),
         "the compose file defines no services"
@@ -637,11 +756,23 @@ pub fn resolve_with(
         !active.is_empty(),
         "no service is selected: every service has profiles; pass --profile NAME (or COMPOSE_PROFILES)"
     );
-    ensure!(
-        active.len() <= MAX_SERVICES,
-        "this file selects {} services, but a Mac runs at most {MAX_SERVICES} macOS VMs at once (Apple's licence limit). Remove services or split the file, or select fewer with `profiles:` and --profile; macOS guests cannot be scaled past 2 per host",
-        active.len()
-    );
+    for s in scale.keys() {
+        ensure!(
+            active.iter().any(|(n, _)| *n == s),
+            "{}",
+            crate::mac_errors::coded(
+                format!(
+                    "--scale names {s:?}, which is not a selected service of this file (selected: {})",
+                    active
+                        .iter()
+                        .map(|(n, _)| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "MAC_COMPOSE_SCALE"
+            )
+        );
+    }
     let project = project
         .map(str::to_string)
         .or_else(|| file.name.clone())
@@ -651,6 +782,7 @@ pub fn resolve_with(
         "project name {project:?} must be lowercase letters, digits, - or _"
     );
     let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut conds: BTreeMap<String, BTreeMap<String, Condition>> = BTreeMap::new();
     for (name, svc) in active.iter().map(|(n, s)| (*n, *s)) {
         ensure!(
             valid_name(name),
@@ -661,7 +793,7 @@ pub fn resolve_with(
             Some(DependsOn::List(l)) => l.clone(),
             Some(DependsOn::Map(m)) => m.keys().cloned().collect(),
         };
-        check_conditions(name, svc)?;
+        conds.insert(name.clone(), conditions_of(name, svc)?);
         for dep in &d {
             if !active.iter().any(|(n, _)| *n == dep)
                 && let Some(p) = file.services.get(dep)
@@ -760,6 +892,20 @@ pub fn resolve_with(
             Some(r) => Some(Restart::parse(r).with_context(|| ctx("restart"))?),
             None => None,
         };
+        let restart_limit = match &svc.restart {
+            Some(r) => ext::restart_limit(r)?,
+            None => None,
+        };
+        let healthcheck = match &svc.healthcheck {
+            Some(h) => Some(h.resolve(&name)?),
+            None => None,
+        };
+        let placement = svc.placement.clone().unwrap_or_default();
+        placement.check(&name)?;
+        let watch = match &svc.develop {
+            Some(d) => d.rules(&name, base, svc.build.is_some())?,
+            None => vec![],
+        };
         let cpus = match svc.cpus {
             Some(c) => {
                 ensure!(
@@ -794,20 +940,109 @@ pub fn resolve_with(
                 labels,
                 restart,
                 project: Some((project.clone(), name.clone())),
-                healthcheck: None,
+                healthcheck,
             },
             command,
             env: env_pairs,
             workdir: svc.working_dir.clone(),
             user: svc.user.clone(),
             depends_on: deps[&name].clone(),
-            healthy_deps: healthy_deps(svc),
+            healthy_deps: conds[&name]
+                .iter()
+                .filter(|(_, c)| **c == Condition::Healthy)
+                .map(|(d, _)| d.clone())
+                .collect(),
+            conditions: conds[&name].clone(),
+            replica: 1,
+            replicas: 1,
+            watch,
+            placement,
+            run_to_completion: false,
+            restart_limit,
             build,
             has_dependents: depended.contains(&name),
             files,
         });
     }
-    Ok(Resolved { project, services })
+    let waited: BTreeSet<String> = services
+        .iter()
+        .flat_map(|s| {
+            s.conditions
+                .iter()
+                .filter(|(_, c)| **c == Condition::Completed)
+                .map(|(d, _)| d.clone())
+        })
+        .collect();
+    let mut expanded = Vec::new();
+    for mut s in services {
+        s.run_to_completion = waited.contains(&s.service);
+        let n = scale.get(&s.service).copied().unwrap_or(1);
+        if n > 1 {
+            if !fleet && let Some(p) = s.spec.publish.iter().find(|p| p.contains(':')) {
+                return Err(crate::mac_errors::coded(
+                    format!(
+                        "service {:?} is scaled to {n} but publishes {p:?}: every copy would want the same port on this Mac. Remove the fixed host port from `ports:`, or place the copies on different Macs with --fleet",
+                        s.service
+                    ),
+                    "MAC_COMPOSE_SCALE",
+                ));
+            }
+            ensure!(
+                !s.run_to_completion,
+                "{}",
+                crate::mac_errors::coded(
+                    format!(
+                        "service {:?} runs to completion and cannot be scaled",
+                        s.service
+                    ),
+                    "MAC_COMPOSE_SCALE"
+                )
+            );
+        }
+        for k in 1..=n {
+            let mut c = s.clone();
+            c.replica = k;
+            c.replicas = n;
+            c.spec.name = ext::instance_name(&project, &s.service, k, n);
+            expanded.push(c);
+        }
+    }
+    let services = expanded;
+    let peak = peak_slots(&services);
+    if !fleet {
+        ensure!(
+            peak <= MAX_SERVICES,
+            "this file selects {} services ({} VMs, at most {peak} at the same moment), but a Mac runs at most {MAX_SERVICES} macOS VMs at once (Apple's licence limit). Remove services or split the file, select fewer with `profiles:` and --profile, let a finishing service give its slot back (`depends_on: {{NAME: {{condition: service_completed_successfully}}}}`), or spread the project over several Macs with `--fleet INVENTORY`",
+            active.len(),
+            services.len()
+        );
+    }
+    Ok(Resolved {
+        project,
+        peak_slots: peak,
+        services,
+    })
+}
+
+/// Like [`resolve_text`] for a fleet: no one-Mac limit.
+#[cfg(test)]
+pub(crate) fn resolve_fleet_text(y: &str) -> Result<Resolved> {
+    resolve_ext(
+        &parse(y)?,
+        None,
+        Path::new("/p"),
+        None,
+        |_| None,
+        &[],
+        &BTreeMap::new(),
+        true,
+    )
+}
+
+/// A parsed compose text resolved the way the tests want it (project `p`, nothing selected by profile).
+#[cfg(test)]
+pub(crate) fn resolve_text(y: &str) -> Result<Resolved> {
+    resolve(&parse(y)?, None, Path::new("/p"), None, |_| None)
 }
 
 fn build_plan(b: &BuildSpec, base: &Path) -> BuildPlan {
@@ -843,46 +1078,19 @@ fn needs_build(build_flag: bool, no_build: bool, image_in_store: bool) -> Result
     })
 }
 
-/// Refuse `depends_on` conditions that cannot mean anything here: a macOS service is a VM that keeps running, so
-/// `service_completed_successfully` is refused, as is any unknown condition (or key) instead of treating it as "started".
-fn check_conditions(service: &str, svc: &Service) -> Result<()> {
-    let Some(DependsOn::Map(m)) = &svc.depends_on else {
-        return Ok(());
-    };
-    for (dep, v) in m {
-        let ctx = || format!("service {service:?}: depends_on {dep:?}");
-        match v["condition"].as_str() {
-            None | Some("service_started" | "service_healthy") => {}
-            Some("service_completed_successfully") => bail!(
-                "{}: condition service_completed_successfully is not supported (a macOS service is a VM that keeps running; use service_started or service_healthy)",
-                ctx()
-            ),
-            Some(other) => bail!(
-                "{}: unknown condition {other:?} (service_started or service_healthy)",
-                ctx()
-            ),
-        }
-    }
-    Ok(())
-}
-
-/// The `depends_on` entries asking for `condition: service_healthy`.
-fn healthy_deps(svc: &Service) -> Vec<String> {
-    match &svc.depends_on {
-        Some(DependsOn::Map(m)) => m
-            .iter()
-            .filter(|(_, v)| v["condition"].as_str() == Some("service_healthy"))
-            .map(|(k, _)| k.clone())
-            .collect(),
-        _ => vec![],
-    }
-}
-
 pub fn render_plan(r: &Resolved) -> String {
     let mut out = format!(
-        "project {} ({} of {MAX_SERVICES} macOS VMs)\n",
+        "project {} ({})\n",
         r.project,
-        r.services.len()
+        if r.peak_slots == r.services.len() && r.services.len() <= MAX_SERVICES {
+            format!("{} of {MAX_SERVICES} macOS VMs", r.services.len())
+        } else {
+            format!(
+                "{} macOS VMs, at most {} at once; one Mac allows {MAX_SERVICES}",
+                r.services.len(),
+                r.peak_slots
+            )
+        }
     );
     for (i, s) in r.services.iter().enumerate() {
         let after = if s.depends_on.is_empty() {
@@ -894,6 +1102,8 @@ pub fn render_plan(r: &Resolved) -> String {
                 .map(|d| {
                     if s.healthy_deps.contains(d) {
                         format!("{d} (healthy)")
+                    } else if s.conditions.get(d) == Some(&Condition::Completed) {
+                        format!("{d} (finished)")
                     } else {
                         d.clone()
                     }
@@ -901,8 +1111,23 @@ pub fn render_plan(r: &Resolved) -> String {
                 .collect();
             format!(" after {}", list.join(", "))
         };
+        let mut notes: Vec<String> = vec![];
+        if s.run_to_completion {
+            notes.push("runs to the end, then its VM is stopped".into());
+        }
+        if !s.watch.is_empty() {
+            notes.push(format!("{} watch rule(s)", s.watch.len()));
+        }
+        if s.replicas > 1 {
+            notes.push(format!("copy {} of {}", s.replica, s.replicas));
+        }
+        let notes = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", notes.join("; "))
+        };
         out.push_str(&format!(
-            "{}. {} = {} from {}{after}\n",
+            "{}. {} = {} from {}{after}{notes}\n",
             i + 1,
             s.service,
             s.spec.name,
@@ -961,6 +1186,17 @@ fn load_with(
     project: Option<&str>,
     profiles: &[String],
 ) -> Result<Resolved> {
+    load_scaled(file, project, profiles, &BTreeMap::new(), false)
+}
+
+/// [`load_with`] with `--scale` copies; `fleet` lifts the one-Mac limit (the fleet planner checks it per Mac).
+fn load_scaled(
+    file: Option<PathBuf>,
+    project: Option<&str>,
+    profiles: &[String],
+    scale: &BTreeMap<String, u32>,
+    fleet: bool,
+) -> Result<Resolved> {
     let path = find_file(file)?;
     let abs = std::fs::canonicalize(&path).unwrap_or(path.clone());
     let base = abs.parent().unwrap_or(Path::new("."));
@@ -971,8 +1207,17 @@ fn load_with(
     let parsed =
         from_value(serde_yaml::Value::Mapping(top)).with_context(|| path.display().to_string())?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    resolve_with(&parsed, project, base, home.as_deref(), lk, profiles)
-        .with_context(|| path.display().to_string())
+    resolve_ext(
+        &parsed,
+        project,
+        base,
+        home.as_deref(),
+        lk,
+        profiles,
+        scale,
+        fleet,
+    )
+    .with_context(|| path.display().to_string())
 }
 
 /// `compose up --dry-run`: no daemon.
@@ -982,9 +1227,28 @@ pub fn run_client(cmd: ComposeCommand) -> Result<()> {
             file,
             project,
             profile,
+            scale,
+            fleet,
+            wait,
+            dry_run,
             ..
         } => {
-            let r = load_with(file, project.as_deref(), &profiles_from_env(&profile))?;
+            let scale = ext::parse_scale(&scale)?;
+            let r = load_scaled(
+                file,
+                project.as_deref(),
+                &profiles_from_env(&profile),
+                &scale,
+                fleet.is_some(),
+            )?;
+            if let Some(inv) = fleet {
+                return crate::mac_compose_fleet::up_command(
+                    &r,
+                    &inv,
+                    dry_run,
+                    wait.unwrap_or(900),
+                );
+            }
             let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
             for s in &r.services {
                 // A service with `build:` may have no image yet: `up` builds it.
@@ -1006,6 +1270,13 @@ pub fn run_client(cmd: ComposeCommand) -> Result<()> {
                         .iter()
                         .any(|d| &d.service == dep && d.build.is_some());
                     let has = built
+                        || r.services.iter().any(|d| {
+                            &d.service == dep
+                                && matches!(
+                                    d.spec.healthcheck,
+                                    Some(crate::mac_lifecycle::HcSetting::Cmd(_))
+                                )
+                        })
                         || image
                             .as_deref()
                             .and_then(|i| store.resolve(i).ok())
@@ -1114,6 +1385,23 @@ pub fn run_client(cmd: ComposeCommand) -> Result<()> {
                     .with_context(|| format!("service {svc:?}: push {image}"))?;
             }
             Ok(())
+        }
+        ComposeCommand::Down {
+            file,
+            project,
+            fleet: Some(inv),
+        } => {
+            let (project, _) = load_existing(file, project.as_deref())?;
+            crate::mac_compose_fleet::down_command(&project, &inv)
+        }
+        ComposeCommand::Ps {
+            file,
+            project,
+            fleet: Some(inv),
+            ..
+        } => {
+            let (project, _) = load_existing(file, project.as_deref())?;
+            crate::mac_compose_fleet::ps_command(&project, &inv)
         }
         _ => bail!("not a client-side compose command"),
     }
@@ -1507,7 +1795,7 @@ fn check_deps_running(
     Ok(())
 }
 
-async fn project_instances(
+pub(crate) async fn project_instances(
     r: &crate::remote::Remote,
     project: &str,
 ) -> Result<Vec<serde_json::Value>> {
@@ -1549,6 +1837,208 @@ async fn service_instance(
         .with_context(|| format!("no instance for service {service:?} in project {project:?} (`fluxctl mac compose ps -a`)"))
 }
 
+/// Does the service have a healthcheck to wait for: its own `healthcheck:` (not disabled), else the image's?
+fn has_healthcheck(store: &crate::mac_store::Store, s: &ServicePlan) -> Result<bool> {
+    use crate::mac_lifecycle::HcSetting;
+    Ok(match &s.spec.healthcheck {
+        Some(HcSetting::Cmd(_)) => true,
+        Some(HcSetting::Off) => false,
+        None => mac_config::load(&store.resolve(&s.spec.image)?)?
+            .healthcheck
+            .is_some(),
+    })
+}
+
+/// Build the images of services with `build:`: all with `--build`, otherwise only those missing from the store.
+async fn build_images(
+    r: &crate::remote::Remote,
+    store: &crate::mac_store::Store,
+    plan: &Resolved,
+    build: bool,
+    no_build: bool,
+    wait: u64,
+) -> Result<()> {
+    let mut built: BTreeSet<&str> = BTreeSet::new();
+    for s in &plan.services {
+        let Some(b) = &s.build else { continue };
+        if !built.insert(&s.spec.image) {
+            continue; // copies of one service share its image
+        }
+        let present = store.resolve(&s.spec.image).is_ok();
+        if !needs_build(build, no_build, present)
+            .with_context(|| format!("service {:?}: image {}", s.service, s.spec.image))?
+        {
+            continue;
+        }
+        eprintln!("building {} from {} ...", s.spec.image, b.context.display());
+        Box::pin(crate::mac_cmd::run_daemon(
+            r,
+            build_command(&s.spec.image, b, wait),
+        ))
+        .await
+        .with_context(|| format!("service {:?}: build", s.service))?;
+    }
+    Ok(())
+}
+
+/// Create and start one instance: wait for what it depends on, start the VM, record the owner, run its command (in the
+/// foreground for a one-shot that others wait for, which is then stopped to free its slot).
+async fn start_service(
+    r: &crate::remote::Remote,
+    store: &crate::mac_store::Store,
+    plan: &Resolved,
+    s: &ServicePlan,
+    wait: u64,
+    health_timeout: u64,
+) -> Result<()> {
+    use crate::mac_instance::{GuestJob, launch, run_in_guest};
+    for dep in &s.healthy_deps {
+        for d in plan.services.iter().filter(|d| &d.service == dep) {
+            eprintln!("waiting for {} to be healthy ...", d.spec.name);
+            crate::mac_health::wait_instance_healthy(r, &d.spec.name, health_timeout)
+                .await
+                .with_context(|| format!("service {:?} depends_on {dep:?} being healthy (started instances stay: `fluxctl mac compose down`)", s.service))?;
+        }
+    }
+    eprintln!("starting {} ...", s.spec.name);
+    let cfg = mac_config::load(&store.resolve(&s.spec.image)?)?;
+    let mut spec = s.spec.clone();
+    let staged = cfg::stage_files(
+        &cfg::stage_root(),
+        &plan.project,
+        &s.service,
+        &s.files,
+        spec.mounts.len(),
+    )?;
+    spec.mounts.extend(staged.mounts);
+    let command = with_links(
+        mac_config::effective_command(&cfg, &s.command, &s.env, s.workdir.as_deref()),
+        &staged.links,
+    );
+    if s.run_to_completion && command.is_none() {
+        return Err(crate::mac_errors::coded(
+            format!(
+                "service {:?} is waited for with service_completed_successfully but has no `command:` and its image has no CMD, so there is nothing to run to the end",
+                s.service
+            ),
+            "MAC_COMPOSE_DEP_FAILED",
+        ));
+    }
+    let id = launch(r, store, &spec).await?;
+    // Ownership for `mac reap --owner`: who brought the project up and when (never an expiry).
+    let owner = crate::mac_reap::stamp(
+        Some(&crate::mac_reap::current_user()),
+        None,
+        crate::mac_health::now_unix(),
+    );
+    r.call(
+        reqwest::Method::PATCH,
+        &format!("/v1/vms/{id}"),
+        Some(owner),
+    )
+    .await
+    .with_context(|| format!("could not record the owner of {}", s.spec.name))?;
+    if command.is_some() || s.has_dependents || !spec.mounts.is_empty() {
+        let job = GuestJob {
+            user: s
+                .user
+                .clone()
+                .or(cfg.user.clone())
+                .unwrap_or_else(|| crate::mac_build_exec::DEFAULT_USER.into()),
+            wait,
+            command,
+            mounts: spec.mounts.clone(),
+            detach: !s.run_to_completion,
+            ..Default::default()
+        };
+        let ran = run_in_guest(r, &id, &job).await;
+        if s.run_to_completion {
+            if let Err(e) = ran {
+                return Err(crate::mac_errors::coded(
+                    format!(
+                        "service {:?} did not finish successfully, so what waits for it is not started: {e:#} (its VM {} stays for you to look at: `fluxctl mac logs {}`; `fluxctl mac compose down` removes it)",
+                        s.service, s.spec.name, s.spec.name
+                    ),
+                    "MAC_COMPOSE_DEP_FAILED",
+                ));
+            }
+            // Done: stop it so its macOS slot is free for the services that waited for it.
+            crate::mac_more::run_daemon(
+                r,
+                crate::mac_more::MacMore::Stop {
+                    names: vec![s.spec.name.clone()],
+                },
+            )
+            .await
+            .with_context(|| format!("{} finished but could not be stopped", s.spec.name))?;
+            eprintln!("{} finished successfully and was stopped", s.spec.name);
+            return Ok(());
+        }
+        ran.with_context(|| {
+            format!(
+                "service {:?} did not come up (instances left running: `fluxctl mac compose down`)",
+                s.service
+            )
+        })?;
+    }
+    println!("{}", s.spec.name);
+    Ok(())
+}
+
+/// Bring the project up for `compose watch`: build what is missing and start what is not there yet.
+pub(crate) async fn up_project(
+    r: &crate::remote::Remote,
+    plan: &Resolved,
+    wait: u64,
+) -> Result<()> {
+    let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+    let existing = project_instances(r, &plan.project).await?;
+    build_images(r, &store, plan, false, false, wait).await?;
+    for s in &plan.services {
+        if existing
+            .iter()
+            .any(|v| v["name"].as_str() == Some(&s.spec.name))
+        {
+            eprintln!("{} is already there", s.spec.name);
+            continue;
+        }
+        start_service(r, &store, plan, s, wait, 600).await?;
+    }
+    Ok(())
+}
+
+/// A rebuild rule: build the image again, delete the instance (a Mac runs only two macOS VMs) and start it from the new image.
+pub(crate) async fn rebuild_service(
+    r: &crate::remote::Remote,
+    store: &crate::mac_store::Store,
+    sp: &ServicePlan,
+    wait: u64,
+) -> Result<()> {
+    let b = sp
+        .build
+        .as_ref()
+        .with_context(|| format!("service {:?} has no `build:` to run", sp.service))?;
+    Box::pin(crate::mac_cmd::run_daemon(
+        r,
+        build_command(&sp.spec.image, b, wait),
+    ))
+    .await?;
+    if let Ok(vm) = crate::mac_cmd::find_instance(r, &sp.spec.name).await {
+        crate::mac_cmd::delete_instance(r, vm["id"].as_str().context("no id")?).await?;
+    }
+    let plan = Resolved {
+        project: sp
+            .spec
+            .project
+            .as_ref()
+            .map(|p| p.0.clone())
+            .unwrap_or_default(),
+        peak_slots: 1,
+        services: vec![sp.clone()],
+    };
+    start_service(r, store, &plan, sp, wait, 600).await
+}
+
 /// `compose up|down|ps` against the daemon. Never run against a real daemon: see the module notes.
 pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Result<()> {
     use crate::mac_instance::{GuestJob, launch, run_in_guest};
@@ -1563,11 +2053,20 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             wait_healthy,
             health_timeout,
             profile,
+            scale,
+            fleet: _,
         } => {
             // `--wait` is docker's spelling of `--wait-healthy`; its optional value is the SSH wait.
             let wait_healthy = wait_healthy || wait.is_some();
             let wait = wait.unwrap_or(900);
-            let plan = load_with(file, project.as_deref(), &profiles_from_env(&profile))?;
+            let scale = ext::parse_scale(&scale)?;
+            let plan = load_scaled(
+                file,
+                project.as_deref(),
+                &profiles_from_env(&profile),
+                &scale,
+                false,
+            )?;
             ensure!(!dry_run, "internal: dry-run is client side");
             let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
             let existing = project_instances(r, &plan.project).await?;
@@ -1582,104 +2081,27 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 );
             }
             eprint!("{}", render_plan(&plan));
-            {
-                let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
-                for s in &plan.services {
-                    let Some(b) = &s.build else { continue };
-                    let present = store.resolve(&s.spec.image).is_ok();
-                    if !needs_build(build, no_build, present).with_context(|| {
-                        format!("service {:?}: image {}", s.service, s.spec.image)
-                    })? {
-                        continue;
-                    }
-                    eprintln!("building {} from {} ...", s.spec.image, b.context.display());
-                    Box::pin(crate::mac_cmd::run_daemon(
-                        r,
-                        build_command(&s.spec.image, b, wait),
-                    ))
-                    .await
-                    .with_context(|| format!("service {:?}: build", s.service))?;
-                }
-            }
+            build_images(r, &store, &plan, build, no_build, wait).await?;
             eprintln!(
                 "note: at most {MAX_SERVICES} macOS VMs run on one Mac; the daemon refuses (409) if another macOS VM holds a slot"
             );
             let mut started: Vec<String> = Vec::new();
             for s in &plan.services {
-                for dep in &s.healthy_deps {
-                    let dep_name = format!("{}-{dep}", plan.project);
-                    eprintln!("waiting for {dep_name} to be healthy ...");
-                    crate::mac_health::wait_instance_healthy(r, &dep_name, health_timeout)
-                        .await
-                        .with_context(|| format!("service {:?} depends_on {dep:?} being healthy (started instances stay: `fluxctl mac compose down`)", s.service))?;
-                }
-                eprintln!("starting {} ...", s.spec.name);
-                let cfg = mac_config::load(&store.resolve(&s.spec.image)?)?;
-                let mut spec = s.spec.clone();
-                let staged = cfg::stage_files(
-                    &cfg::stage_root(),
-                    &plan.project,
-                    &s.service,
-                    &s.files,
-                    spec.mounts.len(),
-                )?;
-                spec.mounts.extend(staged.mounts);
-                let command = with_links(
-                    mac_config::effective_command(&cfg, &s.command, &s.env, s.workdir.as_deref()),
-                    &staged.links,
-                );
-                let id = match launch(r, &store, &spec).await {
-                    Ok(id) => id,
-                    Err(e) => {
-                        if !started.is_empty() {
-                            eprintln!(
-                                "{} already started: `fluxctl mac compose down` removes them",
-                                started.join(", ")
-                            );
-                        }
-                        return Err(e);
+                if let Err(e) = start_service(r, &store, &plan, s, wait, health_timeout).await {
+                    if !started.is_empty() {
+                        eprintln!(
+                            "{} already started: `fluxctl mac compose down` removes them",
+                            started.join(", ")
+                        );
                     }
-                };
-                started.push(s.spec.name.clone());
-                // Ownership for `mac reap --owner`: who brought the project up and when (never an expiry).
-                let owner = crate::mac_reap::stamp(
-                    Some(&crate::mac_reap::current_user()),
-                    None,
-                    crate::mac_health::now_unix(),
-                );
-                r.call(
-                    reqwest::Method::PATCH,
-                    &format!("/v1/vms/{id}"),
-                    Some(owner),
-                )
-                .await
-                .with_context(|| format!("could not record the owner of {}", s.spec.name))?;
-                if command.is_some() || s.has_dependents || !spec.mounts.is_empty() {
-                    let job = GuestJob {
-                        user: s
-                            .user
-                            .clone()
-                            .or(cfg.user.clone())
-                            .unwrap_or_else(|| crate::mac_build_exec::DEFAULT_USER.into()),
-                        wait,
-                        command,
-                        mounts: spec.mounts.clone(),
-                        detach: true,
-                        ..Default::default()
-                    };
-                    run_in_guest(r, &id, &job)
-                        .await
-                        .with_context(|| format!("service {:?} did not come up (instances left running: `fluxctl mac compose down`)", s.service))?;
+                    return Err(e);
                 }
-                println!("{}", s.spec.name);
+                started.push(s.spec.name.clone());
             }
             if wait_healthy {
                 for s in &plan.services {
-                    // Only an image with a HEALTHCHECK can be waited for; the others are up once SSH answered.
-                    if mac_config::load(&store.resolve(&s.spec.image)?)?
-                        .healthcheck
-                        .is_none()
-                    {
+                    // Only a service with a healthcheck can be waited for; the others are up once SSH answered.
+                    if !has_healthcheck(&store, s)? {
                         continue;
                     }
                     eprintln!("waiting for {} to be healthy ...", s.spec.name);
@@ -1692,7 +2114,26 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
             }
             Ok(())
         }
-        ComposeCommand::Down { file, project } => {
+        ComposeCommand::Watch {
+            t,
+            no_up,
+            wait,
+            interval,
+            polls,
+            profile,
+            scale,
+        } => {
+            let scale = ext::parse_scale(&scale)?;
+            let plan = load_scaled(
+                t.file,
+                t.project.as_deref(),
+                &profiles_from_env(&profile),
+                &scale,
+                false,
+            )?;
+            crate::mac_compose_watch::watch(r, plan, wait, no_up, interval, polls).await
+        }
+        ComposeCommand::Down { file, project, .. } => {
             let (project, mut order) = load_existing(file.clone(), project.as_deref())?;
             order.reverse();
             let mut vms = project_instances(r, &project).await?;
@@ -1963,7 +2404,9 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
         | ComposeCommand::Images { .. }
         | ComposeCommand::Pull { .. }
         | ComposeCommand::Push { .. } => run_client(cmd),
-        ComposeCommand::Ps { file, project, all } => {
+        ComposeCommand::Ps {
+            file, project, all, ..
+        } => {
             let (project, _) = load_existing(file, project.as_deref())?;
             let vms = project_instances(r, &project).await?;
             let rows: Vec<&serde_json::Value> = vms.iter().collect();
@@ -2265,11 +2708,9 @@ mod tests {
 
     #[test]
     fn unsupported_conditions_and_dependencies_on_disabled_profiles_are_refused_with_a_reason() {
-        let e = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: service_completed_successfully\n  db:\n    image: d:1\n").unwrap_err().to_string();
-        assert!(
-            e.contains("service_completed_successfully") && e.contains("keeps running"),
-            "{e}"
-        );
+        let r = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: service_completed_successfully\n  db:\n    image: d:1\n    command: ./once\n").unwrap();
+        let db = r.services.iter().find(|s| s.service == "db").unwrap();
+        assert!(db.run_to_completion, "what is waited for runs to the end");
         let e = res("services:\n  web:\n    image: w:1\n    depends_on:\n      db:\n        condition: nope\n  db:\n    image: d:1\n").unwrap_err().to_string();
         assert!(e.contains("unknown condition"), "{e}");
         let e = res("services:\n  web:\n    image: w:1\n    depends_on: [dbg]\n  dbg:\n    image: d:1\n    profiles: [debug]\n").unwrap_err().to_string();
@@ -2298,16 +2739,32 @@ mod tests {
             wait_healthy: false,
             health_timeout: 600,
             profile: vec![],
+            scale: vec![],
+            fleet: None,
         };
         assert!(up(true).is_client_side());
         assert!(!up(false).is_client_side());
         assert!(
             !ComposeCommand::Down {
                 file: None,
-                project: None
+                project: None,
+                fleet: None
             }
             .is_client_side()
         );
+        let fleet = parse_cmd(&["up", "--fleet", "hosts.yaml"]).unwrap();
+        assert!(fleet.is_client_side(), "--fleet talks ssh, not the daemon");
+        assert!(
+            parse_cmd(&["down", "--fleet", "h.yaml"])
+                .unwrap()
+                .is_client_side()
+        );
+        assert!(
+            parse_cmd(&["ps", "--fleet", "h.yaml"])
+                .unwrap()
+                .is_client_side()
+        );
+        assert!(!parse_cmd(&["watch"]).unwrap().is_client_side());
     }
 
     // ---- the Docker Compose parity commands and file features ---------------------------------------------------------
@@ -2809,5 +3266,114 @@ mod tests {
         assert_eq!(r.services[1].spec.image, "x:1");
         assert_eq!(r.services[1].command, ["go"]);
         assert_eq!(r.services[1].depends_on, ["db"]);
+    }
+
+    // ---- watch, scale, one-shots, healthchecks, restart limits ----------------------------------------------------------
+
+    #[test]
+    fn one_shots_free_their_slot_so_three_services_fit_two_at_a_time() {
+        let y = "services:\n  mig: {image: m:1, command: ./migrate}\n  db: {image: d:1}\n  app:\n    image: a:1\n    depends_on:\n      mig: {condition: service_completed_successfully}\n      db: {condition: service_started}\n";
+        let r = res(y).unwrap();
+        assert_eq!(r.services.len(), 3);
+        assert_eq!(r.peak_slots, 2);
+        assert!(
+            render_plan(&r).contains("mig (finished)")
+                && render_plan(&r).contains("runs to the end")
+        );
+        // Without the one-shot semantics three services are still refused.
+        assert!(res("services:\n  a: {image: x}\n  b: {image: x}\n  c: {image: x}\n").is_err());
+    }
+
+    #[test]
+    fn scale_makes_numbered_copies_within_the_two_vm_limit() {
+        let f = parse("services:\n  web: {image: w:1}\n").unwrap();
+        let go = |n: u32, fleet: bool| {
+            let m: BTreeMap<String, u32> = [("web".to_string(), n)].into();
+            resolve_ext(
+                &f,
+                Some("p"),
+                Path::new("/p"),
+                None,
+                |_| None,
+                &[],
+                &m,
+                fleet,
+            )
+        };
+        let r = go(2, false).unwrap();
+        let names: Vec<_> = r.services.iter().map(|s| s.spec.name.as_str()).collect();
+        assert_eq!(names, ["p-web-1", "p-web-2"]);
+        assert!(
+            r.services
+                .iter()
+                .all(|s| s.service == "web" && s.replicas == 2)
+        );
+        let e = go(3, false).unwrap_err().to_string();
+        assert!(
+            e.contains("at most 2 macOS VMs") && e.contains("--fleet"),
+            "{e}"
+        );
+        assert_eq!(go(3, true).unwrap().services.len(), 3);
+        let e = resolve_ext(
+            &f,
+            Some("p"),
+            Path::new("/p"),
+            None,
+            |_| None,
+            &[],
+            &[("nope".to_string(), 2)].into(),
+            false,
+        )
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("MAC_COMPOSE_SCALE"));
+        let f = parse("services:\n  web: {image: w:1, ports: ['8080:80']}\n").unwrap();
+        let m: BTreeMap<String, u32> = [("web".to_string(), 2)].into();
+        let e = resolve_ext(
+            &f,
+            Some("p"),
+            Path::new("/p"),
+            None,
+            |_| None,
+            &[],
+            &m,
+            false,
+        )
+        .unwrap_err();
+        assert!(format!("{e:#}").contains("same port"), "{e:#}");
+    }
+
+    #[test]
+    fn watch_healthcheck_placement_and_restart_keys_resolve() {
+        let r = res("services:\n  a:\n    image: x\n    restart: 'on-failure:3'\n    build: app\n    healthcheck: {test: ./ok, interval: 3s}\n    develop:\n      watch:\n        - {action: sync, path: ./src, target: /app}\n        - {action: rebuild, path: Package.swift}\n    placement: {host: mini-1, labels: [xcode=15], ac_only: true}\n").unwrap();
+        let a = &r.services[0];
+        assert_eq!(a.restart_limit, Some(3));
+        assert_eq!(a.watch.len(), 2);
+        assert_eq!(a.placement.host.as_deref(), Some("mini-1"));
+        assert!(matches!(
+            a.spec.healthcheck,
+            Some(crate::mac_lifecycle::HcSetting::Cmd(_))
+        ));
+        assert!(render_plan(&r).contains("2 watch rule(s)"));
+        let e = res("services:\n  a: {image: x, restart: 'always:2'}\n").unwrap_err();
+        assert!(format!("{e:#}").contains("MAC_COMPOSE_RESTART"));
+        let e = res("services:\n  a: {image: x, develop: {watch: [{action: rebuild, path: p}]}}\n")
+            .unwrap_err();
+        assert!(format!("{e:#}").contains("MAC_COMPOSE_WATCH_RULE"));
+    }
+
+    #[test]
+    fn watch_and_the_new_up_flags_parse() {
+        match parse_cmd(&["up", "--scale", "web=2", "--scale", "db=1"]).unwrap() {
+            ComposeCommand::Up { scale, .. } => assert_eq!(scale.len(), 2),
+            c => panic!("{c:?}"),
+        }
+        assert!(matches!(
+            parse_cmd(&["watch", "--no-up", "--interval", "5"]).unwrap(),
+            ComposeCommand::Watch {
+                no_up: true,
+                interval: 5,
+                ..
+            }
+        ));
     }
 }

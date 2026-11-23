@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -58,5 +58,16 @@ describe('mac actions', () => {
     expect(explainError('ci', 'login session is locked')).toMatch(/Unlock the Mac/);
     expect(explainError('ci', 'admin role required')).toMatch(/administrator/);
     expect(explainError('ci', 'boom')).toMatch(/fluxctl mac doctor/);
+  });
+});
+
+describe('composeCommands', () => {
+  it('spells watch, scale and the fleet plan as fluxctl commands for the project', () => {
+    const c = composeCommands('shop');
+    expect(c.map((x) => x.label)).toEqual(['Watch', 'Scale', 'Fleet plan']);
+    expect(c[0].cmd).toBe('fluxctl mac compose -p shop watch');
+    expect(c[1].cmd).toContain('--scale SERVICE=2');
+    expect(c[2].cmd).toContain('--dry-run --fleet');
+    expect(c.every((x) => x.cmd.startsWith('fluxctl mac compose'))).toBe(true);
   });
 });

@@ -126,6 +126,12 @@ export const IMAGES_COMMAND = 'fluxctl mac images';
 export const LOGINS_COMMAND = 'fluxctl mac logins';
 export const loginCommand = (registry?: string): string => `fluxctl mac login ${registry ?? 'REGISTRY'}`;
 export const COMPOSE_COMMAND = 'fluxctl mac compose ls';
+/** The compose commands of a project, as fluxctl spells them: watch the files, scale a service, and ask where a fleet would run it. */
+export const composeCommands = (project: string): { label: string; cmd: string }[] => [
+  { label: 'Watch', cmd: `fluxctl mac compose -p ${project} watch` },
+  { label: 'Scale', cmd: `fluxctl mac compose -p ${project} up --scale SERVICE=2 --dry-run` },
+  { label: 'Fleet plan', cmd: `fluxctl mac compose up -p ${project} --dry-run --fleet hosts.yaml` },
+];
 export const DOCTOR_COMMAND = 'fluxctl mac doctor';
 
 /** What to say when the Mac page is opened on a host that is not a Mac. */
