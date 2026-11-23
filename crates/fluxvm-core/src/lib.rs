@@ -22,6 +22,7 @@ pub mod kube_app;
 pub mod kube_view;
 pub mod lifecycle;
 pub mod login_session;
+pub mod mac_schedule;
 pub mod mdev;
 pub mod mdns;
 pub mod metrics;

@@ -72,6 +72,7 @@ mod kube_pod;
 mod kube_workloads;
 mod mac_disk_api;
 mod mac_fleet_api;
+mod mac_schedule_api;
 mod mac_view;
 mod macos_pool_api;
 mod setup_doctor;
@@ -1082,6 +1083,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .merge(mac_disk_api::routes())
         .merge(macos_pool_api::routes())
+        .merge(mac_schedule_api::routes())
         .merge(mac_view::routes())
         .merge(audit_api::routes())
         .merge(cluster_health::routes())
