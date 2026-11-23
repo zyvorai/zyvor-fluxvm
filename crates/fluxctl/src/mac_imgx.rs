@@ -187,13 +187,13 @@ pub async fn run_client(cmd: MacImgx) -> Result<()> {
         MacImgx::Manifest {
             command: ManifestCommand::Inspect { reference, json },
         } => {
-            let rep = image::oci_manage::inspect(&reference, crate::mac_cmd::creds(&reference))
+            let rep = fluxvm_image::oci_manage::inspect(&reference, crate::mac_cmd::creds(&reference))
                 .await
                 .map_err(|e| manifest_error(&reference, &e))?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&rep)?);
             } else {
-                print!("{}", image::oci_manage::render_inspect(&rep));
+                print!("{}", fluxvm_image::oci_manage::render_inspect(&rep));
             }
             Ok(())
         }
