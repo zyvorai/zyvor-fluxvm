@@ -9,7 +9,7 @@ import { CopyCmd } from './Images';
 import { MacHomeCard } from './Mac';
 import { BackupsCard } from './Backups';
 import { useAct } from '../lib/act';
-import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle } from '../lib/bundle';
+import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle, previewLines, previewSummary, previewSupportBundle, type BundlePreview } from '../lib/bundle';
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
 import { checkTone, checkWord, needsAttention, notChecked, type SetupReport } from '../lib/doctor';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
@@ -135,11 +135,22 @@ function SupportBundle({ notify }: { notify: Notify }) {
     const d = await downloadSupportBundle();
     notify(bundleSummary(d.name, d.bytes, d.skipped));
   });
+  const [preview, setPreview] = useState<BundlePreview | null>(null);
+  const show = () => void run('bundle-preview', async () => {
+    setPreview(await previewSupportBundle());
+  });
   return (
     <Card title="Support bundle" action={<Button size="sm" onClick={download} busy={busy === 'bundle'}><Download size={14} /> Download support bundle</Button>}>
       <p>One file with the versions, this health report, recent logs, your instances, the settings in effect and disk, memory and network facts. Tokens, passwords, keys and kubeconfig credentials are removed.</p>
       <p className="fx-muted">{BUNDLE_NOTE} If the daemon is stopped, run <code className="fx-mono">{BUNDLE_COMMAND}</code> in a terminal; it works without the daemon.</p>
+      <Button size="sm" variant="ghost" onClick={show} busy={busy === 'bundle-preview'}><ListChecks size={14} /> Show what is included</Button>{' '}
       <Button size="sm" variant="ghost" onClick={() => void copy()}><Copy size={14} /> Copy as fluxctl</Button>
+      {preview ? (
+        <div>
+          <ul className="fx-feed">{previewLines(preview).map((l) => <li key={l}><span className="fx-mono">{l}</span></li>)}</ul>
+          <p className="fx-muted">{previewSummary(preview)}</p>
+        </div>
+      ) : null}
     </Card>
   );
 }

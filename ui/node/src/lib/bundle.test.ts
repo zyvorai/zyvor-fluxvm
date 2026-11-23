@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleFailure, bundleFileName, bundleSummary } from './bundle';
+import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleFailure, bundleFileName, bundleSummary, previewLines, previewSummary, type BundlePreview } from './bundle';
 
 describe('support bundle helpers', () => {
   it('takes the file name from Content-Disposition', () => {
@@ -21,5 +21,25 @@ describe('support bundle helpers', () => {
     expect(bundleFailure(500, 'no bundle was written: ...')).toBe('no bundle was written: ...');
     expect(bundleFailure(403, null)).toContain('admin token');
     expect(bundleFailure(502, null)).toContain(BUNDLE_COMMAND);
+  });
+});
+
+describe('support bundle preview', () => {
+  const p: BundlePreview = {
+    files: [{ name: 'MANIFEST.txt', bytes: 900 }, { name: 'logs/daemon.log', bytes: 3 * 1048576 }],
+    skipped: [{ what: 'clusters.json', why: 'daemon down' }],
+    bytes: 5000,
+    note: BUNDLE_NOTE,
+    sent_anywhere: false,
+  };
+  it('lists every file with its size before anything is downloaded', () => {
+    expect(previewLines(p)).toEqual(['MANIFEST.txt  (1 KiB)', 'logs/daemon.log  (3.0 MiB)']);
+  });
+  it('says what was left out and that nothing is uploaded', () => {
+    const s = previewSummary(p);
+    expect(s).toContain('2 files.');
+    expect(s).toContain('1 part is left out');
+    expect(s).toContain('Nothing is uploaded');
+    expect(previewSummary({ ...p, skipped: [] })).not.toContain('left out');
   });
 });

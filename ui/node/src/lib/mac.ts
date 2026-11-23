@@ -121,6 +121,9 @@ export const inspectCommand = (name: string): string => `fluxctl mac inspect ${n
 export const execCommand = (name: string): string => `fluxctl mac exec -it ${name}`;
 export const attachCommand = (name: string): string => `fluxctl mac attach ${name}`;
 export const logsCommand = (name: string): string => `fluxctl mac logs --tail 300 ${name}`;
+/** Hand a STOPPED instance to someone as one file; prints the `fluxctl import` line for the other Mac. Nothing is uploaded. */
+export const shareCommand = (name: string): string => `fluxctl share ${name}`;
+export const shareServeCommand = (name: string): string => `fluxctl share ${name} --serve`;
 export const PS_COMMAND = 'fluxctl mac ps -a';
 export const IMAGES_COMMAND = 'fluxctl mac images';
 export const LOGINS_COMMAND = 'fluxctl mac logins';

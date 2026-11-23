@@ -7183,6 +7183,67 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn the_support_bundle_preview_lists_files_and_is_admin_only() {
+            let auth = AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "tok-admin-0123456789abcdef".into(),
+                        role: Role::Admin,
+                        name: None,
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "tok-reader-0123456789abcdef".into(),
+                        role: Role::ReadOnly,
+                        name: None,
+                        tenant: None,
+                    },
+                ],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let url = "/v1/support-bundle/preview?log_lines=20";
+            assert_eq!(
+                status_for(router(m.clone()), "GET", url, None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                status_for(
+                    router(m.clone()),
+                    "GET",
+                    url,
+                    Some("tok-reader-0123456789abcdef")
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            let resp = router(m)
+                .oneshot(
+                    Request::get(url)
+                        .header(header::AUTHORIZATION, "Bearer tok-admin-0123456789abcdef")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(!text.contains("0123456789abcdef"), "a token is in {text}");
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let names: Vec<&str> = v["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|f| f["name"].as_str())
+                .collect();
+            assert!(names.contains(&"MANIFEST.txt") && names.contains(&"versions.json"));
+            assert_eq!(v["sent_anywhere"], false);
+        }
+
+        #[tokio::test]
         async fn missing_token_is_rejected_when_auth_is_enabled() {
             let auth = AuthConfig {
                 tokens: vec![ApiToken {

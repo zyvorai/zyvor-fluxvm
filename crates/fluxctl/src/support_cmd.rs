@@ -25,9 +25,15 @@ pub struct SupportBundleArgs {
     /// How many lines of each log to keep (10 to 10000; default 1000; VM console logs are cut to 500).
     #[arg(long, value_name = "N")]
     pub log_lines: Option<usize>,
-    /// Print the result as JSON: the path, the size and what was skipped.
+    /// Print the result as JSON: the path, the size, the files inside and what was skipped.
     #[arg(long)]
     pub json: bool,
+    /// Only show which files the bundle would hold (and what is skipped); write nothing.
+    #[arg(long, alias = "dry-run")]
+    pub list: bool,
+    /// Write it without asking. By default a terminal is asked "Write it? [Y/n]" after the list of files; scripts are not asked.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// The default output path: `~/fluxvm-support-<timestamp>.tar.gz`, or the current folder with no home.
@@ -174,20 +180,114 @@ pub async fn run(a: &SupportBundleArgs, env: &Env, cfg: &Config) -> Result<i32> 
         }
         Err(e) => bail!("{e}"),
     };
+    let files = fluxvm_core::support_bundle::list_archive(&built.bytes)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Show exactly what goes in before anything is written.
+    if !a.json {
+        print!("{}", render_contents(&files, &built.skipped, &out));
+    }
+    if a.list {
+        if a.json {
+            print!("{}", render_list_json(&files, &built.skipped, &out));
+        } else {
+            println!("Nothing was written (--list). Run `fluxctl support-bundle` to write it.");
+        }
+        return Ok(0);
+    }
+    if !a.yes && !a.json && stdin_and_stdout_are_terminals() && !confirm_write(&out) {
+        println!("Nothing was written.");
+        return Ok(0);
+    }
     write_private(&out, &built.bytes)?;
     print!(
         "{}",
-        render(&out, built.bytes.len(), &built.skipped, a.json)
+        render(&out, built.bytes.len(), &built.skipped, &files, a.json)
     );
     Ok(0)
 }
 
+fn stdin_and_stdout_are_terminals() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// Asks once; anything but n/no writes it.
+fn confirm_write(out: &Path) -> bool {
+    print!("Write it to {}? [Y/n] ", out.display());
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
+/// The list shown before writing: every file with its size, what is skipped, and that nothing is sent.
+pub fn render_contents(
+    files: &[(String, u64)],
+    skipped: &[(String, String)],
+    out: &Path,
+) -> String {
+    let mut s = format!("The support bundle will hold {} files:\n", files.len());
+    for (n, b) in files {
+        s.push_str(&format!("  {n}  ({b} bytes)\n"));
+    }
+    if !skipped.is_empty() {
+        s.push_str("Not included:\n");
+        for (w, why) in skipped {
+            s.push_str(&format!("  {w}: {why}\n"));
+        }
+    }
+    s.push_str(&format!(
+        "It is written only to {} (readable by you only). Nothing is uploaded or sent anywhere.\n",
+        out.display()
+    ));
+    s
+}
+
+fn render_list_json(files: &[(String, u64)], skipped: &[(String, String)], out: &Path) -> String {
+    let v: Value = json!({
+        "written": false,
+        "would_write_to": out.display().to_string(),
+        "files": files.iter().map(|(n, b)| json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
+        "skipped": skipped.iter().map(|(w, why)| json!({"what": w, "why": why})).collect::<Vec<_>>(),
+        "sent_anywhere": false,
+        "note": REVIEW_NOTE,
+    });
+    serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
+}
+
+/// What a crash prints after the panic message: the one command that collects what a maintainer needs.
+pub fn crash_hint() -> String {
+    "\nfluxctl hit an internal error (a bug). To collect what is needed to fix it, run:\n  fluxctl support-bundle\nIt lists the files first, removes secrets, writes one .tar.gz on this machine and sends nothing anywhere. Attach it to a bug report at https://github.com/zyvorai/zyvor-fluxvm/issues if you wish.\n".to_owned()
+}
+
+/// Keeps the normal panic report and adds [`crash_hint`] once per process (a daemon can see many task panics).
+pub fn install_crash_hook() {
+    static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        previous(info);
+        if !SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            eprintln!("{}", crash_hint());
+        }
+    }));
+}
+
 /// What is printed when the bundle is written.
-pub fn render(path: &Path, bytes: usize, skipped: &[(String, String)], json: bool) -> String {
+pub fn render(
+    path: &Path,
+    bytes: usize,
+    skipped: &[(String, String)],
+    files: &[(String, u64)],
+    json: bool,
+) -> String {
     if json {
         let v: Value = json!({
             "path": path.display().to_string(),
             "bytes": bytes,
+            "files": files.iter().map(|(n, b)| json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
+            "sent_anywhere": false,
             "skipped": skipped.iter().map(|(w, why)| json!({"what": w, "why": why})).collect::<Vec<_>>(),
             "note": REVIEW_NOTE,
         });
@@ -253,18 +353,26 @@ mod tests {
     #[test]
     fn the_output_names_the_path_what_was_skipped_and_the_review_note() {
         let skipped = vec![("instances.json".to_owned(), "daemon down".to_owned())];
-        let s = render(Path::new("/h/b.tar.gz"), 2049, &skipped, false);
+        let s = render(Path::new("/h/b.tar.gz"), 2049, &skipped, &[], false);
         assert!(s.contains("/h/b.tar.gz") && s.contains("3 KiB"));
         assert!(s.contains("instances.json: daemon down"));
         assert!(
             s.contains("Review before sharing; secrets are removed but check for anything private")
         );
-        let all = render(Path::new("/h/b.tar.gz"), 10, &[], false);
+        let all = render(Path::new("/h/b.tar.gz"), 10, &[], &[], false);
         assert!(all.contains("Everything was collected"));
-        let j: Value =
-            serde_json::from_str(&render(Path::new("/h/b"), 10, &skipped, true)).unwrap();
+        let j: Value = serde_json::from_str(&render(
+            Path::new("/h/b"),
+            10,
+            &skipped,
+            &[("a".to_owned(), 1)],
+            true,
+        ))
+        .unwrap();
         assert_eq!(j["skipped"][0]["what"], "instances.json");
         assert_eq!(j["note"], REVIEW_NOTE);
+        assert_eq!(j["files"][0]["name"], "a");
+        assert_eq!(j["sent_anywhere"], false);
     }
 
     #[tokio::test]
@@ -286,6 +394,8 @@ mod tests {
             out: Some(out.clone()),
             log_lines: Some(20),
             json: false,
+            list: false,
+            yes: true,
         };
         assert_eq!(run(&a, &env, &cfg).await.unwrap(), 0);
         let bytes = std::fs::read(&out).unwrap();
@@ -311,5 +421,78 @@ mod tests {
                 .to_string()
                 .contains("already exists")
         );
+    }
+
+    #[test]
+    fn the_list_before_writing_names_every_file_and_says_nothing_is_sent() {
+        let files = vec![
+            ("MANIFEST.txt".to_owned(), 120),
+            ("host.txt".to_owned(), 900),
+        ];
+        let skipped = vec![("clusters.json".to_owned(), "daemon down".to_owned())];
+        let s = render_contents(&files, &skipped, Path::new("/h/b.tar.gz"));
+        assert!(s.contains("2 files") && s.contains("MANIFEST.txt  (120 bytes)"));
+        assert!(s.contains("clusters.json: daemon down"));
+        assert!(s.contains("/h/b.tar.gz") && s.contains("Nothing is uploaded or sent anywhere"));
+    }
+
+    #[test]
+    fn the_crash_hint_names_the_command_and_promises_no_upload() {
+        let h = crash_hint();
+        assert!(h.contains("fluxctl support-bundle") && h.contains("sends nothing anywhere"));
+    }
+
+    #[tokio::test]
+    async fn list_writes_nothing_and_the_bundle_has_no_secret_patterns() {
+        let d = tempfile::tempdir().unwrap();
+        let mut cfg = Config {
+            listen: "127.0.0.1:1".into(),
+            state_dir: d.path().join("state"),
+            ..Config::default()
+        };
+        cfg.auth.tokens.push(fluxvm_core::config::ApiToken {
+            token: "tok_live_0123456789abcdefSECRET".into(),
+            role: fluxvm_core::config::Role::Admin,
+            name: None,
+            tenant: None,
+        });
+        let env = Env {
+            listen: cfg.listen.clone(),
+            state_dir: cfg.state_dir.clone(),
+            remote: crate::remote::Remote::new(&cfg.listen, None),
+        };
+        let out = d.path().join("b.tar.gz");
+        let mut a = SupportBundleArgs {
+            out: Some(out.clone()),
+            log_lines: Some(20),
+            json: true,
+            list: true,
+            yes: true,
+        };
+        assert_eq!(run(&a, &env, &cfg).await.unwrap(), 0);
+        assert!(!out.exists(), "--list must not write the bundle");
+        a.list = false;
+        assert_eq!(run(&a, &env, &cfg).await.unwrap(), 0);
+        let bytes = std::fs::read(&out).unwrap();
+        let listed: Vec<String> = fluxvm_core::support_bundle::list_archive(&bytes)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.0)
+            .collect();
+        for want in ["README.txt", "MANIFEST.txt", "versions.json", "host.txt"] {
+            assert!(listed.iter().any(|n| n == want), "{want} not in {listed:?}");
+        }
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+        for e in ar.entries().unwrap() {
+            let mut e = e.unwrap();
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut e, &mut text).unwrap();
+            assert!(!text.contains("SECRET"), "token in {:?}", e.path().unwrap());
+            assert!(
+                fluxvm_core::support_bundle::find_leaks(&text).is_empty(),
+                "secret pattern in {:?}",
+                e.path().unwrap()
+            );
+        }
     }
 }

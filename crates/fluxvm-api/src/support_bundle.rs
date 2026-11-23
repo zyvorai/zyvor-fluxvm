@@ -20,7 +20,12 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 pub(crate) fn routes() -> axum::Router<Arc<VmManager>> {
-    axum::Router::new().route("/v1/support-bundle", axum::routing::post(support_bundle))
+    axum::Router::new()
+        .route("/v1/support-bundle", axum::routing::post(support_bundle))
+        .route(
+            "/v1/support-bundle/preview",
+            axum::routing::get(support_bundle_preview),
+        )
 }
 
 #[derive(Deserialize, Default)]
@@ -29,20 +34,23 @@ struct Q {
     log_lines: Option<usize>,
 }
 
-async fn support_bundle(
-    State(m): State<Arc<VmManager>>,
-    Extension(role): Extension<Role>,
-    token_tenant: Option<Extension<TokenTenant>>,
-    Query(q): Query<Q>,
-) -> Result<Response, ApiError> {
+fn gate(role: Role, token_tenant: &Option<Extension<TokenTenant>>) -> Result<(), ApiError> {
     require_admin(role)?;
     if token_tenant.is_some() {
         return Err(ApiError::forbidden(
             "a support bundle describes the whole host, so a token that is limited to one tenant cannot download it; use an admin token without a tenant, or run `fluxctl support-bundle` on the host",
         ));
     }
+    Ok(())
+}
+
+/// Collects and builds the archive in memory (nothing is written to disk and nothing leaves the daemon).
+async fn build_now(
+    m: &Arc<VmManager>,
+    log_lines: Option<usize>,
+) -> Result<(support_collect::Built, chrono::DateTime<chrono::Utc>), ApiError> {
     let now = chrono::Utc::now();
-    let health = crate::cluster_health::assess_now(&m).await;
+    let health = crate::cluster_health::assess_now(m).await;
     let vms: Vec<serde_json::Value> = m
         .list()
         .await
@@ -54,7 +62,7 @@ async fn support_bundle(
         .map(|Json(v)| v)
         .map_err(|e| e.message);
     let cfg = m.cfg.clone();
-    let lines = q.log_lines.unwrap_or(0);
+    let lines = log_lines.unwrap_or(0);
     let built = tokio::task::spawn_blocking(move || {
         let version = env!("CARGO_PKG_VERSION").to_owned();
         support_collect::build(&Inputs {
@@ -80,6 +88,17 @@ async fn support_bundle(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         message: e.to_string(),
     })?;
+    Ok((built, now))
+}
+
+async fn support_bundle(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(q): Query<Q>,
+) -> Result<Response, ApiError> {
+    gate(role, &token_tenant)?;
+    let (built, now) = build_now(&m, q.log_lines).await?;
     let name = support_collect::default_file_name(now);
     let mut resp = (StatusCode::OK, built.bytes).into_response();
     let h = resp.headers_mut();
@@ -96,6 +115,29 @@ async fn support_bundle(
         HeaderValue::from(built.skipped.len()),
     );
     Ok(resp)
+}
+
+/// `GET /v1/support-bundle/preview`: exactly which files a bundle would hold (name and size) and what was skipped, so a person
+/// can look before downloading. Nothing is written or sent.
+async fn support_bundle_preview(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(q): Query<Q>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    gate(role, &token_tenant)?;
+    let (built, _) = build_now(&m, q.log_lines).await?;
+    let files = fluxvm_core::support_bundle::list_archive(&built.bytes).map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: e.to_string(),
+    })?;
+    Ok(Json(serde_json::json!({
+        "files": files.iter().map(|(n, b)| serde_json::json!({"name": n, "bytes": b})).collect::<Vec<_>>(),
+        "skipped": built.skipped.iter().map(|(w, why)| serde_json::json!({"what": w, "why": why})).collect::<Vec<_>>(),
+        "bytes": built.bytes.len(),
+        "note": fluxvm_core::support_bundle::REVIEW_NOTE,
+        "sent_anywhere": false,
+    })))
 }
 
 #[cfg(test)]

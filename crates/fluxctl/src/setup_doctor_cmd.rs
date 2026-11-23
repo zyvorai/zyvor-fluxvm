@@ -326,6 +326,8 @@ async fn offer_bundle(a: &More, env: &Env, cfg: &Config) -> Result<bool> {
             out: None,
             log_lines: None,
             json: false,
+            list: false,
+            yes: true,
         },
         env,
         cfg,
