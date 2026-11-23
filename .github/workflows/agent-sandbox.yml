@@ -249,7 +249,7 @@ jobs:
           go-version: stable
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install system dependencies
         run: fluxvm/scripts/ci-install-apt-deps.sh libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
