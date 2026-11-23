@@ -844,6 +844,35 @@ mod tests {
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn an_exact_name_wins_over_another_containers_id_prefix() {
+        // The ids are fixed so this does not depend on luck: `b`'s id starts with `c`, which is also the name of the
+        // container `c`. Docker resolves the name first, so `c` must not be reported as an ambiguous prefix.
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let cfg = Config {
+            state_dir: dir.path().join("state"),
+            run_dir: dir.path().join("run"),
+            ..Config::default()
+        };
+        let m = VmManager::new(cfg).unwrap();
+        for (name, id) in [
+            ("b", "c0000000-0000-4000-8000-000000000001"),
+            ("c", "10000000-0000-4000-8000-000000000002"),
+        ] {
+            let mut r = fixture(name, VmStatus::Stopped, true);
+            r.id = Uuid::parse_str(id).unwrap();
+            m.store.insert(r).await.unwrap();
+        }
+        let app = router(m.clone());
+        let (s, v) = call(&app, "GET", "/v1.43/containers/c/json").await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["Name"], "/c");
+        // A real prefix still works when no name matches it.
+        let (s, v) = call(&app, "GET", "/v1.43/containers/c0000/json").await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["Name"], "/b");
+    }
+
     #[test]
     fn lifecycle_events_become_docker_events() {
         let id = Uuid::new_v4();

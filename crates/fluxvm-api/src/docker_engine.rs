@@ -817,15 +817,18 @@ async fn resolve_container(m: &VmManager, id_or_name: &str) -> DockerResult<VmRe
             .find(|v| v.id == u)
             .ok_or_else(|| DockerError::not_found(format!("No such container: {id_or_name}")));
     }
+    // Docker resolves an exact name first and falls back to an ID prefix only when no name matches. Matching both at once
+    // made a container named `c` clash with any other container whose random ID happened to start with `c`.
+    let name_of = |v: &VmRecord| {
+        v.name == id_or_name || v.name.trim_start_matches('/') == id_or_name.trim_start_matches('/')
+    };
+    if all.iter().filter(|v| name_of(v)).count() == 1 {
+        return Ok(all.into_iter().find(|v| name_of(v)).unwrap());
+    }
     let needle = id_or_name.trim_start_matches('/').to_ascii_lowercase();
     let mut matches: Vec<VmRecord> = all
         .into_iter()
-        .filter(|v| {
-            let simple = v.id.as_simple().to_string();
-            simple.starts_with(&needle)
-                || v.name == id_or_name
-                || v.name.trim_start_matches('/') == id_or_name.trim_start_matches('/')
-        })
+        .filter(|v| v.id.as_simple().to_string().starts_with(&needle) || name_of(v))
         .collect();
     match matches.len() {
         0 => Err(DockerError::not_found(format!(
