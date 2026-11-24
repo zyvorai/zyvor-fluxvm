@@ -51,6 +51,7 @@ mod rate_limit;
 pub mod release_check;
 #[cfg(target_os = "macos")]
 pub mod self_control;
+pub use mac_backups_api::spawn_scheduler as spawn_mac_backup_scheduler;
 pub use netobs_api::install_netobs;
 mod agent_session_approvals;
 mod agent_session_auth;
@@ -71,6 +72,7 @@ mod kube_inventory;
 mod kube_metrics;
 mod kube_pod;
 mod kube_workloads;
+mod mac_backups_api;
 mod mac_disk_api;
 mod mac_fleet_api;
 mod mac_schedule_api;
@@ -1082,6 +1084,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
                 idempotency::middleware,
             )),
         )
+        .merge(mac_backups_api::routes())
         .merge(mac_disk_api::routes())
         .merge(macos_pool_api::routes())
         .merge(mac_schedule_api::routes())
