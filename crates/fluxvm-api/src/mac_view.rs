@@ -40,6 +40,9 @@ const SERVICE_LABEL: &str = "fluxvm.mac.service";
 const STOPPED_LABEL: &str = "fluxvm.mac.stopped";
 const NOT_STARTED_LABEL: &str = "fluxvm.mac.notstarted";
 const HEALTH_START_LABEL: &str = "fluxvm.mac.health.start";
+const HEALTH_LABEL: &str = "fluxvm.mac.health";
+const HEALTH_STREAK_LABEL: &str = "fluxvm.mac.health.streak";
+const HEALTH_AT_LABEL: &str = "fluxvm.mac.health.checked";
 /// Apple's licence limit: two macOS guests per Mac.
 const MAC_LIMIT: usize = 2;
 
@@ -64,6 +67,23 @@ fn now_unix() -> u64 {
 
 fn is_internal(k: &str) -> bool {
     k == INSTANCE_LABEL || k.starts_with("fluxvm.mac.")
+}
+
+/// The last healthcheck result `mac supervise` / `mac health` recorded, or null when no probe ever ran.
+fn health_of(vm: &Value) -> Value {
+    let l = &vm["labels"];
+    let Some(status) = l[HEALTH_LABEL]
+        .as_str()
+        .filter(|s| matches!(*s, "starting" | "healthy" | "unhealthy"))
+    else {
+        return Value::Null;
+    };
+    let num = |k: &str| {
+        l[k].as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    json!({"status": status, "failing_streak": num(HEALTH_STREAK_LABEL), "last_check_unix": num(HEALTH_AT_LABEL)})
 }
 
 /// One instance as the page shows it, from the daemon's VM record.
@@ -99,6 +119,7 @@ fn instance_row(vm: &Value) -> Value {
         "created": vm["created_at"],
         "ports": ports,
         "restart_policy": vm["labels"][RESTART_LABEL].as_str().unwrap_or("no"),
+        "health": health_of(vm),
         "project": vm["labels"][PROJECT_LABEL],
         "service": vm["labels"][SERVICE_LABEL],
         "error": vm["error"],
@@ -881,6 +902,24 @@ mod tests {
         assert!(!ok.to_string().contains("hunter2"));
         assert_eq!(logins_view(Some(&d.join("none.json")))["items"], json!([]));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn health_comes_from_the_labels_and_is_null_before_the_first_probe() {
+        let r = instance_row(&vm(
+            "a",
+            "running",
+            json!({"fluxvm.mac": "instance", "fluxvm.mac.health": "unhealthy", "fluxvm.mac.health.streak": "3", "fluxvm.mac.health.checked": "99"}),
+        ));
+        assert_eq!(
+            r["health"],
+            json!({"status": "unhealthy", "failing_streak": 3, "last_check_unix": 99})
+        );
+        assert_eq!(r["labels"], json!({}), "the health labels are internal");
+        let none = instance_row(&vm("b", "running", json!({"fluxvm.mac": "instance"})));
+        assert!(none["health"].is_null());
+        let junk = instance_row(&vm("c", "running", json!({"fluxvm.mac.health": "weird"})));
+        assert!(junk["health"].is_null());
     }
 
     #[test]

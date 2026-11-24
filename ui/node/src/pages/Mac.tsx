@@ -11,7 +11,7 @@ import { navigate, Button, Card, EmptyState, Field, Hero, Pill, Skeleton, Tabs, 
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
   COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, SUPERVISE_INSTALL_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, supervisorNote, editFormFor, updateAnswerText, RESTART_POLICIES,
+  actionCommand, actionDone, healthAdvice, healthCommand, healthText, healthTone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, supervisorNote, editFormFor, updateAnswerText, RESTART_POLICIES,
   type EditForm, type MacAction, type MacInstance, type MacUpdateAnswer, type MacView,
 } from '../lib/mac';
 
@@ -116,7 +116,7 @@ function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; 
   const facts: [string, string][] = [
     ['Name', inst.name], ['Id', inst.id], ['Image', inst.image ?? '—'], ['State', inst.status], ['Address', inst.ip ?? 'none yet'],
     ['CPUs', inst.cpus == null ? '—' : String(inst.cpus)], ['Memory', memoryText(inst.memory_mib)], ['Ports', portsText(inst.ports) || 'none published'],
-    ['Restart policy', inst.restart_policy], ['Project', inst.project ?? '—'], ['Created', inst.created ?? '—'],
+    ['Restart policy', inst.restart_policy], ['Health', healthText(inst.health) || 'no probe has run yet'], ['Project', inst.project ?? '—'], ['Created', inst.created ?? '—'],
   ];
   return (
     <Card title={<>{inst.name} <span className="fx-muted">details</span></>} action={<Button size="sm" variant="ghost" onClick={onClose}>Close</Button>}>
@@ -130,6 +130,8 @@ function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; 
             <summary>The daemon's full record</summary>
             <pre className="fx-mono" style={{ maxHeight: 320, overflow: 'auto' }}>{rec.error ? `Could not read the record: ${rec.error.message}` : JSON.stringify(rec.data ?? {}, null, 2)}</pre>
           </details>
+          {healthAdvice(inst) ? <p><Pill tone="bad">unhealthy</Pill> {healthAdvice(inst)}</p> : null}
+          <p><CopyCmd notify={notify} cmd={healthCommand(inst.name)} /> <code className="fx-mono">{healthCommand(inst.name)}</code> <span className="fx-muted">probe its health now</span></p>
           <p><CopyCmd notify={notify} cmd={inspectCommand(inst.name)} /> <code className="fx-mono">{inspectCommand(inst.name)}</code></p>
           <p><CopyCmd notify={notify} cmd={execCommand(inst.name)} /> <code className="fx-mono">{execCommand(inst.name)}</code> <span className="fx-muted">a shell in the guest</span></p>
           {inst.status === 'stopped' ? <p><CopyCmd notify={notify} cmd={shareCommand(inst.name)} /> <code className="fx-mono">{shareCommand(inst.name)}</code> <span className="fx-muted">one file for another Mac; logins and secrets are left out, nothing is uploaded (add --serve for a one-time local link)</span></p> : null}
@@ -212,6 +214,7 @@ export function MacPage({ notify }: { notify: Notify }) {
                 <Pill tone={d.macos_running >= d.macos_limit ? 'warn' : 'ok'}>{d.macos_running} of {d.macos_limit} macOS VMs running</Pill>
                 {sum.stopped ? <Pill tone="idle">{sum.stopped} stopped</Pill> : null}
                 {sum.failed ? <Pill tone="bad">{sum.failed} failed</Pill> : null}
+                {sum.unhealthy ? <Pill tone="bad">{sum.unhealthy} unhealthy</Pill> : null}
                 <span className="fx-muted">Apple allows two macOS VMs at once on one Mac.</span>
                 <span style={{ position: 'relative', flex: 1, minWidth: 180, display: 'inline-flex', alignItems: 'center' }}>
                   <Search size={14} style={{ position: 'absolute', left: 8, opacity: 0.6 }} />
@@ -227,7 +230,7 @@ export function MacPage({ notify }: { notify: Notify }) {
                     <tr key={i.id}>
                       <td className="vm-name">{i.name}<div className="fx-muted fx-mono">{i.ip ?? 'no address yet'}</div></td>
                       <td className="fx-mono">{i.image ?? '—'}</td>
-                      <td><Pill tone={statusTone(i.status)}>{i.status}</Pill>{i.restart_policy !== 'no' ? <div className="fx-muted" title="fluxctl mac run --restart">restart: {i.restart_policy}</div> : null}</td>
+                      <td><Pill tone={statusTone(i.status)}>{i.status}</Pill>{i.health ? <div><Pill tone={healthTone(i.health)}>{i.health.status}</Pill></div> : null}{i.restart_policy !== 'no' ? <div className="fx-muted" title="fluxctl mac run --restart">restart: {i.restart_policy}</div> : null}</td>
                       <td className="fx-muted">{i.cpus ?? '—'} CPU · {memoryText(i.memory_mib)}</td>
                       <td className="fx-mono">{portsText(i.ports) || '—'}</td>
                       <td className="fx-muted">{ageText(i.created, now)}</td>

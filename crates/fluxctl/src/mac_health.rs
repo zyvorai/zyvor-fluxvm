@@ -124,6 +124,18 @@ pub fn inspect_value(vm: &Value) -> Value {
     }
 }
 
+/// What `mac ps` and `--format {{.Health}}` show: the last probe's state, or `-` when no probe ever ran.
+pub fn health_text(vm: &Value) -> String {
+    from_labels(vm).map_or_else(|| "-".into(), |h| h.status.as_str().into())
+}
+
+/// The plain-English next step for an unhealthy instance (the text under `mac health` and in Studio).
+pub fn unhealthy_advice(name: &str) -> String {
+    format!(
+        "{name} is unhealthy: its health command failed several times in a row.\n  look: fluxctl mac logs {name}   and   fluxctl mac exec {name} -- <the health command>\n  once fixed, the next probe turns it healthy by itself; `fluxctl mac health {name}` probes now\n  more: fluxctl explain MAC_UNHEALTHY"
+    )
+}
+
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -409,6 +421,9 @@ pub async fn health_once(r: &crate::remote::Remote, name: &str, json_out: bool) 
             h.streak
         );
     }
+    if h.status == Status::Unhealthy {
+        eprintln!("{}", unhealthy_advice(name));
+    }
     if h.status != Status::Healthy {
         std::process::exit(1);
     }
@@ -532,5 +547,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(e.to_string().contains("not healthy after 0s"), "{e}");
+    }
+
+    #[test]
+    fn health_text_and_the_advice_for_an_unhealthy_instance() {
+        let vm = json!({"labels": {HEALTH_LABEL: "healthy"}});
+        assert_eq!(health_text(&vm), "healthy");
+        assert_eq!(health_text(&json!({"labels": {}})), "-");
+        let a = unhealthy_advice("ci");
+        assert!(
+            a.contains("fluxctl mac logs ci")
+                && a.contains("fluxctl mac health ci")
+                && a.contains("MAC_UNHEALTHY")
+        );
     }
 }

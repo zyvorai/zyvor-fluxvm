@@ -180,6 +180,24 @@ pub const CODES: &[MacCode] = &[
         signatures: &["background supervisor is not installed"],
     },
     MacCode {
+        code: "MAC_UNHEALTHY",
+        status: None,
+        summary: "An instance's healthcheck failed several times in a row, so it is marked unhealthy. The instance itself keeps running.",
+        causes: &[
+            "the service inside the guest crashed, is still starting, or listens on another port than the check expects",
+            "the health command itself is wrong for this guest (a tool it uses is not installed, or it needs a login)",
+            "the guest has no address yet or is not running, so the probe cannot reach it",
+        ],
+        fixes: &[
+            "read what the guest printed: `fluxctl mac logs NAME`",
+            "run the health command by hand: `fluxctl mac exec NAME -- <the command>`",
+            "probe again now: `fluxctl mac health NAME`; it turns healthy by itself once the command passes",
+            "change the check: recreate with `fluxctl mac run --health-cmd CMD ...` (or `--no-healthcheck` to drop it)",
+        ],
+        aliases: &["unhealthy", "health-failed"],
+        signatures: &["is unhealthy"],
+    },
+    MacCode {
         code: "MAC_FILTER_INVALID",
         status: None,
         summary: "A `--filter` was not `KEY=VALUE`, used a key the command does not know, or had a value it cannot use.",
@@ -188,7 +206,7 @@ pub const CODES: &[MacCode] = &[
             "no `=`, an empty value, or a port or status that is not valid",
         ],
         fixes: &[
-            "`mac ps --filter`: name, id, status, image, label, project, service, ip, publish (a port)",
+            "`mac ps --filter`: name, id, status, health, image, label (`label=k` or `label=k=v`), project, service, ip, publish (a port), restart",
             "`mac images --filter`: label, reference (with `*`), source",
             "`mac events --filter`: type (mac or kube), event, name, image, project, status, cluster, label",
             "repeat `--filter` to narrow further; every filter must match",

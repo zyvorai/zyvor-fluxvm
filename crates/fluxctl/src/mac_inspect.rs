@@ -105,12 +105,17 @@ pub enum Filter {
     Project(String),
     Service(String),
     Ip(String),
+    /// `starting`, `healthy`, `unhealthy` or `none` (no probe has run).
+    Health(String),
+    /// The restart policy; an instance without one has `no`.
+    Restart(String),
     /// A published port, host or guest side.
     Publish(u16),
 }
 
 /// The keys `mac ps --filter` accepts, for messages.
-pub const FILTER_KEYS: &str = "name, id, status, image, label, project, service, ip, publish";
+pub const FILTER_KEYS: &str =
+    "name, id, status, health, image, label, project, service, ip, publish, restart";
 
 /// `--filter name=web`, `status=running`, `id=ab12`, `image=macos`, `label=k` or `label=k=v`.
 pub fn parse_filter(s: &str) -> Result<Filter> {
@@ -129,6 +134,20 @@ pub fn parse_filter(s: &str) -> Result<Filter> {
                 "status filter {v:?}: use creating, running, paused, stopped or failed"
             );
             Filter::Status(v.into())
+        }
+        "health" => {
+            ensure!(
+                matches!(v, "starting" | "healthy" | "unhealthy" | "none"),
+                "health filter {v:?}: use starting, healthy, unhealthy or none; see `fluxctl explain MAC_FILTER_INVALID`"
+            );
+            Filter::Health(v.into())
+        }
+        "restart" => {
+            ensure!(
+                matches!(v, "no" | "always" | "unless-stopped" | "on-failure"),
+                "restart filter {v:?}: use no, always, unless-stopped or on-failure; see `fluxctl explain MAC_FILTER_INVALID`"
+            );
+            Filter::Restart(v.into())
         }
         "image" | "ancestor" => Filter::Image(v.into()),
         "label" => match v.split_once('=') {
@@ -173,6 +192,11 @@ pub fn matches(vm: &Value, filters: &[Filter]) -> bool {
         Filter::Project(p) => vm["labels"][PROJECT_LABEL].as_str() == Some(p.as_str()),
         Filter::Service(p) => vm["labels"][SERVICE_LABEL].as_str() == Some(p.as_str()),
         Filter::Ip(p) => vm["guest_ip"].as_str() == Some(p.as_str()),
+        Filter::Health(h) => match crate::mac_health::from_labels(vm) {
+            Some(x) => x.status.as_str() == h,
+            None => h == "none",
+        },
+        Filter::Restart(p) => vm["labels"][RESTART_LABEL].as_str().unwrap_or("no") == p,
         Filter::Publish(port) => ports(vm)
             .iter()
             .any(|(h, g)| *h == u64::from(*port) || *g == u64::from(*port)),
@@ -208,6 +232,7 @@ fn field(vm: &Value, name: &str) -> Result<String> {
         "Ports" => ports_text(vm),
         "Created" | "CreatedAt" => s(&vm["created_at"]),
         "Restart" => s(&vm["labels"][RESTART_LABEL]),
+        "Health" => crate::mac_health::health_text(vm),
         "Project" => s(&vm["labels"][PROJECT_LABEL]),
         "Service" => s(&vm["labels"][SERVICE_LABEL]),
         "Labels" => {
@@ -224,7 +249,7 @@ fn field(vm: &Value, name: &str) -> Result<String> {
             l.join(",")
         }
         other => bail!(
-            "unknown field {{{{.{other}}}}} in --format (ID, Name, Image, Status, IP, Ports, Created, Restart, Project, Service, Labels)"
+            "unknown field {{{{.{other}}}}} in --format (ID, Name, Image, Status, IP, Ports, Created, Restart, Health, Project, Service, Labels)"
         ),
     })
 }
@@ -647,5 +672,23 @@ mod tests {
                 .to_string()
                 .contains("project, service, ip, publish")
         );
+    }
+
+    #[test]
+    fn health_and_restart_filters() {
+        let vm = |labels: Value| json!({"name": "a", "status": "running", "labels": labels});
+        let sick = vm(json!({"fluxvm.mac.health": "unhealthy", "fluxvm.mac.restart": "always"}));
+        let fresh = vm(json!({}));
+        let f = |s: &str| parse_filters(&[s.to_string()]).unwrap();
+        assert!(matches(&sick, &f("health=unhealthy")) && !matches(&sick, &f("health=healthy")));
+        assert!(matches(&fresh, &f("health=none")) && !matches(&sick, &f("health=none")));
+        assert!(matches(&sick, &f("restart=always")) && matches(&fresh, &f("restart=no")));
+        assert!(!matches(&fresh, &f("restart=always")));
+        for bad in ["health=sick", "restart=sometimes"] {
+            let e = parse_filter(bad).unwrap_err().to_string();
+            assert!(e.contains("MAC_FILTER_INVALID"), "{bad}: {e}");
+        }
+        assert_eq!(field(&sick, "Health").unwrap(), "unhealthy");
+        assert_eq!(field(&fresh, "Health").unwrap(), "-");
     }
 }

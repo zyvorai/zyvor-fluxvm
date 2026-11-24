@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand, supervisorNote, unrestarted } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand, supervisorNote, unrestarted, healthAdvice, healthText, healthTone } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -14,7 +14,7 @@ describe('mac instances', () => {
     expect(statusTone('failed')).toBe('bad');
     expect(statusTone('creating')).toBe('warn');
     expect(statusTone('stopped')).toBe('idle');
-    expect(summarize([i('a', 'running'), i('b', 'stopped'), i('c', 'paused'), i('d', 'failed')])).toEqual({ running: 1, stopped: 2, failed: 1 });
+    expect(summarize([i('a', 'running'), i('b', 'stopped'), i('c', 'paused'), i('d', 'failed')])).toEqual({ running: 1, stopped: 2, failed: 1, unhealthy: 0 });
   });
   it('writes ports, memory and sizes', () => {
     expect(portsText([{ host: 2222, guest: 22 }, { host: 8080, guest: 80 }])).toBe('2222→22, 8080→80');
@@ -164,5 +164,30 @@ describe('restart policies and the supervisor', () => {
     expect(n).toContain('2 instances have a restart policy');
     expect(n).toContain('fluxctl mac supervise --install');
     expect(supervisorNote([list[0]], sup)).toContain('1 instance has');
+  });
+});
+
+describe('health', () => {
+  const h = (status: 'starting' | 'healthy' | 'unhealthy', n = 0) => ({ status, failing_streak: n, last_check_unix: 1 });
+  it('has a tone and a sentence for every state, and nothing before the first probe', () => {
+    expect(healthTone(h('healthy'))).toBe('ok');
+    expect(healthTone(h('unhealthy', 3))).toBe('bad');
+    expect(healthTone(h('starting', 1))).toBe('warn');
+    expect(healthTone(null)).toBe('idle');
+    expect(healthText(null)).toBe('');
+    expect(healthText(h('healthy'))).toBe('healthy');
+    expect(healthText(h('unhealthy', 3))).toBe('unhealthy (3 probes failed in a row)');
+    expect(healthText(h('starting', 1))).toBe('starting (1 probe failed so far)');
+  });
+  it('says what to do only when unhealthy', () => {
+    expect(healthAdvice(i('a', 'running', { health: h('healthy') }))).toBe('');
+    const a = healthAdvice(i('a', 'running', { health: h('unhealthy', 3) }));
+    expect(a).toContain('fluxctl mac health a');
+    expect(a).toContain('fluxctl mac exec -it a');
+  });
+  it('is part of the free-text filter and the summary', () => {
+    const list = [i('a', 'running', { health: h('unhealthy', 3) }), i('b', 'running')];
+    expect(filterInstances(list, 'unhealthy').map((x) => x.name)).toEqual(['a']);
+    expect(summarize(list).unhealthy).toBe(1);
   });
 });
