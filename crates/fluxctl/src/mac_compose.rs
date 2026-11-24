@@ -1967,6 +1967,7 @@ async fn start_service(
                 r,
                 crate::mac_more::MacMore::Stop {
                     names: vec![s.spec.name.clone()],
+                    time: None,
                 },
             )
             .await
@@ -2205,7 +2206,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 !names.is_empty(),
                 "no matching instances in project {project:?}"
             );
-            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Restart { names }).await
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Restart { names, time: None })
+                .await
         }
         ComposeCommand::Stop { services, t } => {
             let (project, order) = load_existing(t.file, t.project.as_deref())?;
@@ -2217,7 +2219,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: ComposeCommand) -> Resul
                 println!("nothing to stop: no instance of project {project:?} is running");
                 return Ok(());
             }
-            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Stop { names }).await
+            crate::mac_more::run_daemon(r, crate::mac_more::MacMore::Stop { names, time: None })
+                .await
         }
         ComposeCommand::Start { services, t } => {
             let (project, order) = load_existing(t.file, t.project.as_deref())?;
