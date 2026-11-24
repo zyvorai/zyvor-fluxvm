@@ -202,6 +202,9 @@ pub enum MacCommand {
     Ux(crate::mac_ux::MacUx),
     #[command(flatten)]
     Ops(crate::mac_ops::MacOps),
+    /// `schedule` (run a Mac image on a cron expression) and `notify`.
+    #[command(flatten)]
+    Sched(crate::mac_sched::MacSched),
     /// Registry login (`login`, `logout`, `logins`) and `fork`.
     #[command(flatten)]
     Dp(crate::mac_dp::MacDp),
@@ -236,6 +239,7 @@ impl MacCommand {
             Self::More(m) => m.is_client_side(),
             Self::Plus(_) | Self::Ux(_) => true,
             Self::Ops(o) => o.is_client_side(),
+            Self::Sched(s) => s.is_client_side(),
             Self::Dp(d) => d.is_client_side(),
             Self::Res(x) => x.is_client_side(),
             _ => !matches!(
@@ -461,8 +465,47 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
                     opts.clone(),
                 )
             })
-            .await?;
+            .await;
+            let outcome = match outcome {
+                Ok(o) => o,
+                Err(e) => {
+                    let t = xrun.notify_targets();
+                    if t.any() {
+                        let first = format!("{e:#}");
+                        let ev = crate::mac_notify::Event {
+                            what: name.clone().unwrap_or_else(|| image.clone()),
+                            ok: false,
+                            detail: format!(
+                                "the run failed: {}. Run it again in a terminal to see why, or try `fluxctl mac doctor`",
+                                first.lines().next().unwrap_or("see the terminal")
+                            ),
+                        };
+                        crate::mac_notify::warn(
+                            &crate::mac_notify::deliver(&crate::mac_notify::Real, &t, &ev).await,
+                        );
+                    }
+                    return Err(e);
+                }
+            };
             crate::mac_ops::after_run(r, &outcome.name, started, &xrun).await?;
+            // A command that ran to the end is the moment to notify; an instance that keeps running is watched until it stops.
+            {
+                let t = xrun.notify_targets();
+                if t.any() {
+                    if cmd.is_empty() && !rm {
+                        notify_when_gone(r, &outcome.name, &t);
+                    } else {
+                        let ev = crate::mac_notify::Event {
+                            what: outcome.name.clone(),
+                            ok: true,
+                            detail: format!("{} ran to the end.", outcome.name),
+                        };
+                        crate::mac_notify::warn(
+                            &crate::mac_notify::deliver(&crate::mac_notify::Real, &t, &ev).await,
+                        );
+                    }
+                }
+            }
             if json {
                 println!(
                     "{}",
@@ -499,6 +542,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
         MacCommand::Imgx(i) => crate::mac_imgx::run_daemon(r, i).await,
         MacCommand::Ckpt(c) => crate::mac_checkpoint::run_daemon(r, c).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
+        MacCommand::Sched(s) => crate::mac_sched::run_daemon(r, s).await,
         MacCommand::Res(x) => crate::mac_res::run_daemon(r, x).await,
         MacCommand::Build {
             file,
@@ -960,6 +1004,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
     }
     let command = match command {
         MacCommand::Ops(o) => return crate::mac_ops::run_client(o),
+        MacCommand::Sched(s) => return run_sched_client(s).await,
         MacCommand::Dp(d) => return crate::mac_dp::run_client(d).await,
         MacCommand::Res(x) => return crate::mac_res::run_client(x),
         c => c,
@@ -1084,9 +1129,29 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Imgx(_)
         | MacCommand::Ckpt(_)
         | MacCommand::Res(_)
-        | MacCommand::Ops(_) => unreachable!("rejected above"),
+        | MacCommand::Ops(_)
+        | MacCommand::Sched(_) => unreachable!("rejected above"),
     }
     Ok(())
+}
+
+/// For an instance that keeps running: a detached `mac notify wait` fires when it stops or is removed.
+fn notify_when_gone(r: &crate::remote::Remote, name: &str, t: &crate::mac_notify::Targets) {
+    if let Err(e) = crate::mac_sched::spawn_notify_wait(r, name, t) {
+        eprintln!(
+            "warning: could not start the notifier ({e:#}); run `fluxctl mac notify wait {name}` yourself"
+        );
+    }
+}
+
+/// `schedule add|ls|rm|...` and `notify test`: no daemon.
+async fn run_sched_client(s: crate::mac_sched::MacSched) -> Result<()> {
+    match s {
+        crate::mac_sched::MacSched::Notify { command } => {
+            crate::mac_notify::run_client(command).await
+        }
+        s => crate::mac_sched::run_client(s),
+    }
 }
 
 /// Parse a Macfile and render the plan for `tag`; errors carry the Macfile line.

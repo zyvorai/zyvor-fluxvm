@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react';
 import { Copy, Play, RotateCw, ScrollText, Search, Skull, Square, Trash2 } from 'lucide-react';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
+import { MacSchedules } from './MacSchedules';
 import { navigate, Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
@@ -106,7 +107,7 @@ function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; 
 export function MacPage({ notify }: { notify: Notify }) {
   const view = usePoll(() => api.get<MacView>('/v1/mac'), 5000);
   const d = view.data;
-  const [tab, setTab] = useState<'instances' | 'images' | 'projects' | 'login'>('instances');
+  const [tab, setTab] = useState<'instances' | 'images' | 'projects' | 'login' | 'schedules'>('instances');
   const [q, setQ] = useState('');
   const [open, setOpen] = useState<MacInstance | null>(null);
   const [busy, setBusy] = useState('');
@@ -154,6 +155,7 @@ export function MacPage({ notify }: { notify: Notify }) {
             { value: 'images', label: `Images · ${d.images.items.length}` },
             { value: 'projects', label: `Compose · ${d.projects.length}` },
             { value: 'login', label: `Registry login · ${d.logins.items.length}` },
+            { value: 'schedules', label: 'Schedules' },
           ]} />
           {tab === 'instances' ? (
             <Card title="Instances" action={<CopyCmd notify={notify} cmd={PS_COMMAND} />}>
@@ -248,6 +250,7 @@ export function MacPage({ notify }: { notify: Notify }) {
               <p className="fx-muted">Passwords are never shown or typed in Studio. The login file is {d.logins.path ?? 'not known to the daemon'}; it is the one of the account the daemon runs as, so if you use fluxctl as another user, run <code className="fx-mono">{LOGINS_COMMAND}</code> there.</p>
             </Card>
           ) : null}
+          {tab === 'schedules' ? <MacSchedules notify={notify} /> : null}
           {open ? <Detail inst={d.instances.find((x) => x.id === open.id) ?? open} notify={notify} onClose={() => setOpen(null)} /> : null}
         </>
       )}

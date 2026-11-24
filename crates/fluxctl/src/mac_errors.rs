@@ -1284,6 +1284,81 @@ pub const CODES: &[MacCode] = &[
         aliases: &["share-fetch"],
         signatures: &["could not download the shared bundle"],
     },
+    MacCode {
+        code: "MAC_SCHEDULE_INVALID",
+        status: None,
+        summary: "A schedule could not be saved: its name, cron expression, image, TTL or webhook is not valid.",
+        causes: &[
+            "the cron expression does not have five fields (minute hour day-of-month month day-of-week), or a field is out of range",
+            "the name has spaces or other characters a schedule name cannot hold, or a schedule with that name exists",
+            "the TTL is not a duration such as 30m or 2h, or the webhook is not an http:// or https:// URL",
+        ],
+        fixes: &[
+            "quote the cron expression: `fluxctl mac schedule add nightly \"0 3 * * *\" IMAGE -- CMD` (also @hourly @daily @weekly @monthly)",
+            "see the existing schedules: `fluxctl mac schedule ls`, and remove one with `fluxctl mac schedule rm NAME`",
+            "the images you can run: `fluxctl mac images`",
+        ],
+        aliases: &["schedule-invalid", "bad-cron"],
+        signatures: &[
+            "is not a cron expression",
+            "not a usable schedule name",
+            "a schedule named",
+            "a schedule needs an image",
+        ],
+    },
+    MacCode {
+        code: "MAC_SCHEDULE_MISSING",
+        status: Some(404),
+        summary: "There is no schedule with that name.",
+        causes: &[
+            "the name is misspelt, or the schedule was removed",
+            "this Mac keeps its schedules in its own file; you may be on another Mac or another user account",
+        ],
+        fixes: &[
+            "list them: `fluxctl mac schedule ls`",
+            "add it: `fluxctl mac schedule add NAME \"0 3 * * *\" IMAGE -- CMD`",
+        ],
+        aliases: &["schedule-missing", "schedule-not-found"],
+        signatures: &["no schedule named"],
+    },
+    MacCode {
+        code: "MAC_NOTIFY_FAILED",
+        status: None,
+        summary: "A run finished but its notification could not be delivered (the run itself is not affected).",
+        causes: &[
+            "macOS blocked the banner: notifications are off for Script Editor / osascript, or there is no logged-in desktop session (a bare ssh login cannot show one)",
+            "the webhook URL was revoked, mistyped, or is not reachable from this Mac",
+        ],
+        fixes: &[
+            "check your setup: `fluxctl mac notify test` (add `--webhook URL` to test the webhook, `--no-desktop` to skip the banner)",
+            "allow notifications for Script Editor in System Settings > Notifications",
+            "give the webhook again: `fluxctl mac schedule rm NAME`, then add it with `--notify-webhook URL`",
+        ],
+        aliases: &["notify-failed", "notification-failed"],
+        signatures: &[
+            "could not show a macos notification",
+            "macos refused the notification",
+            "the webhook answered",
+            "could not reach the webhook",
+            "a webhook must be an http",
+        ],
+    },
+    MacCode {
+        code: "MAC_TTL_REMOVE_FAILED",
+        status: None,
+        summary: "An instance reached its time limit (--ttl) but could not be stopped and removed.",
+        causes: &[
+            "the daemon was unreachable or refused the removal",
+            "the instance is busy (still starting or stopping)",
+        ],
+        fixes: &[
+            "remove it by hand: `fluxctl mac rm NAME` (or `fluxctl mac kill NAME`, then `rm`)",
+            "check the daemon: `fluxctl mac doctor`",
+            "`fluxctl mac reap` removes every instance whose TTL passed",
+        ],
+        aliases: &["ttl-remove-failed"],
+        signatures: &["reached its time limit but could not be removed"],
+    },
 ];
 
 fn norm(s: &str) -> String {

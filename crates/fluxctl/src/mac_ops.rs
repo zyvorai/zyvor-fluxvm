@@ -32,12 +32,36 @@ pub struct RunExtra {
     /// See `fluxctl mac checkpoint --help`.
     #[arg(long, value_name = "NAME:TAG")]
     pub from_checkpoint: Option<String>,
+    /// Show a macOS notification when the run ends or fails (and when `--ttl` removes it). `fluxctl mac notify test` checks it works.
+    #[arg(long)]
+    pub notify: bool,
+    /// Also POST the result to this URL (or set FLUXVM_MAC_NOTIFY_WEBHOOK, which keeps it out of shell history). Add --notify for
+    /// the banner.
+    #[arg(
+        long,
+        env = "FLUXVM_MAC_NOTIFY_WEBHOOK",
+        hide_env_values = true,
+        value_name = "URL"
+    )]
+    pub notify_webhook: Option<String>,
 }
 
 impl RunExtra {
+    /// Where `--notify` / `--notify-webhook` send things.
+    pub fn notify_targets(&self) -> crate::mac_notify::Targets {
+        crate::mac_notify::Targets {
+            desktop: self.notify,
+            webhook: self.notify_webhook.clone(),
+        }
+    }
+
     pub fn check(&self, rm: bool) -> Result<()> {
         if let Some(t) = &self.ttl {
             crate::mac_reap::parse_ttl(t)?;
+        }
+        if let Some(w) = &self.notify_webhook {
+            fluxvm_core::mac_schedule::check_webhook(w)
+                .map_err(|m| crate::mac_errors::coded(m, "MAC_NOTIFY_FAILED"))?;
         }
         ensure!(
             !(self.wait_healthy && rm),
@@ -169,6 +193,14 @@ pub async fn after_run(
             Some(patch),
         )
         .await?;
+    }
+    if x.ttl.is_some() && crate::mac_cmd::find_instance(r, name).await.is_ok() {
+        // The expiry label is stamped above; this detached process acts on it, so the TTL holds after fluxctl exits.
+        if let Err(e) = crate::mac_sched::spawn_guard(r, name, &x.notify_targets()) {
+            eprintln!(
+                "warning: could not start the TTL guard ({e:#}); `fluxctl mac supervise` or `fluxctl mac reap` will still remove {name} after its TTL"
+            );
+        }
     }
     if x.wait_healthy {
         let waited = crate::mac_health::wait_instance_healthy(r, name, x.health_timeout).await?;

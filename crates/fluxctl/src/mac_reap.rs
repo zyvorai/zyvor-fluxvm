@@ -149,6 +149,13 @@ pub async fn set_ttl(r: &crate::remote::Remote, name: &str, ttl: &str) -> Result
         Some(json!({"labels": {EXPIRES_LABEL: val}})),
     )
     .await?;
+    if ttl != "none"
+        && let Err(e) = crate::mac_sched::spawn_guard(r, name, &Default::default())
+    {
+        eprintln!(
+            "warning: could not start the TTL guard ({e:#}); `fluxctl mac reap` still removes it"
+        );
+    }
     println!(
         "{name}: ttl {}",
         if ttl == "none" { "cleared" } else { ttl }
