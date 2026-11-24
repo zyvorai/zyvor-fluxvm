@@ -68,3 +68,35 @@ and unverified); everything else was read from the cited page.
 * https://github.com/yannh/kubeconform
 * https://developer.hashicorp.com/terraform/cli/commands/plan
 * https://kubevela.io/docs/platform-engineers/oam/oam-model/ (migration stub only)
+
+---
+
+# Round 3 research: VM housekeeping in comparable tools
+
+Everything below was read from a fetched page in this session unless marked **[U]**.
+
+| Tool | Relevant behaviour | Read from |
+| --- | --- | --- |
+| **Lima** (`limactl`) | `protect` / `unprotect` guard an instance against accidental removal; also `prune`, `snapshot`, `disk`, `autostart`, `copy`, `watch`, `completion`. | https://lima-vm.io/docs/reference/limactl/ |
+| **OrbStack** (`orb`) | `orb` subcommands include `list`, `info`, `logs`, `push`/`pull`, `rename`, `report`, `reset`; release notes mention an `orb top` activity monitor **[U: the release-notes page was only seen as a search result]**. | https://docs.orbstack.dev/machines/commands |
+| **Docker** | `docker system df`: rows Images, Containers, Local Volumes; columns TOTAL, ACTIVE, SIZE, RECLAIMABLE; `-v` per-item breakdown; `--format json`. | https://docs.docker.com/reference/cli/docker/system/df/ |
+| **Vagrant** | `global-status` lists environments from a cache, `--prune` drops invalid entries (slower). | https://developer.hashicorp.com/vagrant/docs/cli/global-status |
+| **Multipass** | `delete`, `recover`, `purge` are listed as separate commands (the page gave no behaviour text, so a soft-delete reading is **[U]**). | https://canonical.com/multipass/docs//latest/reference/command-line-interface/ |
+| **Colima** | README lists start flags, runtimes, Kubernetes, GPU; it did not document `prune` or `status`, so those are **[U]**. | https://github.com/abiosoft/colima/blob/main/README.md |
+
+## What FluxVM lacked
+
+* `GET /v1/host/storage` existed but had no command and no notion of reclaimable space.
+* Nothing stopped `fluxctl delete -l env=prod --yes` from removing a VM you care about.
+* No one-step cleanup of stopped VMs, and no live per-VM view (only `stats ID` for one VM, one sample).
+
+## Decisions
+
+| Idea | Decision |
+| --- | --- |
+| Deletion protection (Lima `protect`) | Built (`protect`, `unprotect`, enforced in the manager). |
+| `df` with RECLAIMABLE (Docker) | Built over the existing storage report. |
+| `prune` with preview (Docker, Vagrant, Lima) | Built; preview by default, never touches protected or live VMs. |
+| `top` (OrbStack, `docker stats`) | Built from two `/v1/stats` samples. |
+| Soft delete and `recover` (Multipass) | Not built: needs a trash area for disks and a retention policy; protection covers the accident without new state. |
+| `snapshot`, `disk`, `copy`, `completion`, `rename` | Already present (`snapshot`, `disk`, `cp`, `completion`, `rename-vm`). |

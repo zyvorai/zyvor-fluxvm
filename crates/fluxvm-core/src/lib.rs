@@ -34,6 +34,7 @@ pub mod placement;
 pub mod policy;
 pub mod pressure_admission;
 pub mod process;
+pub mod protect;
 pub mod security;
 pub mod self_test;
 pub mod setup_doctor;
