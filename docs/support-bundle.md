@@ -6,8 +6,16 @@ One file with what a maintainer needs to help you, with the secrets taken out.
 fluxctl support-bundle                 # writes ~/fluxvm-support-<timestamp>.tar.gz
 fluxctl support-bundle --out ~/b.tgz   # somewhere else
 fluxctl support-bundle --log-lines 300 # fewer log lines (10 to 10000, default 1000)
-fluxctl support-bundle --json          # print the path, size and skipped parts as JSON
+fluxctl support-bundle --json          # print the path, size, files and skipped parts as JSON
+fluxctl support-bundle --list          # show exactly which files it would hold; write nothing
+fluxctl support-bundle --yes           # do not ask "Write it? [Y/n]" on a terminal
 ```
+
+Before anything is written it prints every file (with its size) and every skipped part, then, on a terminal, asks once. The bundle is
+built on this machine and is never sent anywhere. In Studio, **Show what is included** (`GET /v1/support-bundle/preview`, admin) lists
+the same files before you download.
+
+If `fluxctl` itself crashes (a panic), it prints the normal report and then tells you to run `fluxctl support-bundle`.
 
 It needs no flags, no set-up and no running daemon. It prints the path and the line
 **Review before sharing; secrets are removed but check for anything private.** The file is readable by you only (mode 600) and is never
@@ -74,3 +82,10 @@ SUPPORT_BUNDLE_SECRET_LEFT`): send `fluxctl cluster status --json` and `fluxctl 
 | --- | --- |
 | `SUPPORT_BUNDLE_SECRET_LEFT` | The final scan found something that looks like a secret; nothing was written |
 | `SUPPORT_BUNDLE_WRITE_FAILED` | The file could not be created or written (folder missing, disk full, file exists): use `--out` |
+
+## Sharing an instance instead
+
+`fluxctl share NAME` (a stopped macOS instance) writes one self-contained file and prints the `fluxctl import FILE` line that restores it
+on another Mac; `--serve` also offers it once over local HTTP (127.0.0.1 unless `--bind` says otherwise) under a one-time token, then
+stops. Registry logins, tokens, build secrets, SSH keys, environment values and host folders are never read into it and are listed in the
+output; anything stored inside the guest's own disk travels with it, and the output says so. Nothing is uploaded.

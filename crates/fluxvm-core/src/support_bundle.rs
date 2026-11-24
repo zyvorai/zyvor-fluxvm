@@ -454,6 +454,29 @@ pub fn verify_archive(bytes: &[u8]) -> Result<usize, BundleError> {
     Ok(n)
 }
 
+/// The files in a finished `.tar.gz`: each entry's path inside the archive (without the top folder) and its size in bytes.
+/// This is what `fluxctl support-bundle` shows before it writes anything.
+pub fn list_archive(bytes: &[u8]) -> Result<Vec<(String, u64)>, BundleError> {
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let entries = ar
+        .entries()
+        .map_err(|e| BundleError::Archive(e.to_string()))?;
+    let mut out = Vec::new();
+    for e in entries {
+        let e = e.map_err(|e| BundleError::Archive(e.to_string()))?;
+        let path = e
+            .path()
+            .map_err(|e| BundleError::Archive(e.to_string()))?
+            .to_string_lossy()
+            .into_owned();
+        let name = path
+            .split_once('/')
+            .map_or(path.clone(), |(_, r)| r.to_owned());
+        out.push((name, e.size()));
+    }
+    Ok(out)
+}
+
 /// Keeps the last `n` lines of `text`.
 pub fn last_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -1012,6 +1035,27 @@ mod tests {
             "GET failed: Authorization: Bearer abcdefghijklmnop was refused",
         );
         assert!(!b.skipped()[0].1.contains("abcdefghijklmnop"));
+    }
+
+    #[test]
+    fn list_archive_names_every_file_without_the_top_folder() {
+        let mut b = Bundle::new();
+        b.add_text("versions.json", "{}");
+        b.add_text("logs/daemon.log", "hello\n");
+        let bytes = b.finish("fluxvm-support-x", "now", 0).unwrap();
+        let l = list_archive(&bytes).unwrap();
+        let names: Vec<&str> = l.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "README.txt",
+                "MANIFEST.txt",
+                "versions.json",
+                "logs/daemon.log"
+            ]
+        );
+        assert_eq!(l[3].1, 6);
+        assert!(list_archive(b"not an archive").is_err());
     }
 
     #[test]

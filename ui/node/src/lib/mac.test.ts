@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -69,5 +69,12 @@ describe('composeCommands', () => {
     expect(c[1].cmd).toContain('--scale SERVICE=2');
     expect(c[2].cmd).toContain('--dry-run --fleet');
     expect(c.every((x) => x.cmd.startsWith('fluxctl mac compose'))).toBe(true);
+  });
+});
+
+describe('share commands', () => {
+  it('name the instance in the command', () => {
+    expect(shareCommand('build-1')).toBe('fluxctl share build-1');
+    expect(shareServeCommand('build-1')).toBe('fluxctl share build-1 --serve');
   });
 });

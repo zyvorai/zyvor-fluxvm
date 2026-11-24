@@ -148,29 +148,40 @@ pub fn export_refusal(name: &str, status: &str) -> Option<anyhow::Error> {
     ))
 }
 
+/// Exports a STOPPED instance to `output` (plus its `.sha256`), the way `mac export` does. Returns the instance record the daemon
+/// holds (so a caller can say what was left out) and the archive's checksum. Shared by `mac export` and `fluxctl share`.
+pub async fn export_instance(
+    r: &crate::remote::Remote,
+    name: &str,
+    output: &Path,
+) -> Result<(Value, String)> {
+    let vm = crate::mac_cmd::find_instance(r, name).await?;
+    let status = crate::mac_inspect::status(&vm);
+    if let Some(e) = export_refusal(name, status) {
+        return Err(e);
+    }
+    let disk = PathBuf::from(vm["disk"].as_str().context("the VM record has no disk")?);
+    let ws = PathBuf::from(
+        vm["workspace"]
+            .as_str()
+            .context("the VM record has no workspace")?,
+    );
+    if !disk.is_file() {
+        bail!(
+            "{} is not readable here: `mac export` needs the daemon on this Mac",
+            disk.display()
+        );
+    }
+    let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
+    export_files(&store, name, &disk, &ws, output)?;
+    let digest = write_sidecar(output)?;
+    Ok((vm, digest))
+}
+
 pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacImgx) -> Result<()> {
     match cmd {
         MacImgx::Export { name, output } => {
-            let vm = crate::mac_cmd::find_instance(r, &name).await?;
-            let status = crate::mac_inspect::status(&vm);
-            if let Some(e) = export_refusal(&name, status) {
-                return Err(e);
-            }
-            let disk = PathBuf::from(vm["disk"].as_str().context("the VM record has no disk")?);
-            let ws = PathBuf::from(
-                vm["workspace"]
-                    .as_str()
-                    .context("the VM record has no workspace")?,
-            );
-            if !disk.is_file() {
-                bail!(
-                    "{} is not readable here: `mac export` needs the daemon on this Mac",
-                    disk.display()
-                );
-            }
-            let store = crate::mac_store::Store::open(crate::mac_store::default_root()?)?;
-            export_files(&store, &name, &disk, &ws, &output)?;
-            let digest = write_sidecar(&output)?;
+            let (_, digest) = export_instance(r, &name, &output).await?;
             println!(
                 "exported {name} to {} (sha256 {digest}, also in {})",
                 output.display(),

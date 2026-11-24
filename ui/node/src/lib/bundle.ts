@@ -70,3 +70,46 @@ export async function downloadSupportBundle(): Promise<Downloaded> {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
   return { name, bytes: blob.size, skipped: Number(res.headers.get('x-fluxvm-support-skipped') ?? 0) || 0 };
 }
+
+export interface BundlePreview {
+  files: { name: string; bytes: number }[];
+  skipped: { what: string; why: string }[];
+  bytes: number;
+  note: string;
+  sent_anywhere: boolean;
+}
+
+/** One line per file, as shown before anything is downloaded: `MANIFEST.txt  (1.2 KiB)`. */
+export function previewLines(p: BundlePreview): string[] {
+  const size = (b: number) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MiB` : `${Math.max(1, Math.round(b / 1024))} KiB`);
+  return p.files.map((f) => `${f.name}  (${size(f.bytes)})`);
+}
+
+/** The sentence under the list: how many files, what was left out, and that nothing is sent. */
+export function previewSummary(p: BundlePreview): string {
+  const left = p.skipped.length ? ` ${p.skipped.length} part${p.skipped.length === 1 ? ' is' : 's are'} left out; MANIFEST.txt says why.` : '';
+  return `${p.files.length} files.${left} Nothing is uploaded: the file only goes to your Downloads folder.`;
+}
+
+/** Asks the daemon which files the bundle would hold. Nothing is saved. */
+export async function previewSupportBundle(): Promise<BundlePreview> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let res: Response;
+  try {
+    res = await fetch(`${apiBase()}/v1/support-bundle/preview`, { headers, cache: 'no-store' });
+  } catch {
+    throw new Error(`The daemon did not answer. Run ${BUNDLE_COMMAND} --list on the machine instead; it works with the daemon stopped.`);
+  }
+  if (!res.ok) {
+    let msg: string | null = null;
+    try {
+      msg = ((await res.json()) as { error?: string }).error ?? null;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(res.status, String(res.status), bundleFailure(res.status, msg));
+  }
+  return (await res.json()) as BundlePreview;
+}

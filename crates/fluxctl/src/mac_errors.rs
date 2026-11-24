@@ -1254,6 +1254,36 @@ pub const CODES: &[MacCode] = &[
         aliases: &["compose-fleet-inventory"],
         signatures: &["explain mac_compose_fleet_inventory"],
     },
+    MacCode {
+        code: "SHARE_SERVE_FAILED",
+        status: None,
+        summary: "`fluxctl share --serve` could not start its one-time local download.",
+        causes: &[
+            "the port is already used by another program",
+            "the address given with --bind does not belong to this machine",
+        ],
+        fixes: &[
+            "leave the port out (`fluxctl share NAME --serve`) and a free one is picked",
+            "or share the file by hand: `fluxctl share NAME` writes the bundle and prints the `fluxctl import FILE` line to run on the other machine",
+        ],
+        aliases: &["share-serve"],
+        signatures: &["could not serve the share bundle"],
+    },
+    MacCode {
+        code: "SHARE_FETCH_FAILED",
+        status: None,
+        summary: "`fluxctl import URL` could not download the bundle.",
+        causes: &[
+            "the sender stopped `fluxctl share --serve` (it serves one download, then stops, or after its timeout)",
+            "the address is not reachable from this machine, or the link was cut short when copied",
+        ],
+        fixes: &[
+            "ask the sender to run `fluxctl share NAME --serve` again and send you the new line",
+            "or have them send the file itself and run `fluxctl import FILE`",
+        ],
+        aliases: &["share-fetch"],
+        signatures: &["could not download the shared bundle"],
+    },
 ];
 
 fn norm(s: &str) -> String {

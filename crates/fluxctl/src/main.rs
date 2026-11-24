@@ -179,6 +179,7 @@ mod remote;
 mod run;
 mod sandbox_run;
 mod setup_doctor_cmd;
+mod share_cmd;
 mod stable_exe;
 mod stack;
 mod stack_fleet;
@@ -2018,6 +2019,12 @@ enum Command {
     /// .tar.gz with every secret removed, and print its path. Works with the daemon down; says what it skipped and why.
     /// Studio: Home, Download support bundle.
     SupportBundle(support_cmd::SupportBundleArgs),
+    /// Share a stopped macOS instance as one file: writes a self-contained bundle (disk and checksum, no secrets or logins) and
+    /// prints the one `fluxctl import` line that restores it on another Mac. `--serve` also offers it once over local HTTP.
+    /// Nothing is uploaded and nothing is sent to us. Studio: Mac, Share.
+    Share(share_cmd::ShareArgs),
+    /// Restore a shared bundle (a file, or the link `fluxctl share --serve` printed) as a macOS image: `fluxctl import FILE --as NAME:TAG`.
+    Import(share_cmd::ImportArgs),
     /// Offline checks of a VM spec (`vm-spec check`): unknown keys, values the daemon refuses, settings the chosen
     /// backend ignores, missing paths.
     VmSpec {
@@ -5429,6 +5436,7 @@ async fn run_remote(
             .await?,
         )?,
         Command::Mac { command } => mac_cmd::run_daemon(r, command).await?,
+        Command::Share(a) => share_cmd::run(r, &a).await?,
         Command::MacosPool { command } => match command {
             MacosPoolCommand::List => pretty(&r.call(Method::GET, "/v1/macos-pool", None).await?)?,
             MacosPoolCommand::Status => {
@@ -6303,6 +6311,7 @@ fn parse_cli() -> (Cli, bool) {
 }
 
 fn main() -> Result<()> {
+    support_cmd::install_crash_hook();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -6641,6 +6650,9 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     if let Command::VmImage { command } = cli.command {
         return run_vm_image(command).await;
     }
+    if let Command::Import(a) = &cli.command {
+        return share_cmd::run_import(a).await;
+    }
     if let Command::Mac { command } = &cli.command
         && command.is_client_side()
     {
@@ -6865,7 +6877,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     // when the daemon is down, which is when they are most needed.
     if matches!(
         cli.command,
-        Command::Cluster { .. } | Command::Fix(_) | Command::SupportBundle(_)
+        Command::Cluster { .. } | Command::Fix(_) | Command::SupportBundle(_) | Command::Share(_)
     ) {
         let env = cluster_cmd::Env {
             listen: cfg.listen.clone(),
@@ -6878,6 +6890,10 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             } => cluster_cmd::run_status(a, &env).await?,
             Command::Fix(a) => cluster_cmd::run_fix(a, &env, &cfg.state_dir).await?,
             Command::SupportBundle(a) => support_cmd::run(a, &env, &cfg).await?,
+            Command::Share(a) => {
+                share_cmd::run(&env.remote, a).await?;
+                0
+            }
             _ => unreachable!(),
         };
         std::process::exit(code);
@@ -7010,6 +7026,8 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Explain(_)
         | Command::Fix(_)
         | Command::SupportBundle(_)
+        | Command::Share(_)
+        | Command::Import(_)
         | Command::VmSpec { .. }
         | Command::HostCompat { .. }
         | Command::Place { .. }

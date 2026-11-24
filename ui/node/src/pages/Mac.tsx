@@ -9,7 +9,7 @@ import { navigate, Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, us
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
   COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, sizeText, statusTone, summarize,
+  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, shareCommand, sizeText, statusTone, summarize,
   type MacAction, type MacInstance, type MacView,
 } from '../lib/mac';
 
@@ -83,6 +83,7 @@ function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; 
           </details>
           <p><CopyCmd notify={notify} cmd={inspectCommand(inst.name)} /> <code className="fx-mono">{inspectCommand(inst.name)}</code></p>
           <p><CopyCmd notify={notify} cmd={execCommand(inst.name)} /> <code className="fx-mono">{execCommand(inst.name)}</code> <span className="fx-muted">a shell in the guest</span></p>
+          {inst.status === 'stopped' ? <p><CopyCmd notify={notify} cmd={shareCommand(inst.name)} /> <code className="fx-mono">{shareCommand(inst.name)}</code> <span className="fx-muted">one file for another Mac; logins and secrets are left out, nothing is uploaded (add --serve for a one-time local link)</span></p> : null}
           <p><CopyCmd notify={notify} cmd={attachCommand(inst.name)} /> <code className="fx-mono">{attachCommand(inst.name)}</code> <span className="fx-muted">follow its console</span></p>
         </>
       ) : (
