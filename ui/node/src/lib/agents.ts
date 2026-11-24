@@ -58,3 +58,12 @@ export function repairSummary(rs: RepairResult[]): string {
   const bad = rs.filter((r) => !r.ok);
   return bad.length ? `Could not load ${bad.map((r) => r.label).join(', ')}: ${bad[0].detail}` : `Loaded ${rs.length} service${rs.length === 1 ? '' : 's'}.`;
 }
+
+/** `GET /v1/agents/{label}/log`. */
+export interface AgentLog {
+  label: string;
+  text: string;
+}
+
+/** `fluxctl agents logs NAME`, with the same short name as `restartCommand`. */
+export const logsCommand = (a: AgentInfo): string => `fluxctl agents logs ${a.label === 'dev.zyvor.fluxvm' ? 'daemon' : a.label.replace(/^dev\.zyvor\.fluxvm[.-]/, '')}`;

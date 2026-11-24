@@ -14,7 +14,7 @@ import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle, prev
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
 import { checkTone, checkWord, needsAttention, notChecked, type SetupReport } from '../lib/doctor';
 import { UPGRADE_COMMAND, upgradeDetails, upgradeTone, upgradeWord, type UpgradeStatus } from '../lib/upgrade';
-import { AGENTS_COMMAND, AGENTS_REPAIR_COMMAND, agentTone, agentWord, repairSummary, repairable, restartCommand, runningText, type AgentsReport, type RepairResult } from '../lib/agents';
+import { AGENTS_COMMAND, AGENTS_REPAIR_COMMAND, agentTone, agentWord, logsCommand, repairSummary, repairable, restartCommand, runningText, type AgentLog, type AgentsReport, type RepairResult } from '../lib/agents';
 import { SELF_TEST_COMMAND, SELF_TEST_FIX_COMMAND, explainCommand, selfTestTone, selfTestWord, todo, type SelfTestReport } from '../lib/selfTest';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
@@ -136,6 +136,7 @@ function AgentsCard({ notify }: { notify: Notify }) {
   const { busy, run } = useAct(notify);
   const p = usePoll(() => api.get<AgentsReport>('/v1/agents'), 15000);
   const r = p.data;
+  const [shown, setShown] = useState<AgentLog | null>(null);
   // Nothing to show on a Mac without FluxVM services (or on Linux): no card instead of an empty one.
   if (!r || r.agents.length === 0) return null;
   const fix = () => void run('agents-repair', async () => {
@@ -148,6 +149,9 @@ function AgentsCard({ notify }: { notify: Notify }) {
     notify('Restarted ' + label);
     p.refresh();
   });
+  const showLog = (label: string) => void run('log-' + label, async () => {
+    setShown(await api.get<AgentLog>(`/v1/agents/${encodeURIComponent(label)}/log?lines=40`));
+  });
   return (
     <Card title="Background services" action={<><CopyCmd notify={notify} cmd={AGENTS_COMMAND} /> {repairable(r).length ? <Button size="sm" onClick={fix} busy={busy === 'agents-repair'}>Load {repairable(r).length}</Button> : null}</>}>
       <p>{r.headline}</p>
@@ -158,7 +162,8 @@ function AgentsCard({ notify }: { notify: Notify }) {
             <span>
               {a.name}: {runningText(a)}
               {a.what_to_do ? <div className="fx-muted">What to do: {a.what_to_do}</div> : null}
-              <div className="fx-muted"><code className="fx-mono">{restartCommand(a)}</code> <Button size="sm" onClick={() => restart(a.label)} busy={busy === 'agent-' + a.label}>Restart</Button></div>
+              <div className="fx-muted"><code className="fx-mono">{restartCommand(a)}</code> <Button size="sm" onClick={() => restart(a.label)} busy={busy === 'agent-' + a.label}>Restart</Button> <Button size="sm" onClick={() => showLog(a.label)} busy={busy === 'log-' + a.label}>Log</Button> <code className="fx-mono">{logsCommand(a)}</code></div>
+              {shown?.label === a.label ? <pre className="fx-mono">{shown.text}</pre> : null}
             </span>
           </li>
         ))}

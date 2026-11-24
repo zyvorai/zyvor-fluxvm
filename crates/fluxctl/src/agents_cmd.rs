@@ -18,6 +18,12 @@ pub enum AgentsCommand {
     /// Restart one: its label or a short name (`daemon`, `kube`, `docker`, `node-agent`, `vmnet`, `usb`). An agent that is
     /// installed but not loaded is loaded instead.
     Restart { name: String },
+    /// Print the end of one agent's log (the file its plist writes to): a label or short name, `-n` lines (default 50).
+    Logs {
+        name: String,
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: usize,
+    },
     /// Load every agent that is installed but not loaded. Never edits or deletes a plist, never uses sudo.
     Repair {
         /// Only say which would be loaded.
@@ -76,6 +82,17 @@ pub fn run(cmd: Option<AgentsCommand>) -> Result<i32> {
         AgentsCommand::Restart { name } => match la::restart(&home, &la::System, &name) {
             Ok(label) => {
                 println!("restarted {label}");
+                Ok(0)
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                Ok(1)
+            }
+        },
+        AgentsCommand::Logs { name, lines } => match la::log_tail(&home, &la::System, &name, lines)
+        {
+            Ok(t) => {
+                println!("{t}");
                 Ok(0)
             }
             Err(e) => {

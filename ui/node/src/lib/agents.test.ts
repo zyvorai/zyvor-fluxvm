@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { agentTone, agentWord, needsAttention, repairSummary, repairable, restartCommand, runningText, type AgentInfo, type AgentsReport } from './agents';
+import { agentTone, agentWord, needsAttention, repairSummary, repairable, logsCommand, restartCommand, runningText, type AgentInfo, type AgentsReport } from './agents';
 
 const a = (label: string, health: AgentInfo['health'], extra: Partial<AgentInfo> = {}): AgentInfo => ({ label, name: label, loaded: health !== 'not_loaded', state: null, pid: null, last_exit_code: null, program: '/x', program_exists: true, plist: '/p', log: null, health, what_to_do: null, ...extra });
 const report = (agents: AgentInfo[]): AgentsReport => ({ schema: 1, agents, headline: 'x' });
@@ -33,5 +33,10 @@ describe('agents helpers', () => {
     expect(repairSummary([])).toMatch(/Nothing to repair/);
     expect(repairSummary([{ label: 'a', ok: true, detail: 'loaded' }])).toBe('Loaded 1 service.');
     expect(repairSummary([{ label: 'a', ok: false, detail: 'boom' }])).toBe('Could not load a: boom');
+  });
+  it('builds the logs command with the short name the CLI accepts', () => {
+    expect(logsCommand(a('dev.zyvor.fluxvm', 'ok'))).toBe('fluxctl agents logs daemon');
+    expect(logsCommand(a('dev.zyvor.fluxvm.kube', 'ok'))).toBe('fluxctl agents logs kube');
+    expect(logsCommand(a('dev.zyvor.fluxvm-central', 'ok'))).toBe('fluxctl agents logs central');
   });
 });

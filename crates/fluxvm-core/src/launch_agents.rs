@@ -400,6 +400,53 @@ pub fn restart(home: &Path, lc: &dyn Launchctl, query: &str) -> Result<String, S
     Ok(label)
 }
 
+/// The last `lines` lines of a text file, reading at most the last 256 KiB so a huge log costs the same as a small one.
+pub fn tail(path: &Path, lines: usize) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    const WINDOW: u64 = 256 * 1024;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(WINDOW);
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    f.take(WINDOW).read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    // A window that starts mid-file starts mid-line: drop that partial first line.
+    let text = if start > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    let all: Vec<&str> = text.lines().collect();
+    Ok(all[all.len().saturating_sub(lines)..].join("\n"))
+}
+
+/// The tail of one agent's log, by label or short name.
+pub fn log_tail(
+    home: &Path,
+    lc: &dyn Launchctl,
+    query: &str,
+    lines: usize,
+) -> Result<String, String> {
+    let report = list(home, lc);
+    let labels: Vec<String> = report.agents.iter().map(|a| a.label.clone()).collect();
+    let label = resolve(query, &labels)?;
+    let a = report
+        .agents
+        .iter()
+        .find(|a| a.label == label)
+        .ok_or("not installed")?;
+    let path = a
+        .log
+        .as_ref()
+        .ok_or_else(|| format!("{label} has no log file in its plist"))?;
+    match tail(path, lines.clamp(1, 1000)) {
+        Ok(t) if t.is_empty() => Ok(format!("(the log {} is empty)", path.display())),
+        Ok(t) => Ok(t),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,5 +651,34 @@ mod tests {
             install_command("dev.zyvor.fluxvm.kube.dev-w2"),
             "fluxctl kube agent node install --name dev --worker 2"
         );
+    }
+
+    #[test]
+    fn a_log_tail_returns_the_last_lines_and_never_reads_the_whole_file() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.log");
+        std::fs::write(&f, "one\ntwo\nthree\nfour\n").unwrap();
+        assert_eq!(tail(&f, 2).unwrap(), "three\nfour");
+        assert_eq!(tail(&f, 99).unwrap(), "one\ntwo\nthree\nfour");
+        // Bigger than the window: only the end is read, and the cut first line is dropped.
+        let big: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&f, &big).unwrap();
+        let t = tail(&f, 3).unwrap();
+        assert_eq!(t, "line 99997\nline 99998\nline 99999");
+        assert!(tail(&d.path().join("missing"), 1).is_err());
+    }
+
+    #[test]
+    fn an_agents_log_is_found_through_its_plist() {
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        let h = home_with(&[("dev.zyvor.fluxvm.kube", &exe)]);
+        let fake = Fake::default();
+        // home_with points StandardErrorPath at /tmp/<label>.log, which does not exist here.
+        let e = log_tail(h.path(), &fake, "kube", 5).unwrap_err();
+        assert!(
+            e.contains("cannot read /tmp/dev.zyvor.fluxvm.kube.log"),
+            "{e}"
+        );
+        assert!(log_tail(h.path(), &fake, "nope", 5).is_err());
     }
 }

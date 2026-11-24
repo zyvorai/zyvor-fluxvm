@@ -21,6 +21,7 @@ pub(crate) fn routes() -> axum::Router<Arc<VmManager>> {
         .route("/v1/agents", axum::routing::get(list))
         .route("/v1/agents/repair", axum::routing::post(repair))
         .route("/v1/agents/{label}/restart", axum::routing::post(restart))
+        .route("/v1/agents/{label}/log", axum::routing::get(log))
 }
 
 fn home() -> Option<std::path::PathBuf> {
@@ -64,6 +65,34 @@ async fn restart(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match r {
         Ok(label) => Ok(Json(serde_json::json!({"ok": true, "label": label}))),
+        Err(e) => Err((StatusCode::BAD_REQUEST, e)),
+    }
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    #[serde(default = "default_lines")]
+    lines: usize,
+}
+
+fn default_lines() -> usize {
+    50
+}
+
+async fn log(
+    Path(label): Path<String>,
+    Query(q): Query<LogQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let r = tokio::task::spawn_blocking(move || match home() {
+        Some(h) if cfg!(target_os = "macos") => {
+            la::log_tail(&h, &la::System, &label, q.lines).map(|t| (label, t))
+        }
+        _ => Err("LaunchAgents exist only on macOS".to_owned()),
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match r {
+        Ok((label, text)) => Ok(Json(serde_json::json!({"label": label, "text": text}))),
         Err(e) => Err((StatusCode::BAD_REQUEST, e)),
     }
 }
