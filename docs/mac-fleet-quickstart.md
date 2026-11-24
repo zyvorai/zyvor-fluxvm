@@ -99,6 +99,23 @@ Other commands take `-f fleet.yaml` and then default to all its hosts, or name s
 ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 ... -- admin@mini-1.local '/bin/sh -c '\''...'\'''
 ```
 
+## Labels on Macs
+
+A label is `key=value` on a host of the inventory (`labels: [zone=lab]`). They place jobs (`mac-fleet run --host-label zone=lab`)
+and filter lists.
+
+```
+fluxctl mac-fleet label -f hosts.yaml                       # every Mac with its labels
+fluxctl mac-fleet label mini-1 zone=lab team=ios -f hosts.yaml
+fluxctl mac-fleet label mini-1 --rm team -f hosts.yaml
+fluxctl mac-fleet label -f hosts.yaml --filter label=zone=lab
+fluxctl mac-fleet top -f hosts.yaml --filter label=zone=lab   # also: status
+```
+
+`label` edits the inventory file only and sends nothing to a Mac (the file is rewritten: other keys are kept, comments are not).
+`top --filter` does not overwrite the snapshot Studio shows. Studio's Mac fleet page shows each Mac's labels, filters by them
+(`zone=lab`) and copies the command above.
+
 ## SSH and secrets
 
 - The system `ssh` is used with `BatchMode=yes`: it never prompts, so a missing key fails in seconds instead of hanging a parallel run.

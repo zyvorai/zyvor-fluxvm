@@ -84,6 +84,7 @@ export function AppsPage({ notify }: { notify: Notify }) {
               <Field label="Image" hint="For example nginx or ghcr.io/you/app:1.0">{(id) => <input id={id} className="fx-input" value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })} placeholder="nginx" />}</Field>
               <Field label="Name" hint="Default: from the image">{(id) => <input id={id} className="fx-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="web" />}</Field>
               <Field label="Port" hint="What it listens on">{(id) => <input id={id} className="fx-input" inputMode="numeric" value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} placeholder="80" />}</Field>
+              <Field label="Labels" hint="Optional, like team=ios, tier=web. Find them later with the filter below.">{(id) => <input id={id} className="fx-input" value={form.labels} onChange={(e) => setForm({ ...form, labels: e.target.value })} placeholder="team=ios" />}</Field>
               <Field label="Copies">{(id) => <input id={id} className="fx-input" inputMode="numeric" value={form.replicas} onChange={(e) => setForm({ ...form, replicas: e.target.value })} />}</Field>
             </div>
             {problem ? <p className="fx-muted" role="status">{problem}</p> : null}

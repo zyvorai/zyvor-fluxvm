@@ -153,6 +153,10 @@ pub struct TopArgs {
     /// Seconds between refreshes in a terminal.
     #[arg(long, value_name = "SECS", default_value_t = 5)]
     pub interval: u64,
+    /// Only the Macs that match: `label=KEY`, `label=KEY=VALUE`, `name=PART`, `host=PART`. Repeatable. A filtered view is not
+    /// saved for Studio, which keeps showing the whole fleet.
+    #[arg(long = "filter", value_name = "KEY=VALUE")]
+    pub filter: Vec<String>,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -172,6 +176,9 @@ pub struct TopRow {
     pub disk_free_gib: Option<u64>,
     pub disk_low: bool,
     pub on_ac: Option<bool>,
+    /// The Mac's labels from the inventory (`fluxctl mac-fleet label`), `{"zone": "lab"}`.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
     pub error: Option<String>,
     /// What to do about the row, when something is wrong; a command or a sentence.
     pub next: Option<String>,
@@ -249,6 +256,7 @@ pub fn top_row(v: &HostView, cordoned: bool, thermal: Option<Thermal>) -> TopRow
         disk_free_gib: v.disk_free_gib,
         disk_low,
         on_ac: v.on_ac,
+        labels: crate::mac_fleet_label::labels_map(&v.labels),
         error: v.unavailable.clone(),
         next,
     }
@@ -382,6 +390,8 @@ pub fn take(
 
 pub fn top_cmd(a: TopArgs) -> Result<()> {
     let (targets, inv) = resolve(&a.which, &a.conn)?;
+    let filtered = !a.filter.is_empty();
+    let targets = crate::mac_fleet_label::filter_targets(targets, &a.filter)?;
     let tr = transport(&a.conn, inv.as_ref());
     if a.conn.dry_run {
         let _ = take(tr.as_ref(), &targets, &FleetState::default(), 1, 0);
@@ -402,7 +412,9 @@ pub fn top_cmd(a: TopArgs) -> Result<()> {
             jobs(&a.conn),
             SystemClock.now(),
         );
-        save_snapshot(&snap);
+        if !filtered {
+            save_snapshot(&snap);
+        }
         if a.conn.json {
             println!("{}", serde_json::to_string_pretty(&snap)?);
         } else if live {
@@ -557,5 +569,18 @@ mod tests {
         assert_eq!(v["taken_unix"], 42);
         assert_eq!(v["hosts"][0]["state"], "ready");
         assert_eq!(v["summary"]["slots_total"], 2);
+    }
+
+    #[test]
+    fn the_snapshot_carries_each_macs_labels_for_studio() {
+        let tr = fake(0, 200, "");
+        let mut t = Target::parse("a").unwrap();
+        t.labels = vec!["zone=lab".into(), "team=ios".into()];
+        let snap = take(&tr, &[t], &FleetState::default(), 2, 1);
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(
+            v["hosts"][0]["labels"],
+            serde_json::json!({"team": "ios", "zone": "lab"})
+        );
     }
 }

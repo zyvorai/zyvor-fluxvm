@@ -97,7 +97,7 @@ pub(crate) fn build(snapshot: Option<&Value>, state: Option<&Value>, now: u64) -
                 hosts.push(json!({
                     "name": name, "host": h["host"], "state": "unknown", "cordoned": cordoned(name),
                     "macos_guests": 0, "macos_limit": 2, "thermal": "unknown", "thermal_limit_pct": null,
-                    "disk_free_gib": null, "disk_low": false, "on_ac": null, "error": null,
+                    "disk_free_gib": null, "disk_low": false, "on_ac": null, "labels": {}, "error": null,
                     "next": REFRESH, "commands": commands(name),
                 }));
             }
@@ -198,6 +198,16 @@ mod tests {
             "fluxctl mac-fleet cordon mini-1"
         );
         assert_eq!(v["hosts"][2]["state"], "unreachable");
+    }
+
+    #[test]
+    fn a_macs_labels_pass_through_from_the_snapshot() {
+        let mut sn = snap();
+        sn["hosts"][0]["labels"] = json!({"zone": "lab"});
+        let v = build(Some(&sn), None, 1030);
+        assert_eq!(v["hosts"][0]["labels"]["zone"], "lab");
+        let st = json!({"applied": {"/x/inv.yaml": [{"name": "mini-9", "host": "mini-9.local"}]}});
+        assert_eq!(build(None, Some(&st), 5)["hosts"][0]["labels"], json!({}));
     }
 
     #[test]
