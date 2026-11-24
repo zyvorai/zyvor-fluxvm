@@ -37,3 +37,8 @@ fn help_does_not_overflow_the_stack() {
 fn subcommand_help_does_not_overflow_the_stack() {
     run(&["kube", "--help"]);
 }
+
+#[test]
+fn completions_do_not_overflow_the_stack() {
+    run(&["completions", "bash"]);
+}

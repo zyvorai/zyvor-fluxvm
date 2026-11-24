@@ -12,6 +12,7 @@ import { useAct } from '../lib/act';
 import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle, previewLines, previewSummary, previewSupportBundle, type BundlePreview } from '../lib/bundle';
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
 import { checkTone, checkWord, needsAttention, notChecked, type SetupReport } from '../lib/doctor';
+import { UPGRADE_COMMAND, upgradeDetails, upgradeTone, upgradeWord, type UpgradeStatus } from '../lib/upgrade';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
 function ItemRow({ i, notify }: { i: HealthItem; notify: Notify }) {
@@ -127,6 +128,33 @@ function CheckMySetup({ notify }: { notify: Notify }) {
   );
 }
 
+/** "Updates": the status of `fluxctl upgrade --check`, read when the button is pressed (it asks the release list, installs nothing). */
+function UpdatesCard({ notify }: { notify: Notify }) {
+  const { busy, run } = useAct(notify);
+  const [s, setS] = useState<UpgradeStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const check = () => void run('upgrade', async () => {
+    try {
+      setS(await api.get<UpgradeStatus>('/v1/upgrade/check'));
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  });
+  return (
+    <Card title="Updates" action={<><CopyCmd notify={notify} cmd={UPGRADE_COMMAND} /> <Button size="sm" onClick={check} busy={busy === 'upgrade'}><ListChecks size={14} /> {s ? 'Check again' : 'Check for updates'}</Button></>}>
+      {!s && !err ? <p className="fx-muted">Is there a newer release you can install? This only looks; <code className="fx-mono">fluxctl upgrade</code> in a terminal does the upgrade, after asking.</p> : null}
+      {err ? <p className="fx-muted">Could not check: {err}. Run <code className="fx-mono">{UPGRADE_COMMAND}</code> in a terminal instead.</p> : null}
+      {s ? (
+        <>
+          <p><Pill tone={upgradeTone(s)}>{upgradeWord(s)}</Pill> {s.line}</p>
+          {upgradeDetails(s).map((l) => <p key={l} className="fx-muted">{l}</p>)}
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
 /** Download the support bundle: versions, health, recent logs, instances, config and host facts with secrets removed. */
 function SupportBundle({ notify }: { notify: Notify }) {
   const { busy, run } = useAct(notify);
@@ -167,6 +195,7 @@ export function HomePage({ notify }: { notify: Notify }) {
         <Hero eyebrow="Home" title="Cluster health is not available" lede="This node did not answer the health request." />
         <EmptyState title="Could not read the health report" body={`${h.error?.message ?? 'No answer'}. An older FluxVM daemon does not have this page's data; run fluxctl cluster status on the machine instead.`} action={<Button onClick={() => void copy('fluxctl cluster status')}><Copy size={14} /> Copy as fluxctl</Button>} />
         <div className="fx-section"><CheckMySetup notify={notify} /></div>
+        <div className="fx-section"><UpdatesCard notify={notify} /></div>
         <div className="fx-section"><SupportBundle notify={notify} /></div>
       </>
     );
@@ -194,6 +223,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <MacHomeCard notify={notify} />
       <BackupsCard notify={notify} />
       <div className="fx-section"><CheckMySetup notify={notify} /></div>
+      <div className="fx-section"><UpdatesCard notify={notify} /></div>
       <div className="fx-section"><SupportBundle notify={notify} /></div>
       <p className="fx-muted fx-section">This page shows the node you are connected to. For every Mac of a fleet, run <code className="fx-mono">fluxctl cluster status -f inventory.yaml</code>.</p>
     </>

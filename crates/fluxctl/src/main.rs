@@ -6320,6 +6320,21 @@ fn parse_cli() -> (Cli, bool) {
     )
 }
 
+/// `fluxctl completions SHELL`. Like `parse_cli`, this runs from `main` before the async runtime: building the clap tree
+/// again (`Cli::command()`) needs several MiB of stack in a debug build, and `run`'s own frame had already used most of
+/// the 8 MiB main-thread stack, so doing it there overflowed.
+#[inline(never)]
+fn print_completions(shell: clap_complete::Shell) -> Result<()> {
+    use std::io::Write;
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "fluxctl", &mut buf);
+    match std::io::stdout().write_all(&buf) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        other => other?,
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     support_cmd::install_crash_hook();
     tracing_subscriber::fmt()
@@ -6330,6 +6345,9 @@ fn main() -> Result<()> {
         )
         .init();
     let (cli, output_explicit) = parse_cli();
+    if let Command::Completions { shell } = &cli.command {
+        return print_completions(*shell);
+    }
     // A command that changes something leaves one record in the audit log when it ends (`fluxctl audit ls`). Against a
     // remote daemon the daemon records it instead.
     let audit_action = fluxvm_scheduler::audit::describe_cli(&std::env::args().collect::<Vec<_>>());
@@ -6394,16 +6412,6 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             );
         } else {
             print!("{}", fluxvm_core::cheatsheet::text());
-        }
-        return Ok(());
-    }
-    if let Command::Completions { shell } = &cli.command {
-        use std::io::Write;
-        let mut buf = Vec::new();
-        clap_complete::generate(*shell, &mut Cli::command(), "fluxctl", &mut buf);
-        match std::io::stdout().write_all(&buf) {
-            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-            other => other?,
         }
         return Ok(());
     }

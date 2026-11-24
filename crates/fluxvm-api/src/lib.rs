@@ -48,6 +48,7 @@ mod netobs_api;
 mod oidc;
 mod openapi;
 mod rate_limit;
+pub mod release_check;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 pub use netobs_api::install_netobs;
@@ -1089,6 +1090,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
         .merge(setup_doctor::routes())
+        .merge(release_check::routes())
         .merge(cli_api::routes())
         .merge(support_bundle::routes())
         .merge(image_security::routes())
