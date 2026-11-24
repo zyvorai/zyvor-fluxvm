@@ -41,6 +41,76 @@ pub const CODES: &[MacCode] = &[
         signatures: &[],
     },
     MacCode {
+        code: "VM_PROTECTED",
+        status: Some(409),
+        summary: "A VM was not deleted because it is protected.",
+        causes: &["the VM has the label `fluxvm.io/protected=true` (set by `fluxctl protect`)"],
+        fixes: &[
+            "remove the protection: `fluxctl unprotect NAME`, then delete it",
+            "see what is protected: `fluxctl protect --list`",
+        ],
+        aliases: &["vm-protected"],
+        signatures: &[],
+    },
+    MacCode {
+        code: "PROTECT_NO_TARGET",
+        status: None,
+        summary: "`fluxctl protect` or `unprotect` had no VM to act on.",
+        causes: &[
+            "no VM name or id was given and `-l` was not used",
+            "the label selector given with `-l` matches no VM",
+        ],
+        fixes: &[
+            "name the VM: `fluxctl protect web`",
+            "or use a selector: `fluxctl protect -l env=prod` (check with `fluxctl ps --label env=prod`)",
+        ],
+        aliases: &["protect-no-target"],
+        signatures: &[],
+    },
+    MacCode {
+        code: "DAEMON_REQUIRED",
+        status: None,
+        summary: "`fluxctl protect`, `unprotect`, `df`, `prune` or `top` could not reach the FluxVM daemon.",
+        causes: &[
+            "the daemon is not running or not reachable at the address in use",
+            "the daemon is older than this fluxctl and lacks the route",
+            "a token is needed (`--server-token`)",
+        ],
+        fixes: &[
+            "check the daemon: `fluxctl doctor`",
+            "start it: `fluxctl serve` (or `fluxctl service install`)",
+        ],
+        aliases: &["daemon-required"],
+        signatures: &[],
+    },
+    MacCode {
+        code: "PRUNE_BAD_AGE",
+        status: None,
+        summary: "`fluxctl prune --older-than` was not a length of time.",
+        causes: &["the value was not like `30m`, `12h`, `7d`, `2w` or `0s`"],
+        fixes: &[
+            "preview everything stopped: `fluxctl prune --older-than 0s`",
+            "keep the last week: `fluxctl prune --older-than 7d`",
+        ],
+        aliases: &["prune-bad-age"],
+        signatures: &[],
+    },
+    MacCode {
+        code: "TOP_BAD_SORT",
+        status: None,
+        summary: "`fluxctl top` was given a sort key or interval it cannot use.",
+        causes: &[
+            "`--sort` was not `cpu`, `mem`, `disk`, `net` or `name`",
+            "`--interval` was outside 0.05 to 3600 seconds",
+        ],
+        fixes: &[
+            "sort by memory: `fluxctl top --sort mem`",
+            "refresh every 5 seconds: `fluxctl top --interval 5`",
+        ],
+        aliases: &["top-bad-sort"],
+        signatures: &[],
+    },
+    MacCode {
         code: "CONFIG_UNKNOWN_KEY",
         status: None,
         summary: "That setting does not exist, so `fluxctl config set` did not write it (the daemon would silently ignore it).",

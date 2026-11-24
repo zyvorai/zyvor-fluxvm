@@ -124,6 +124,15 @@ impl<E: Into<anyhow::Error>> From<E> for ApiError {
                 message: format!("{:#}", e),
             };
         }
+        // `fluxctl protect`: deleting a protected VM is a conflict until it is unprotected.
+        if e.downcast_ref::<fluxvm_core::protect::VmProtected>()
+            .is_some()
+        {
+            return Self {
+                status: StatusCode::CONFLICT,
+                message: format!("{:#}", e),
+            };
+        }
         if e.downcast_ref::<fluxvm_scheduler::diagnostics::DiagnosticsBusy>()
             .is_some()
         {
@@ -8215,6 +8224,61 @@ mod tests {
             let resp = app.oneshot(b.body(body).unwrap()).await.unwrap();
             let status = resp.status();
             (status, body_string(resp).await)
+        }
+
+        /// `fluxctl protect`: the label makes `DELETE /v1/vms/{id}` answer 409 with the fix, and removing it lets the
+        /// same delete through. Stopping/labelling still work while protected.
+        #[tokio::test]
+        async fn a_protected_vm_cannot_be_deleted_until_it_is_unprotected() {
+            let m = procbox_manager(density_tokens(), false);
+            let ws = m.cfg.state_dir.join("ws");
+            std::fs::create_dir_all(&ws).unwrap();
+            let id = Uuid::new_v4();
+            let vm: fluxvm_core::model::VmRecord = serde_json::from_value(json!({
+                "id": id.to_string(), "name": "db", "backend": "qemu", "status": "stopped",
+                "pid": null, "created_at": "2026-01-01T00:00:00Z", "expires_at": null,
+                "workspace": ws, "disk": ws.join("disk"), "seed_disk": null, "tap_name": null,
+                "control_socket": null, "log_path": ws.join("console.log"), "error": null,
+                "request": {"name": "db", "backend": "qemu", "image": "/img.qcow2", "network": {"mode": "none"}}
+            }))
+            .unwrap();
+            m.store.insert(vm).await.unwrap();
+            let app = router(m);
+            let uri = format!("/v1/vms/{id}");
+            let (st, b) = call(
+                app.clone(),
+                "PATCH",
+                &uri,
+                "ops",
+                Some(r#"{"labels":{"fluxvm.io/protected":"true"}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, b) = call(app.clone(), "DELETE", &uri, "ops", None).await;
+            assert_eq!(st, StatusCode::CONFLICT, "{b}");
+            assert!(
+                b.contains("fluxctl unprotect db") && b.contains("VM_PROTECTED"),
+                "{b}"
+            );
+            // Still there.
+            let (st, _) = call(app.clone(), "GET", &uri, "ops", None).await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, _) = call(
+                app.clone(),
+                "PATCH",
+                &uri,
+                "ops",
+                Some(r#"{"labels":{"fluxvm.io/protected":null}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, b) = call(app.clone(), "DELETE", &uri, "ops", None).await;
+            assert_eq!(st, StatusCode::NO_CONTENT, "{b}");
+            // The VM is really gone. An unknown id answers 400 "VM not found" on every VM route: `VmManager::get` fails with
+            // a plain error that the API maps to the historical 400 (not part of this change).
+            let (st, b) = call(app, "GET", &uri, "ops", None).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+            assert!(b.contains("VM not found"), "{b}");
         }
 
         fn density_tokens() -> AuthConfig {

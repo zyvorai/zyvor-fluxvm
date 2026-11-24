@@ -5666,6 +5666,8 @@ impl VmManager {
 
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         let mut vm = self.get(id).await?;
+        // `fluxctl protect`: a protected VM is only removable after `fluxctl unprotect`.
+        fluxvm_core::protect::guard_delete(&vm.name, &vm.labels)?;
         // A native container has no VMM: stop its unit (or launcher) and cgroup first.
         self.container_teardown(&vm).await;
         // A Paused VM is not "already stopped" — its process is fully

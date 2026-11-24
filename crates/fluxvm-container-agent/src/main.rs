@@ -3577,7 +3577,7 @@ fn configure_container_policy(
             .map_mut("fluxvm_cpol")
             .context("fluxvm_cpol map not found")?;
         let mut pol: aya::maps::HashMap<_, u64, u64> = aya::maps::HashMap::try_from(map)?;
-        pol.insert(cgroup_id, flags | ((count as u64) << 32), 0)?;
+        pol.insert(&cgroup_id, &(flags | ((count as u64) << 32)), 0)?;
     }
     if let Some(map) = state.bpf.map_mut("fluxvm_crules") {
         let mut rules: aya::maps::HashMap<_, CruleKey, CruleValue> =
@@ -3599,12 +3599,12 @@ fn configure_container_policy(
                     };
                     let (family, prefix_len, address) = parse_container_cidr(r)?;
                     rules.insert(
-                        CruleKey {
+                        &CruleKey {
                             cgroup_id,
                             slot: slot as u32,
                             reserved: 0,
                         },
-                        CruleValue {
+                        &CruleValue {
                             direction,
                             family,
                             prefix_len,
@@ -3634,12 +3634,12 @@ fn configure_container_policy(
             for addr in addrs {
                 if let IpAddr::V4(v4) = addr {
                     m.insert(
-                        Cid4Key {
+                        &Cid4Key {
                             cgroup_id,
                             address: v4.octets(),
                             reserved: 0,
                         },
-                        v,
+                        &v,
                         0,
                     )?;
                 }
@@ -3659,11 +3659,11 @@ fn configure_container_policy(
             for addr in addrs {
                 if let IpAddr::V6(v6) = addr {
                     m.insert(
-                        Cid6Key {
+                        &Cid6Key {
                             cgroup_id,
                             address: v6.octets(),
                         },
-                        v,
+                        &v,
                         0,
                     )?;
                 }
@@ -3894,8 +3894,8 @@ fn configure_container_lsm_policy(
     let mut pol: aya::maps::HashMap<_, u64, LsmPolicyValue> =
         aya::maps::HashMap::try_from(pol_map)?;
     pol.insert(
-        cgroup_id,
-        LsmPolicyValue {
+        &cgroup_id,
+        &LsmPolicyValue {
             flags,
             generation: state.generation,
         },
@@ -3924,7 +3924,7 @@ fn configure_container_lsm_policy(
                     bytes,
                 };
                 write
-                    .insert(key, value, 0)
+                    .insert(&key, &value, 0)
                     .context("writing fluxvm_lsmwrite entry")?;
             }
             _ => {

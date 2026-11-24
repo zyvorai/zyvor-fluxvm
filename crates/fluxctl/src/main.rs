@@ -41,6 +41,7 @@ mod compose;
 mod config_check;
 mod contexts;
 mod create;
+mod df_cmd;
 mod docker_builds_cmd;
 mod docker_context_cmd;
 mod docker_host;
@@ -183,6 +184,8 @@ mod mcp_install;
 mod netobs;
 mod node_agent;
 mod output;
+mod protect_cmd;
+mod prune_cmd;
 mod recipes;
 mod remote;
 mod run;
@@ -198,6 +201,9 @@ mod styles;
 mod supply_errors;
 mod support_cmd;
 mod templates_cmd;
+#[cfg(test)]
+mod testkit;
+mod top_cmd;
 mod up;
 mod upgrade_cmd;
 mod usage_cmd;
@@ -1925,6 +1931,20 @@ enum Command {
     /// usage.cpu_hour 0.04`, what it cost. `--by vm|day|label:KEY`, `--since 7d`, `--label env=dev`. REST: `GET /v1/usage`.
     /// Counted automatically while VMs run; also in Studio's Usage page.
     Usage(usage_cmd::UsageArgs),
+    /// Protect VMs from deletion (`limactl protect`): the daemon refuses to delete a VM labelled `fluxvm.io/protected=true`
+    /// (HTTP 409) until `fluxctl unprotect`. `protect --list` shows them; `-l env=prod` protects by label. `prune` skips them.
+    Protect(protect_cmd::ProtectArgs),
+    /// Remove the deletion protection set by `fluxctl protect`.
+    Unprotect(protect_cmd::UnprotectArgs),
+    /// Where the disk space goes and how much `prune` could free, like `docker system df` (TYPE, TOTAL, ACTIVE, SIZE,
+    /// RECLAIMABLE). `-v` lists every VM and branch. REST: `GET /v1/host/storage`.
+    Df(df_cmd::DfArgs),
+    /// Delete stopped VMs in one step. Previews by default; `--yes` deletes. `--older-than 7d`, `-l SELECTOR`,
+    /// `--failed`. Never touches running or protected VMs.
+    Prune(prune_cmd::PruneArgs),
+    /// Live per-VM CPU, memory, disk and network (like `orb top`). `--once`, `--sort cpu|mem|disk|net|name`, `--all`,
+    /// `--json`. REST: `GET /v1/stats` (two samples give the rates).
+    Top(top_cmd::TopArgs),
     /// Guest-network observability: flows, DNS, roll-ups, packet capture. REST: `/v1/netobs/*`. Always talks to the
     /// daemon (`--server`, the current context, or the local `listen`). See docs/netobs.md.
     Netobs {
@@ -5230,6 +5250,11 @@ async fn run_remote(
         Command::Get { id } | Command::Status { id: Some(id), .. } => {
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
+        Command::Protect(a) => protect_cmd::run_protect(r, &a).await?,
+        Command::Unprotect(a) => protect_cmd::run_unprotect(r, &a).await?,
+        Command::Df(a) => df_cmd::run(r, &a).await?,
+        Command::Prune(a) => prune_cmd::run(r, &a).await?,
+        Command::Top(a) => top_cmd::run(r, &a).await?,
         Command::Netobs { command } => netobs::run(r, command).await?,
         Command::Guest { command } => guest_cmd::run(r, command).await?,
         Command::Agent { command } => agent_session::run(r, command).await?,
@@ -6894,6 +6919,20 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(res) = {
+        let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
+        match &cli.command {
+            Command::Protect(a) => Some(protect_cmd::run_protect(&r, a).await),
+            Command::Unprotect(a) => Some(protect_cmd::run_unprotect(&r, a).await),
+            Command::Df(a) => Some(df_cmd::run(&r, a).await),
+            Command::Prune(a) => Some(prune_cmd::run(&r, a).await),
+            Command::Top(a) => Some(top_cmd::run(&r, a).await),
+            _ => None,
+        }
+    } {
+        return res;
+    }
+
     if let Command::Usage(a) = &cli.command {
         let r = remote::Remote::new(&cfg.listen, cli.server_token.clone());
         return usage_cmd::run(&r, a, &cfg.usage).await;
@@ -7016,6 +7055,11 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Context { .. }
         | Command::Usage(_)
         | Command::Find(_)
+        | Command::Protect(_)
+        | Command::Unprotect(_)
+        | Command::Df(_)
+        | Command::Prune(_)
+        | Command::Top(_)
         | Command::Netobs { .. }
         | Command::Agent { .. }
         | Command::Infer { .. }
