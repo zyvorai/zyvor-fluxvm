@@ -104,7 +104,11 @@ pub fn judge_signature(helper: Helper, dvv: &str, entitlements: &str) -> Signatu
                 "ad hoc signed: macOS kills or refuses a helper that claims the restricted {ent} entitlement without a Developer \
                  ID signature and provisioning profile (docs/macos-signing.md). Install the release package's signed copy: \
                  `fluxctl helper-agent {} install --package-dir <unpacked release>`",
-                if helper == Helper::Vmnet { "vmnet" } else { "usb" }
+                if helper == Helper::Vmnet {
+                    "vmnet"
+                } else {
+                    "usb"
+                }
             ),
         };
     }
@@ -138,23 +142,37 @@ fn codesign_verdict(helper: Helper, path: &Path) -> SignatureVerdict {
             .args(args)
             .arg(path)
             .output()
-            .map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+            .map(|o| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            })
             .unwrap_or_default()
     };
-    judge_signature(helper, &run(&["-dvv"]), &run(&["-d", "--entitlements", "-"]))
+    judge_signature(
+        helper,
+        &run(&["-dvv"]),
+        &run(&["-d", "--entitlements", "-"]),
+    )
 }
 
 fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is not set")
 }
 
 fn plist(helper: Helper, home: &Path) -> PathBuf {
-    home.join("Library/LaunchAgents").join(format!("{}.plist", helper.label()))
+    home.join("Library/LaunchAgents")
+        .join(format!("{}.plist", helper.label()))
 }
 
 pub fn status(helper: Helper) -> Result<serde_json::Value> {
     let home = home()?;
-    let mut v = crate::launch_agent::status_of(helper.label(), &plist(helper, &home), &helper.log(&home))?;
+    let mut v =
+        crate::launch_agent::status_of(helper.label(), &plist(helper, &home), &helper.log(&home))?;
     let sig = codesign_verdict(helper, Path::new(helper.target()));
     v["label"] = helper.label().into();
     v["binary"] = helper.target().into();
@@ -167,7 +185,10 @@ pub fn uninstall(helper: Helper) -> Result<bool> {
     let home = home()?;
     let p = plist(helper, &home);
     let _ = Command::new("launchctl")
-        .args(["bootout", &format!("{}/{}", crate::launch_agent::domain(), helper.label())])
+        .args([
+            "bootout",
+            &format!("{}/{}", crate::launch_agent::domain(), helper.label()),
+        ])
         .output();
     match std::fs::remove_file(&p) {
         Ok(()) => Ok(true),
@@ -178,7 +199,10 @@ pub fn uninstall(helper: Helper) -> Result<bool> {
 
 /// Finds `macos/<helper>/build-install.sh` in a source checkout (the dir of this binary's workspace, or the current dir).
 fn find_script(helper: Helper, package_dir: Option<&Path>) -> Result<PathBuf> {
-    let rel = format!("crates/fluxvm-apple/macos/{}/build-install.sh", helper.dir());
+    let rel = format!(
+        "crates/fluxvm-apple/macos/{}/build-install.sh",
+        helper.dir()
+    );
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(p) = package_dir {
         roots.push(p.join("share/helpers"));
@@ -200,13 +224,21 @@ fn find_script(helper: Helper, package_dir: Option<&Path>) -> Result<PathBuf> {
     )
 }
 
-pub fn install(helper: Helper, package_dir: Option<&Path>, force: bool) -> Result<serde_json::Value> {
+pub fn install(
+    helper: Helper,
+    package_dir: Option<&Path>,
+    force: bool,
+) -> Result<serde_json::Value> {
     if let Some(p) = package_dir {
         let app = p.join("libexec/FluxVMNetworking.app");
         if helper == Helper::Vmnet && app.exists() {
             let v = codesign_verdict(helper, &app);
             if !v.ok && !force {
-                bail!("the package's {} cannot be used: {}", app.display(), v.message);
+                bail!(
+                    "the package's {} cannot be used: {}",
+                    app.display(),
+                    v.message
+                );
             }
         }
     } else if helper == Helper::Vmnet && !force {
@@ -222,7 +254,9 @@ pub fn install(helper: Helper, package_dir: Option<&Path>, force: bool) -> Resul
     if let Some(p) = package_dir {
         cmd.env("FLUXVM_PACKAGE_DIR", p);
     }
-    let st = cmd.status().with_context(|| format!("running {}", script.display()))?;
+    let st = cmd
+        .status()
+        .with_context(|| format!("running {}", script.display()))?;
     if !st.success() {
         bail!("{} failed ({st})", script.display());
     }
@@ -235,7 +269,9 @@ pub fn run(cmd: HelperAgentCommand) -> Result<serde_json::Value> {
         HelperAgentCommand::Usb { command } => (Helper::Usb, command),
     };
     Ok(match verb {
-        HelperVerb::Install { package_dir, force } => install(helper, package_dir.as_deref(), force)?,
+        HelperVerb::Install { package_dir, force } => {
+            install(helper, package_dir.as_deref(), force)?
+        }
         HelperVerb::Uninstall => serde_json::json!({"ok": true, "removed": uninstall(helper)?}),
         HelperVerb::Status => status(helper)?,
     })
@@ -245,20 +281,28 @@ pub fn run(cmd: HelperAgentCommand) -> Result<serde_json::Value> {
 mod tests {
     use super::*;
 
-    const DEVID: &str = "Authority=Developer ID Application: Zyvor (ABC123)\nTeamIdentifier=ABC123\n";
+    const DEVID: &str =
+        "Authority=Developer ID Application: Zyvor (ABC123)\nTeamIdentifier=ABC123\n";
 
     #[test]
     fn an_ad_hoc_signature_is_refused_with_the_fix() {
         let v = judge_signature(Helper::Vmnet, "Signature=adhoc\n", "");
         assert!(!v.ok);
-        assert!(v.message.contains("helper-agent vmnet install --package-dir"));
+        assert!(
+            v.message
+                .contains("helper-agent vmnet install --package-dir")
+        );
         let v = judge_signature(Helper::Usb, "flags=0x2(adhoc)", "");
         assert!(v.message.contains("helper-agent usb install"));
     }
 
     #[test]
     fn developer_id_without_the_entitlement_is_named() {
-        let v = judge_signature(Helper::Vmnet, DEVID, "<key>com.apple.security.virtualization</key>");
+        let v = judge_signature(
+            Helper::Vmnet,
+            DEVID,
+            "<key>com.apple.security.virtualization</key>",
+        );
         assert!(!v.ok);
         assert!(v.message.contains("com.apple.vm.networking"));
     }
@@ -267,7 +311,11 @@ mod tests {
     fn developer_id_with_the_entitlement_passes() {
         let v = judge_signature(Helper::Vmnet, DEVID, "<key>com.apple.vm.networking</key>");
         assert!(v.ok);
-        let v = judge_signature(Helper::Usb, DEVID, "<key>com.apple.developer.accessory-access.usb</key>");
+        let v = judge_signature(
+            Helper::Usb,
+            DEVID,
+            "<key>com.apple.developer.accessory-access.usb</key>",
+        );
         assert!(v.ok);
     }
 
