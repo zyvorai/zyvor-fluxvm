@@ -218,7 +218,7 @@ export function MacPage({ notify }: { notify: Notify }) {
                 <span className="fx-muted">Apple allows two macOS VMs at once on one Mac.</span>
                 <span style={{ position: 'relative', flex: 1, minWidth: 180, display: 'inline-flex', alignItems: 'center' }}>
                   <Search size={14} style={{ position: 'absolute', left: 8, opacity: 0.6 }} />
-                  <input className="fx-input" style={{ flex: 1, paddingLeft: 28 }} aria-label="Filter instances" placeholder="Filter by name, image, address, project or state" value={q} onChange={(e) => setQ(e.target.value)} />
+                  <input className="fx-input" style={{ flex: 1, paddingLeft: 28 }} aria-label="Filter instances" placeholder="Filter by name, image, address, state, health or team=ios" value={q} onChange={(e) => setQ(e.target.value)} />
                 </span>
               </div>
               {supervisorNote(d.instances, d.supervisor) ? <p><Pill tone="warn">not restarted</Pill> {supervisorNote(d.instances, d.supervisor)} <CopyCmd notify={notify} cmd={SUPERVISE_INSTALL_COMMAND} /></p> : null}

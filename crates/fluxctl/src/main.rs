@@ -100,6 +100,7 @@ mod kube_sync;
 mod kube_tls;
 mod kube_trim;
 mod kube_upgrade;
+mod label_filter;
 mod launch_agent;
 mod mac_backup;
 mod mac_build;
@@ -608,7 +609,14 @@ enum KubeCommand {
         service: String,
     },
     /// The services `kube add` can run, which of them are running, and the apps you started with `kube run`.
-    Apps(KubeArgs),
+    Apps {
+        #[command(flatten)]
+        cluster: KubeArgs,
+        /// Only your apps that match `KEY=VALUE`: name, namespace, state (running, starting, stopped, problem), image or label
+        /// (`label=team` or `label=team=ios`; set with `kube run --label`). Repeatable; all must match.
+        #[arg(short = 'f', long = "filter", value_name = "KEY=VALUE")]
+        filter: Vec<String>,
+    },
     /// Docker-style apps on the cluster: `run IMAGE`, `rm`, `shell`, `scale`, `rollout undo`, `expose`. Logs: `kube logs APP -f`;
     /// a local port: `kube forward APP`; the list: `kube apps`.
     #[command(flatten)]
@@ -2387,7 +2395,12 @@ enum FleetCommand {
     },
     /// List every registered node, each with its live `healthy`/`cordoned`
     /// state and free capacity. REST equivalent: `GET /fleet/nodes`.
-    Nodes,
+    Nodes {
+        /// Only nodes that match `KEY=VALUE`: name, state (healthy, unhealthy, cordoned) or label (`label=zone=lab`). Repeatable; all
+        /// must match.
+        #[arg(short = 'f', long = "filter", value_name = "KEY=VALUE")]
+        filter: Vec<String>,
+    },
     /// Exactly one node's own record -- the same shape a `Nodes` list entry
     /// has, without fetching and filtering the whole fleet just to check one
     /// node's `healthy`/`cordoned`/free-capacity state. REST equivalent:
@@ -9631,12 +9644,13 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                 std::process::exit(1);
             }
         }
-        KubeCommand::Apps(cluster) => {
+        KubeCommand::Apps { cluster, filter } => {
+            let filters = label_filter::parse_all(&filter, kube_app_cmd::FILTER_FIELDS)?;
             print!("{}", kube_apps::list(api, &cluster.options()?).await?);
             let name = cluster.name.clone();
             print!(
                 "{}",
-                tokio::task::block_in_place(|| kube_app_cmd::apps_section(Some(&name)))
+                tokio::task::block_in_place(|| kube_app_cmd::apps_section(Some(&name), &filters))
             );
         }
         KubeCommand::Use(cluster) => {

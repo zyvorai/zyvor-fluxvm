@@ -1,13 +1,15 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { LABEL_HINT, filterFlags } from '../lib/labelFilter';
 import { Copy, Minus, Plus, Play, ScrollText, SquareTerminal, Trash2 } from 'lucide-react';
 import type { Notify } from '../App';
 import { Button, Card, EmptyState, Field, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
-import { type App, type Apps, type RunForm, appCommands, appTone, appsPath, appsSummary, clampCopies, deleteAppPath, emptyRunForm, runBody, runCommand, runProblem, scalePath } from '../lib/apps';
+import { type App, type Apps, type RunForm, appCommands, appTone, appsPath, appsSummary, clampCopies, deleteAppPath, emptyRunForm, filterApps, runBody, runCommand, runProblem, scalePath } from '../lib/apps';
 import { type KubeClusterItem, kubeProblem, shortImage } from '../lib/kube';
 import { PodWindow, type PodTab } from './PodWindow';
+import { CopyCmd } from './Images';
 
 /** Images that run on a cluster like `docker run`: start one, watch it, read its logs, scale it, remove it. */
 export function AppsPage({ notify }: { notify: Notify }) {
@@ -17,11 +19,13 @@ export function AppsPage({ notify }: { notify: Notify }) {
   const current = items.find((c) => c.name === picked)?.name ?? items[0]?.name ?? '';
   const poll = usePoll(async () => (current ? await api.get<Apps>(appsPath(current)) : null), 4000, [current]);
   const [form, setForm] = useState<RunForm>(emptyRunForm);
+  const [q, setQ] = useState('');
   const [busy, setBusy] = useState('');
   const [confirm, setConfirm] = useState('');
   const [open, setOpen] = useState<{ app: App; tab: PodTab } | null>(null);
   const copy = (cmd: string) => navigator.clipboard.writeText(cmd).then(() => notify('Copied: ' + cmd), () => notify('Copy blocked by the browser', 'bad'));
   const d = poll.data;
+  const shownApps = useMemo(() => filterApps(d?.apps ?? [], q), [d, q]);
   const problem = form.image.trim() ? runProblem(form) : null;
 
   const run = async () => {
@@ -101,14 +105,16 @@ export function AppsPage({ notify }: { notify: Notify }) {
             <Card><EmptyState title="No apps yet" body="Type an image above and press Run, or use fluxctl kube run nginx. Databases and tools you use every day are under fluxctl kube add." /></Card>
           ) : (
             <Card title={appsSummary(d.apps)}>
+              <p><input className="fx-input" aria-label="Filter apps" placeholder="Filter by name, image, state or team=ios" value={q} onChange={(e) => setQ(e.target.value)} /> <span className="fx-muted">{LABEL_HINT}</span>{filterFlags(q) ? <> <CopyCmd notify={notify} cmd={`fluxctl kube apps ${filterFlags(q)}`} /></> : null}</p>
+              {shownApps.length === 0 ? <p className="fx-muted">No app matches. Clear the filter to see all {d.apps.length}.</p> : null}
               <div className="fx-table-wrap"><table className="fx-table"><thead><tr><th>Name</th><th>Image</th><th>Status</th><th>Port</th><th /></tr></thead><tbody>
-                {d.apps.map((a) => {
+                {shownApps.map((a) => {
                   const key = `${a.namespace}/${a.name}`;
                   const cmd = appCommands(current, a);
                   const first = a.pods[0];
                   return (
                     <tr key={key}>
-                      <td className="vm-name">{a.name}<div className="fx-muted">{a.namespace}</div></td>
+                      <td className="vm-name">{a.name}<div className="fx-muted">{a.namespace}</div>{a.labels && Object.keys(a.labels).length ? <div className="fx-muted fx-mono">{Object.entries(a.labels).map(([k, v]) => `${k}=${v}`).join(' ')}</div> : null}</td>
                       <td className="fx-mono fx-muted">{shortImage(a.image)}</td>
                       <td>
                         <Pill tone={appTone(a.state)}>{a.state === 'running' ? `${a.ready}/${a.desired} running` : a.state === 'starting' ? `starting ${a.ready}/${a.desired}` : a.state}</Pill>

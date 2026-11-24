@@ -3,6 +3,7 @@
 
 // Pure helpers for the Mac page: the shape of `GET /v1/mac`, how an instance is summarised, and the `fluxctl mac` command for every action.
 import { type Tone, ageOf } from './kube';
+import { labelsMatch, parseQuery } from './labelFilter';
 
 export type MacHealth = { status: 'starting' | 'healthy' | 'unhealthy'; failing_streak: number; last_check_unix: number };
 
@@ -101,8 +102,9 @@ export const ageText = (created: string | null, now: number): string => ageOf(cr
 
 /** Instances whose name, image, ip, project or status contain every word of `q`. */
 export const filterInstances = (list: MacInstance[], q: string): MacInstance[] => {
-  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const { words, labels } = parseQuery(q);
   return list.filter((i) => {
+    if (!labelsMatch(i.labels, labels)) return false;
     const hay = `${i.name} ${i.image ?? ''} ${i.ip ?? ''} ${i.project ?? ''} ${i.status} ${i.health?.status ?? ''}`.toLowerCase();
     return words.every((w) => hay.includes(w));
   });

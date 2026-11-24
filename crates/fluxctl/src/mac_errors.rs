@@ -209,6 +209,8 @@ pub const CODES: &[MacCode] = &[
             "`mac ps --filter`: name, id, status, health, image, label (`label=k` or `label=k=v`), project, service, ip, publish (a port), restart",
             "`mac images --filter`: label, reference (with `*`), source",
             "`mac events --filter`: type (mac or kube), event, name, image, project, status, cluster, label",
+            "`kube apps --filter`: name, namespace, state (running, starting, stopped, problem), image, label",
+            "`fleet nodes --filter`: name, state (healthy, unhealthy, cordoned), label",
             "repeat `--filter` to narrow further; every filter must match",
         ],
         aliases: &["filter-invalid", "bad-filter", "filter"],
