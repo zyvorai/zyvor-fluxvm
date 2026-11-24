@@ -183,6 +183,7 @@ mod mcp;
 mod mcp_install;
 mod netobs;
 mod node_agent;
+mod helper_agent;
 mod output;
 mod protect_cmd;
 mod prune_cmd;
@@ -1159,6 +1160,12 @@ enum Command {
     NodeAgent {
         #[command(subcommand)]
         command: node_agent::NodeAgentCommand,
+    },
+    /// The privileged helper LaunchAgents: `vmnet` (the vmnet broker) and `usb` (USB access). `install` checks the signature
+    /// first and says what will not work; `status` reports loaded state and whether the entitlement can be honoured.
+    HelperAgent {
+        #[command(subcommand)]
+        command: helper_agent::HelperAgentCommand,
     },
     /// Ready-made things to run: a dev database, a website, a CI runner, a private registry, monitoring. Each prints
     /// where to open it, where its credentials are, a backup schedule and how to uninstall. See docs/recipes.md.
@@ -6525,6 +6532,14 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         let code = tokio::task::block_in_place(|| gateway::run(command));
         std::process::exit(code);
     }
+    if let Command::HelperAgent { .. } = &cli.command {
+        let Command::HelperAgent { command } = cli.command else {
+            unreachable!()
+        };
+        let out = tokio::task::block_in_place(|| helper_agent::run(command))?;
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     if let Command::NodeAgent { command } = &cli.command {
         let out = match command {
             node_agent::NodeAgentCommand::Install(a) => {
@@ -7044,6 +7059,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::ImportCompose { .. }
         | Command::Service { .. }
         | Command::NodeAgent { .. }
+        | Command::HelperAgent { .. }
         | Command::Recipe { .. }
         | Command::Gateway { .. }
         | Command::MacFleet { .. }
