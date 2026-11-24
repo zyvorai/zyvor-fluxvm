@@ -147,6 +147,7 @@ fn projects(rows: &[Value]) -> Vec<Value> {
                 "total": members.len(),
                 "services": members.iter().map(|m| json!({
                     "service": m["service"], "instance": m["name"], "status": m["status"],
+                    "health": m["health"],
                 })).collect::<Vec<_>>(),
             })
         })
@@ -833,6 +834,8 @@ mod tests {
             ),
             (Some("shop"), Some(1), Some(2))
         );
+        // Each service carries its health (null when no probe ran), which `depends_on: service_healthy` gates on.
+        assert!(p[0]["services"][0].get("health").is_some());
     }
 
     #[test]

@@ -1881,6 +1881,27 @@ async fn build_images(
     Ok(())
 }
 
+/// The plain-English error for a `condition: service_healthy` dependency that did not become healthy in time (or at all).
+fn gate_error(
+    service: &str,
+    dep: &str,
+    instance: &str,
+    timeout: u64,
+    cause: &anyhow::Error,
+) -> anyhow::Error {
+    let waited = if timeout == 0 {
+        "forever".to_string()
+    } else {
+        format!("{timeout}s")
+    };
+    crate::mac_errors::coded(
+        format!(
+            "service {service:?} was not started because {dep:?} (instance {instance}, depends_on with condition: service_healthy) did not become healthy (waited {waited}): {cause:#}. Services started before it stay up: `fluxctl mac compose down` removes them"
+        ),
+        "MAC_COMPOSE_DEP_UNHEALTHY",
+    )
+}
+
 /// Create and start one instance: wait for what it depends on, start the VM, record the owner, run its command (in the
 /// foreground for a one-shot that others wait for, which is then stopped to free its slot).
 async fn start_service(
@@ -1897,7 +1918,7 @@ async fn start_service(
             eprintln!("waiting for {} to be healthy ...", d.spec.name);
             crate::mac_health::wait_instance_healthy(r, &d.spec.name, health_timeout)
                 .await
-                .with_context(|| format!("service {:?} depends_on {dep:?} being healthy (started instances stay: `fluxctl mac compose down`)", s.service))?;
+                .map_err(|e| gate_error(&s.service, dep, &d.spec.name, health_timeout, &e))?;
         }
     }
     eprintln!("starting {} ...", s.spec.name);
@@ -3378,5 +3399,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn unhealthy_dependency_gives_a_coded_plain_error() {
+        let e = gate_error(
+            "web",
+            "db",
+            "ci-db-1",
+            30,
+            &anyhow::anyhow!("ci-db-1 was not healthy after 30s: 2 probe(s) failed so far"),
+        );
+        let m = format!("{e:#}");
+        assert!(m.contains("MAC_COMPOSE_DEP_UNHEALTHY"), "{m}");
+        assert!(
+            m.contains("\"web\"") && m.contains("\"db\"") && m.contains("30s"),
+            "{m}"
+        );
+        assert!(m.contains("compose down"), "{m}");
+        let f = gate_error("a", "b", "i", 0, &anyhow::anyhow!("x"));
+        assert!(format!("{f:#}").contains("forever"));
     }
 }

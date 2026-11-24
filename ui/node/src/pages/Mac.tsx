@@ -11,7 +11,7 @@ import { navigate, Button, Card, EmptyState, Field, Hero, Pill, Skeleton, Tabs, 
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
   COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, SUPERVISE_INSTALL_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, healthAdvice, healthCommand, healthText, healthTone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, supervisorNote, editFormFor, updateAnswerText, RESTART_POLICIES,
+  actionCommand, actionDone, healthAdvice, healthCommand, healthText, healthTone, composeCommands, gateNote, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, supervisorNote, editFormFor, updateAnswerText, RESTART_POLICIES,
   type EditForm, type MacAction, type MacInstance, type MacUpdateAnswer, type MacView,
 } from '../lib/mac';
 
@@ -286,7 +286,8 @@ export function MacPage({ notify }: { notify: Notify }) {
               ) : d.projects.map((p) => (
                 <div key={p.name} style={{ marginBottom: 12 }}>
                   <p><b>{p.name}</b> <Pill tone={p.running === p.total ? 'ok' : p.running ? 'warn' : 'idle'}>{p.running} of {p.total} running</Pill> <CopyCmd notify={notify} cmd={`fluxctl mac compose ps -p ${p.name}`} /> {composeCommands(p.name).map((c) => <span key={c.label} title={c.label}><CopyCmd notify={notify} cmd={c.cmd} /></span>)}</p>
-                  <ul className="fx-feed">{p.services.map((s) => <li key={s.instance}><Pill tone={statusTone(s.status)}>{s.status}</Pill><span>{s.service ?? s.instance} <span className="fx-muted fx-mono">({s.instance})</span></span></li>)}</ul>
+                  <ul className="fx-feed">{p.services.map((s) => <li key={s.instance}><Pill tone={statusTone(s.status)}>{s.status}</Pill>{s.health ? <Pill tone={healthTone(s.health)}>{s.health.status}</Pill> : null}<span>{s.service ?? s.instance} <span className="fx-muted fx-mono">({s.instance})</span></span></li>)}</ul>
+                  {gateNote(p) ? <p className="fx-muted">{gateNote(p)}</p> : null}
                 </div>
               ))}
               <p className="fx-muted">Studio only lists projects. Run <code className="fx-mono">fluxctl mac compose up</code> or <code className="fx-mono">down</code> in the project's folder.</p>
