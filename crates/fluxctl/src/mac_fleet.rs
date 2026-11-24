@@ -62,6 +62,9 @@ pub enum MacFleetCommand {
     Logs(crate::mac_fleet_view::LogsArgs),
     /// The recorded `mac.*` / `kube.apple.*` events of every Mac, merged by time.
     Events(crate::mac_fleet_view::EventsArgs),
+    /// Labels on the Macs: list them (`label -f hosts.yaml`, `--filter label=zone=lab`), or set and remove them
+    /// (`label mini-1 zone=lab --rm gpu`). They are saved in the inventory and place jobs (`run --host-label`).
+    Label(crate::mac_fleet_label::LabelArgs),
     /// Make or extend an inventory file: `inventory import --ssh-config`, `--hosts-file`, `--bonjour`.
     Inventory {
         #[command(subcommand)]
@@ -192,6 +195,9 @@ pub struct StatusArgs {
     /// headless checks (`mac host headless-check`). With --json the same keys are added. Read-only.
     #[arg(long)]
     pub detail: bool,
+    /// Only the Macs that match: `label=KEY`, `label=KEY=VALUE`, `name=PART`, `host=PART`. Repeatable; all must match.
+    #[arg(long = "filter", value_name = "KEY=VALUE")]
+    pub filter: Vec<String>,
     #[command(flatten)]
     pub conn: Conn,
 }
@@ -1094,6 +1100,7 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
         }
         MacFleetCommand::Status(a) => {
             let (targets, inv) = resolve(&a.which, &a.conn)?;
+            let targets = crate::mac_fleet_label::filter_targets(targets, &a.filter)?;
             if a.detail {
                 return crate::mac_fleet_status::status_detail_cmd(&a.conn, inv.as_ref(), &targets);
             }
@@ -1196,6 +1203,7 @@ pub fn run(cmd: MacFleetCommand) -> Result<()> {
         MacFleetCommand::Resume(a) => crate::mac_fleet_run::drain_cmd(a, false),
         MacFleetCommand::Templates { command } => crate::mac_fleet_run::templates_cmd(command),
         MacFleetCommand::Logs(a) => crate::mac_fleet_view::logs_cmd(a),
+        MacFleetCommand::Label(a) => crate::mac_fleet_label::label_cmd(a),
         MacFleetCommand::Events(a) => crate::mac_fleet_view::events_cmd(a),
         MacFleetCommand::Inventory { command } => match command {
             crate::mac_fleet_import::InventoryCommand::Import(a) => {

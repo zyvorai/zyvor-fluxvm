@@ -126,6 +126,7 @@ mod mac_fleet_agg;
 mod mac_fleet_boot;
 mod mac_fleet_import;
 mod mac_fleet_inv;
+mod mac_fleet_label;
 mod mac_fleet_lease;
 mod mac_fleet_login;
 mod mac_fleet_ops;

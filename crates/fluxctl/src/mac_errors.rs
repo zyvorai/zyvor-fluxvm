@@ -992,6 +992,47 @@ pub const CODES: &[MacCode] = &[
         signatures: &["fleet_disk_low"],
     },
     MacCode {
+        code: "FLEET_LABEL_INVALID",
+        status: None,
+        summary: "A Mac label was not `KEY=VALUE`, or has characters a label cannot have.",
+        causes: &[
+            "no `=` (`zone` instead of `zone=lab`), an empty key, or a space or shell character in it",
+        ],
+        fixes: &[
+            "write it as KEY=VALUE with letters, digits and . _ - / : only: `fluxctl mac-fleet label mini-1 zone=lab -f hosts.yaml`",
+            "to remove a label give only its key: `fluxctl mac-fleet label mini-1 --rm zone -f hosts.yaml`",
+        ],
+        aliases: &["fleet-label-invalid", "bad-fleet-label"],
+        signatures: &["fleet_label_invalid"],
+    },
+    MacCode {
+        code: "FLEET_HOST_UNKNOWN",
+        status: None,
+        summary: "The inventory has no Mac with that name.",
+        causes: &[
+            "a typo, or the Mac is listed under another `name` (the default name is the first part of the host)",
+            "the Mac was never added to this inventory file",
+        ],
+        fixes: &[
+            "list the names the inventory has: `fluxctl mac-fleet label -f hosts.yaml`",
+            "add the Mac: `fluxctl mac-fleet add user@host`, or `fluxctl mac-fleet inventory import --ssh-config`",
+        ],
+        aliases: &["fleet-host-unknown", "unknown-mac"],
+        signatures: &["fleet_host_unknown"],
+    },
+    MacCode {
+        code: "FLEET_INVENTORY_MISSING",
+        status: None,
+        summary: "The inventory file (`hosts.yaml` unless you pass `-f`) was not found.",
+        causes: &["you are in another folder, or the file has another name"],
+        fixes: &[
+            "point at it: `-f path/to/hosts.yaml` (`.yaml`, `.yml` and `.json` are all tried)",
+            "make one from what you have: `fluxctl mac-fleet inventory import --ssh-config` or `--hosts-file FILE`",
+        ],
+        aliases: &["fleet-inventory-missing", "no-inventory"],
+        signatures: &["fleet_inventory_missing"],
+    },
+    MacCode {
         code: "MAC_VOLUME_NAME",
         status: None,
         summary: "That is not a valid volume name.",

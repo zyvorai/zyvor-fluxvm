@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type FleetHost, ageText, diskText, primaryAction, slotsText, stateTone, thermalText, viewTone } from './fleet';
+import { type FleetHost, ageText, diskText, filterHosts, labelCommand, labelsText, primaryAction, slotsText, stateTone, thermalText, viewTone } from './fleet';
 
 const cmds = { cordon: 'fluxctl mac-fleet cordon m1', uncordon: 'fluxctl mac-fleet uncordon m1', drain: 'fluxctl mac-fleet drain m1 --wait', doctor: 'fluxctl mac-fleet doctor m1' };
 const h = (o: Partial<FleetHost>): FleetHost => ({ name: 'm1', host: 'a@m1', state: 'ready', cordoned: false, macos_guests: 1, macos_limit: 2, thermal: 'nominal', thermal_limit_pct: null, disk_free_gib: 120, disk_low: false, on_ac: true, error: null, next: null, commands: cmds, ...o });
@@ -36,5 +36,25 @@ describe('freshness', () => {
     expect(viewTone({ status: 'stale', summary: s })).toBe('warn');
     expect(viewTone({ status: 'live', summary: s })).toBe('ok');
     expect(viewTone({ status: 'live', summary: { ...s, unreachable: 1 } })).toBe('bad');
+  });
+});
+
+describe('host labels', () => {
+  const a = h({ name: 'mini-1', host: 'a@mini-1.local', labels: { zone: 'lab', gpu: '' } });
+  const b = h({ name: 'mini-2', host: 'a@mini-2.local', labels: { zone: 'prod' } });
+  const c = h({ name: 'old', host: 'a@old.local' });
+  it('filters like fluxctl mac-fleet top --filter', () => {
+    expect(filterHosts([a, b, c], '')).toHaveLength(3);
+    expect(filterHosts([a, b, c], 'zone=lab')).toEqual([a]);
+    expect(filterHosts([a, b, c], 'label:zone')).toEqual([a, b]);
+    expect(filterHosts([a, b, c], 'label:gpu')).toEqual([a]);
+    expect(filterHosts([a, b, c], 'mini zone=prod')).toEqual([b]);
+    expect(filterHosts([a, b, c], 'old')).toEqual([c]);
+    expect(filterHosts([a, b, c], 'zone=none')).toEqual([]);
+  });
+  it('shows labels on one line and offers the command to set one', () => {
+    expect(labelsText(a)).toBe('zone=lab gpu');
+    expect(labelsText(c)).toBe('');
+    expect(labelCommand(a)).toBe('fluxctl mac-fleet label mini-1 KEY=VALUE -f hosts.yaml');
   });
 });

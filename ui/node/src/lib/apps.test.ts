@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type App, appCommands, appTone, appsPath, appsSummary, clampCopies, deleteAppPath, emptyRunForm, runBody, runCommand, runProblem, scalePath } from './apps';
+import { type App, parseAppLabels, appCommands, appTone, appsPath, appsSummary, clampCopies, deleteAppPath, emptyRunForm, runBody, runCommand, runProblem, scalePath } from './apps';
 
 const app = (over: Partial<App> = {}): App => ({ namespace: 'default', name: 'web', image: 'nginx', desired: 1, ready: 1, port: 80, state: 'running', summary: '1 of 1 running', code: null, next: null, pods: [], created: null, ...over });
 
@@ -42,8 +42,21 @@ describe('apps', () => {
     expect(runProblem({ ...emptyRunForm, image: 'nginx', port: '70000' })).toMatch(/port/);
     expect(runProblem({ ...emptyRunForm, image: 'nginx', replicas: '101' })).toMatch(/Copies/);
     expect(runBody({ ...emptyRunForm, image: ' nginx ' })).toEqual({ image: 'nginx' });
-    expect(runBody({ image: 'nginx', name: 'web', port: '8080', replicas: '2', namespace: 'shop' })).toEqual({ image: 'nginx', name: 'web', port: 8080, replicas: 2, namespace: 'shop' });
+    expect(runBody({ image: 'nginx', name: 'web', port: '8080', replicas: '2', namespace: 'shop', labels: '' })).toEqual({ image: 'nginx', name: 'web', port: 8080, replicas: 2, namespace: 'shop' });
     expect(runCommand('dev', { ...emptyRunForm, image: 'nginx', port: '8080' })).toBe('fluxctl kube run nginx --port 8080 --cluster dev');
+  });
+
+  it('takes labels in the run form like kube run --label', () => {
+    expect(parseAppLabels('team=ios, tier=web  env=')).toEqual({ labels: { team: 'ios', tier: 'web', env: '' }, bad: null });
+    expect(parseAppLabels('team').bad).toBe('team');
+    expect(parseAppLabels('a b=c').bad).toBe('a');
+    expect(parseAppLabels('=x').bad).toBe('=x');
+    expect(parseAppLabels('team=-bad').bad).toBe('team=-bad');
+    expect(runProblem({ ...emptyRunForm, image: 'nginx', labels: 'oops' })).toMatch(/"oops" is not a label.*team=ios/);
+    expect(runProblem({ ...emptyRunForm, image: 'nginx', labels: 'team=ios' })).toBeNull();
+    expect(runBody({ ...emptyRunForm, image: 'nginx', labels: 'team=ios,app.kubernetes.io/part-of=shop' })).toEqual({ image: 'nginx', labels: { team: 'ios', 'app.kubernetes.io/part-of': 'shop' } });
+    expect(runBody({ ...emptyRunForm, image: 'nginx' })).not.toHaveProperty('labels');
+    expect(runCommand('dev', { ...emptyRunForm, image: 'nginx', labels: 'team=ios tier=web' })).toBe('fluxctl kube run nginx --label team=ios --label tier=web --cluster dev');
   });
 
   it('summarises the list', () => {

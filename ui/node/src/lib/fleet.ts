@@ -3,6 +3,7 @@
 
 // Pure helpers for the Mac fleet page: how GET /v1/mac-fleet is read, toned and turned into fluxctl commands to copy.
 import type { Tone } from './kube';
+import { labelsMatch, parseQuery } from './labelFilter';
 
 export type FleetState = 'ready' | 'full' | 'cordoned' | 'draining' | 'unreachable' | 'unknown';
 
@@ -20,6 +21,8 @@ export type FleetHost = {
   disk_free_gib: number | null;
   disk_low: boolean;
   on_ac: boolean | null;
+  /** From the inventory (`fluxctl mac-fleet label`); missing in a snapshot an older fluxctl wrote. */
+  labels?: Record<string, string>;
   error: string | null;
   /** What to do about this Mac, when something is wrong. */
   next: string | null;
@@ -82,3 +85,16 @@ export const ageText = (secs: number | null): string => {
 /** Pill tone for the whole answer: stale or missing data is a warning, not an error. */
 export const viewTone = (v: Pick<FleetView, 'status' | 'summary'>): Tone =>
   v.status !== 'live' ? 'warn' : v.summary.unreachable > 0 ? 'bad' : 'ok';
+
+/** Macs whose name or address contain every word and that carry every `key=value` label term, like `fluxctl mac-fleet top --filter label=zone=lab`. */
+export const filterHosts = <T extends Pick<FleetHost, 'name' | 'host' | 'labels'>>(hosts: T[], q: string): T[] => {
+  const { words, labels } = parseQuery(q);
+  return hosts.filter((h) => labelsMatch(h.labels, labels) && words.every((w) => `${h.name} ${h.host}`.toLowerCase().includes(w)));
+};
+
+/** `zone=lab gpu`: a Mac's labels on one line (a label with no value is just its name). */
+export const labelsText = (h: Pick<FleetHost, 'labels'>): string =>
+  Object.entries(h.labels ?? {}).map(([k, v]) => (v ? `${k}=${v}` : k)).join(' ');
+
+/** The command to set a label on a Mac, to copy: the inventory file is edited, nothing is sent to the Mac. */
+export const labelCommand = (h: Pick<FleetHost, 'name'>): string => `fluxctl mac-fleet label ${h.name} KEY=VALUE -f hosts.yaml`;

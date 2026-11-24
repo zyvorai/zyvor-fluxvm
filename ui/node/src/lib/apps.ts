@@ -58,11 +58,24 @@ export const appCommands = (cluster: string, a: Pick<App, 'namespace' | 'name'>)
   };
 };
 
-export type RunForm = { image: string; name: string; port: string; replicas: string; namespace: string };
+export type RunForm = { image: string; name: string; port: string; replicas: string; namespace: string; labels: string };
 
-export const emptyRunForm: RunForm = { image: '', name: '', port: '', replicas: '1', namespace: 'default' };
+export const emptyRunForm: RunForm = { image: '', name: '', port: '', replicas: '1', namespace: 'default', labels: '' };
 
 const NAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+const LABEL_KEY = /^([a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?\/)?[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$/;
+const LABEL_VALUE = /^([A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?)?$/;
+
+/** `team=ios, tier=web` (commas, spaces or lines) into labels; `bad` is the first piece that is not a Kubernetes `key=value`, like `fluxctl kube run --label`. */
+export const parseAppLabels = (text: string): { labels: Record<string, string>; bad: string | null } => {
+  const labels: Record<string, string> = {};
+  for (const piece of text.split(/[\s,]+/).filter(Boolean)) {
+    const eq = piece.indexOf('=');
+    if (eq < 1 || !LABEL_KEY.test(piece.slice(0, eq)) || !LABEL_VALUE.test(piece.slice(eq + 1))) return { labels, bad: piece };
+    labels[piece.slice(0, eq)] = piece.slice(eq + 1);
+  }
+  return { labels, bad: null };
+};
 
 /** The sentence to show for a form that cannot be sent, or null when it can. The daemon checks again. */
 export const runProblem = (f: RunForm): string | null => {
@@ -74,6 +87,8 @@ export const runProblem = (f: RunForm): string | null => {
   if (f.port.trim() && !(Number.isInteger(Number(f.port)) && Number(f.port) >= 1 && Number(f.port) <= 65535)) return 'The port is a number from 1 to 65535.';
   const n = Number(f.replicas || '1');
   if (!Number.isInteger(n) || n < 0 || n > MAX_COPIES) return `Copies is a number from 0 to ${MAX_COPIES}.`;
+  const { bad } = parseAppLabels(f.labels);
+  if (bad != null) return `"${bad}" is not a label. Write labels as KEY=VALUE, like team=ios, separated by commas or spaces (letters, digits, dash, dot, underscore).`;
   return null;
 };
 
@@ -84,6 +99,8 @@ export const runBody = (f: RunForm): Record<string, unknown> => {
   if (f.port.trim()) body.port = Number(f.port);
   if (f.replicas.trim() && Number(f.replicas) !== 1) body.replicas = Number(f.replicas);
   if (f.namespace.trim() && f.namespace.trim() !== 'default') body.namespace = f.namespace.trim();
+  const { labels } = parseAppLabels(f.labels);
+  if (Object.keys(labels).length) body.labels = labels;
   return body;
 };
 
@@ -94,6 +111,7 @@ export const runCommand = (cluster: string, f: RunForm): string => {
   if (f.port.trim()) s += ` --port ${f.port.trim()}`;
   if (f.replicas.trim() && Number(f.replicas) !== 1) s += ` --replicas ${f.replicas.trim()}`;
   if (f.namespace.trim() && f.namespace.trim() !== 'default') s += ` -n ${f.namespace.trim()}`;
+  for (const [k, v] of Object.entries(parseAppLabels(f.labels).labels)) s += ` --label ${k}=${v}`;
   return `${s} --cluster ${cluster}`;
 };
 
