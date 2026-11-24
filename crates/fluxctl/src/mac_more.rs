@@ -27,12 +27,13 @@ pub struct PsOpts {
     /// Include stopped and failed instances (by default only running, paused and starting ones are shown).
     #[arg(short = 'a', long)]
     pub all: bool,
-    /// Keep instances that match `KEY=VALUE`: name, id, status, image, label, project, service, ip or publish (a port). Repeatable;
+    /// Keep instances that match `KEY=VALUE`: name, id, status, health (starting, healthy, unhealthy, none), image, label (`label=k` or
+    /// `label=k=v`), project, service, ip, publish (a port) or restart (the policy). Repeatable;
     /// all must match.
     #[arg(short = 'f', long = "filter", value_name = "KEY=VALUE")]
     pub filter: Vec<String>,
     /// Print each instance with a template such as `{{.Name}} {{.Status}}`, or `table {{.Name}}\t{{.IP}}`.
-    /// Fields: ID, Name, Image, Status, IP, Ports, Created, Restart, Project, Service, Labels.
+    /// Fields: ID, Name, Image, Status, Health, IP, Ports, Created, Restart, Project, Service, Labels.
     #[arg(long, value_name = "TEMPLATE")]
     pub format: Option<String>,
     /// Print only the short ids.

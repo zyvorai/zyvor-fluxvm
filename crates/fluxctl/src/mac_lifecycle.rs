@@ -700,6 +700,10 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacLife) -> Result<()> {
                 json,
             };
             let out = update_with(r, &a).await?;
+            // A policy is only a label until the supervisor runs: make sure it does (never installs under `cargo test`).
+            if let Some(p) = a.restart.as_deref() {
+                crate::mac_supervise::ensure_for_policy(r, p);
+            }
             if let Some(t) = &out.progress {
                 eprintln!("{t}");
             }

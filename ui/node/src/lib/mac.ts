@@ -4,6 +4,8 @@
 // Pure helpers for the Mac page: the shape of `GET /v1/mac`, how an instance is summarised, and the `fluxctl mac` command for every action.
 import { type Tone, ageOf } from './kube';
 
+export type MacHealth = { status: 'starting' | 'healthy' | 'unhealthy'; failing_streak: number; last_check_unix: number };
+
 export type MacPort = { host: number; guest: number };
 
 export type MacInstance = {
@@ -19,6 +21,8 @@ export type MacInstance = {
   created: string | null;
   ports: MacPort[];
   restart_policy: string;
+  /** The last healthcheck result; null until `mac supervise` or `mac health` ran a probe (or no healthcheck exists). Absent on an older daemon. */
+  health?: MacHealth | null;
   project: string | null;
   service: string | null;
   error: string | null;
@@ -29,8 +33,13 @@ export type MacProject = { name: string; running: number; total: number; service
 
 export type MacImage = { reference: string; digest: string; source: string; added_unix: number; size_bytes: number | null; present: boolean };
 
+/** Whether the background restarter (`fluxctl mac supervise`) is installed; without it a restart policy is only a label. */
+export type MacSupervisor = { installed: boolean; label: string; install_command: string; status_command: string };
+
 export type MacView = {
   schema: number;
+  /** Absent on an older daemon. */
+  supervisor?: MacSupervisor;
   /** False on a host that is not a Mac: the page explains instead of listing. */
   supported: boolean;
   macos_limit: number;
@@ -52,7 +61,23 @@ export const statusTone = (status: string): Tone => {
   }
 };
 
-export const summarize = (list: MacInstance[]): { running: number; stopped: number; failed: number } => ({
+export const healthTone = (h: MacHealth | null | undefined): Tone => (h?.status === 'healthy' ? 'ok' : h?.status === 'unhealthy' ? 'bad' : h?.status === 'starting' ? 'warn' : 'idle');
+
+/** `healthy`, `starting (1 probe failed)`, `unhealthy (3 probes failed in a row)`; empty when no probe ran. */
+export const healthText = (h: MacHealth | null | undefined): string => {
+  if (!h) return '';
+  const n = h.failing_streak;
+  return n > 0 ? `${h.status} (${n} probe${n === 1 ? '' : 's'} failed${h.status === 'unhealthy' ? ' in a row' : ' so far'})` : h.status;
+};
+
+export const healthCommand = (name: string): string => `fluxctl mac health ${name}`;
+
+/** What to do about an unhealthy instance, in plain words; empty otherwise. */
+export const healthAdvice = (i: Pick<MacInstance, 'name' | 'health'>): string =>
+  i.health?.status === 'unhealthy' ? `${i.name} is unhealthy: its health command failed several times in a row. Read its log, run the command by hand with ${execCommand(i.name)}, then probe again with ${healthCommand(i.name)}. It turns healthy by itself once the command passes.` : '';
+
+export const summarize = (list: MacInstance[]): { running: number; stopped: number; failed: number; unhealthy: number } => ({
+  unhealthy: list.filter((i) => i.health?.status === 'unhealthy').length,
   running: list.filter((i) => i.status === 'running').length,
   stopped: list.filter((i) => i.status === 'stopped' || i.status === 'paused').length,
   failed: list.filter((i) => i.status === 'failed').length,
@@ -78,7 +103,7 @@ export const ageText = (created: string | null, now: number): string => ageOf(cr
 export const filterInstances = (list: MacInstance[], q: string): MacInstance[] => {
   const words = q.toLowerCase().split(/\s+/).filter(Boolean);
   return list.filter((i) => {
-    const hay = `${i.name} ${i.image ?? ''} ${i.ip ?? ''} ${i.project ?? ''} ${i.status}`.toLowerCase();
+    const hay = `${i.name} ${i.image ?? ''} ${i.ip ?? ''} ${i.project ?? ''} ${i.status} ${i.health?.status ?? ''}`.toLowerCase();
     return words.every((w) => hay.includes(w));
   });
 };
@@ -135,6 +160,19 @@ export const composeCommands = (project: string): { label: string; cmd: string }
   { label: 'Scale', cmd: `fluxctl mac compose -p ${project} up --scale SERVICE=2 --dry-run` },
   { label: 'Fleet plan', cmd: `fluxctl mac compose up -p ${project} --dry-run --fleet hosts.yaml` },
 ];
+export const SUPERVISE_INSTALL_COMMAND = 'fluxctl mac supervise --install';
+export const SUPERVISE_STATUS_COMMAND = 'fluxctl mac supervise --status';
+
+/** The instances whose restart policy nothing applies yet: they have a policy, and the restarter is not installed. */
+export const unrestarted = (list: MacInstance[], sup: MacSupervisor | undefined): MacInstance[] => (sup && !sup.installed ? list.filter((i) => i.restart_policy !== 'no') : []);
+
+/** One sentence for the banner above the instance list; empty when there is nothing to say. */
+export const supervisorNote = (list: MacInstance[], sup: MacSupervisor | undefined): string => {
+  const n = unrestarted(list, sup).length;
+  if (!n) return '';
+  return `${n} instance${n === 1 ? ' has' : 's have'} a restart policy, but nothing restarts ${n === 1 ? 'it' : 'them'}: the macOS daemon never restarts a VM by itself. Install the restarter once with ${SUPERVISE_INSTALL_COMMAND} (a LaunchAgent of your user, no sudo).`;
+};
+
 export const DOCTOR_COMMAND = 'fluxctl mac doctor';
 
 /** What to say when the Mac page is opened on a host that is not a Mac. */

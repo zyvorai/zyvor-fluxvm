@@ -344,15 +344,16 @@ pub fn render_ps(instances: &[&Value]) -> String {
         .filter(|v| v["status"].as_str() == Some("running"))
         .count();
     let mut out = format!(
-        "{:<20}  {:<24}  {:<9}  {:<15}  {:<14}  CREATED\n",
-        "NAME", "IMAGE", "STATUS", "IP", "PORTS"
+        "{:<20}  {:<24}  {:<9}  {:<9}  {:<15}  {:<14}  CREATED\n",
+        "NAME", "IMAGE", "STATUS", "HEALTH", "IP", "PORTS"
     );
     for v in instances {
         out.push_str(&format!(
-            "{:<20}  {:<24}  {:<9}  {:<15}  {:<14}  {}\n",
+            "{:<20}  {:<24}  {:<9}  {:<9}  {:<15}  {:<14}  {}\n",
             v["name"].as_str().unwrap_or("-"),
             v["labels"][IMAGE_LABEL].as_str().unwrap_or("-"),
             v["status"].as_str().unwrap_or("-"),
+            crate::mac_health::health_text(v),
             v["guest_ip"].as_str().unwrap_or("-"),
             forwards_text(v),
             v["created_at"].as_str().unwrap_or("-"),
@@ -1597,5 +1598,17 @@ mod tests {
             panic!("not run")
         };
         assert!(!queue.queue && !json);
+    }
+
+    #[test]
+    fn the_ps_table_has_a_health_column() {
+        let mut vm = serde_json::json!({"name": "a", "status": "running", "labels": {"fluxvm.mac.health": "unhealthy"}});
+        let t = render_ps(&[&vm]);
+        assert!(
+            t.lines().next().unwrap().contains("HEALTH") && t.contains("unhealthy"),
+            "{t}"
+        );
+        vm["labels"] = serde_json::json!({});
+        assert!(render_ps(&[&vm]).contains("running    -"));
     }
 }

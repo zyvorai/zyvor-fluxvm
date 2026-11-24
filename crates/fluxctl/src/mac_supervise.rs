@@ -275,6 +275,86 @@ pub fn agent_command(a: &SuperviseArgs) -> Result<Option<Value>> {
     Ok(None)
 }
 
+/// Whether the user-level LaunchAgent that runs `mac supervise` is installed.
+pub fn agent_installed() -> bool {
+    crate::docker_host::home()
+        .map(|h| agent_paths(&h).0.exists())
+        .unwrap_or(false)
+}
+
+/// What a restart policy needs from the supervisor, decided without touching the system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// Policy `no`, or the supervisor is already there.
+    Nothing,
+    /// Install the LaunchAgent now.
+    Install,
+    /// It cannot or must not be installed here: tell the user how.
+    Tell,
+}
+
+pub fn need(policy: &str, installed: bool, is_mac: bool, opted_out: bool) -> Need {
+    let wants = !matches!(policy.trim(), "" | "no");
+    match (wants, installed) {
+        (false, _) | (_, true) => Need::Nothing,
+        _ if is_mac && !opted_out => Need::Install,
+        _ => Need::Tell,
+    }
+}
+
+/// The plain-English warning for an option (`--restart always`, `--health-cmd`) that nothing applies.
+pub fn missing_warning(what: &str, why: &str) -> String {
+    format!(
+        "warning: {what} is recorded, but nothing applies it: the background supervisor is not installed ({why}).\n  fix: fluxctl mac supervise --install\n  more: fluxctl explain MAC_SUPERVISOR_MISSING"
+    )
+}
+
+/// After `mac run|create|update --restart POLICY`: make sure something applies the policy. On a Mac this installs the
+/// `mac supervise` LaunchAgent once (opt out with `FLUXCTL_NO_AUTO_SUPERVISE=1`); never fails the command that called it.
+pub fn ensure_for_policy(r: &crate::remote::Remote, policy: &str) {
+    ensure(r, policy, &format!("--restart {policy}"));
+}
+
+/// Same for `--health-cmd` (and an image HEALTHCHECK): only the supervisor runs the probes.
+pub fn ensure_for_health(r: &crate::remote::Remote) {
+    ensure(r, "health", "--health-cmd");
+}
+
+fn ensure(r: &crate::remote::Remote, policy: &str, what: &str) {
+    if cfg!(test) {
+        return; // a test must never install a LaunchAgent on the machine it runs on
+    }
+    let opted_out = std::env::var_os("FLUXCTL_NO_AUTO_SUPERVISE").is_some_and(|v| !v.is_empty());
+    match need(
+        policy,
+        agent_installed(),
+        cfg!(target_os = "macos"),
+        opted_out,
+    ) {
+        Need::Nothing => {}
+        Need::Tell => eprintln!("{}", missing_warning(what, "automatic install is off here")),
+        Need::Install => {
+            let args = SuperviseArgs {
+                interval: 15,
+                once: false,
+                dry_run: false,
+                no_reap: false,
+                install: true,
+                uninstall: false,
+                status: false,
+                daemon: Some(r.base().to_string()),
+                daemon_context: None,
+            };
+            match agent_command(&args) {
+                Ok(_) => eprintln!(
+                    "note: installed the background supervisor (LaunchAgent {AGENT_LABEL}) so {what} is applied; remove it with `fluxctl mac supervise --uninstall`"
+                ),
+                Err(e) => eprintln!("{}", missing_warning(what, &format!("{e:#}"))),
+            }
+        }
+    }
+}
+
 /// `mac supervise` with the daemon.
 pub async fn run(r: &crate::remote::Remote, a: SuperviseArgs) -> Result<()> {
     let mut host = DaemonHost { r };
@@ -464,5 +544,17 @@ mod tests {
             ]
         );
         assert!(!v.iter().any(|s| s.contains("token")));
+    }
+
+    #[test]
+    fn a_restart_policy_needs_the_restarter_installed_once() {
+        assert_eq!(need("no", false, true, false), Need::Nothing);
+        assert_eq!(need("", false, true, false), Need::Nothing);
+        assert_eq!(need("always", true, true, false), Need::Nothing);
+        assert_eq!(need("always", false, true, false), Need::Install);
+        assert_eq!(need("on-failure", false, true, true), Need::Tell);
+        assert_eq!(need("always", false, false, false), Need::Tell);
+        let w = missing_warning("--restart always", "why");
+        assert!(w.contains("mac supervise --install") && w.contains("MAC_SUPERVISOR_MISSING"));
     }
 }

@@ -351,6 +351,16 @@ pub async fn create_instance(
         crate::mac_cmd::delete_instance(r, &id).await.ok();
         return Err(e);
     }
+    // The daemon never restarts a macOS VM: a policy needs the supervisor, so make sure it is there.
+    if let Some(p) = spec.restart.filter(|p| *p != Restart::No) {
+        crate::mac_supervise::ensure_for_policy(r, p.as_str());
+    }
+    if matches!(
+        spec.healthcheck,
+        Some(crate::mac_lifecycle::HcSetting::Cmd(_))
+    ) {
+        crate::mac_supervise::ensure_for_health(r);
+    }
     Ok(id)
 }
 
