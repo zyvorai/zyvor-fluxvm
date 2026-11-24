@@ -125,6 +125,27 @@ pub fn update_document(name: &str, id: &str, patch: &Value) -> Value {
     })
 }
 
+/// `mac update --json`: [`update_document`] plus what the daemon did with a size change. Keys are only added: `cpus` and
+/// `memory_mib` are the sizes asked for (null when not), `applied` and `pending_restart` say what took effect and what
+/// still needs a restart, `restarted` and `checkpoint` (the `auto-before-update-<time>` tag, or null) describe `--restart-now`.
+pub fn update_document_ext(
+    name: &str,
+    id: &str,
+    patch: &Value,
+    answer: &Value,
+    cpus: Value,
+    memory_mib: Value,
+) -> Value {
+    let mut d = update_document(name, id, patch);
+    d["cpus"] = cpus;
+    d["memory_mib"] = memory_mib;
+    d["applied"] = answer["applied"].clone();
+    d["pending_restart"] = answer["pending_restart"].clone();
+    d["restarted"] = json!(answer["restarted"].as_bool().unwrap_or(false));
+    d["checkpoint"] = answer["checkpoint"].clone();
+    d
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,18 +288,18 @@ mod tests {
             ),
         );
         let patch =
-            crate::mac_lifecycle::update_patch(Some("always"), &["team=ios".into()]).unwrap();
+            crate::mac_lifecycle::update_patch(Some("always"), &["team=ios".into()], &[]).unwrap();
         golden(
             "update.json",
             &update_document("ci-1", "0b1c2d3e-0000-4000-8000-000000000001", &patch),
         );
-        let cleared = crate::mac_lifecycle::update_patch(Some("no"), &[]).unwrap();
+        let cleared = crate::mac_lifecycle::update_patch(Some("no"), &[], &[]).unwrap();
         let d = update_document("ci-1", "x", &cleared);
         assert_eq!(
             (&d["restart_policy"], &d["labels"]),
             (&json!("no"), &json!({}))
         );
-        let only_labels = crate::mac_lifecycle::update_patch(None, &["a=b".into()]).unwrap();
+        let only_labels = crate::mac_lifecycle::update_patch(None, &["a=b".into()], &[]).unwrap();
         assert_eq!(
             update_document("n", "i", &only_labels)["restart_policy"],
             Value::Null

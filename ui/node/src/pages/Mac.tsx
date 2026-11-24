@@ -6,12 +6,12 @@ import { Copy, Play, RotateCw, ScrollText, Search, Skull, Square, Trash2 } from 
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
 import { MacSchedules } from './MacSchedules';
-import { navigate, Button, Card, EmptyState, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
+import { navigate, Button, Card, EmptyState, Field, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
   COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, portsText, shareCommand, sizeText, statusTone, summarize,
-  type MacAction, type MacInstance, type MacView,
+  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, editFormFor, updateAnswerText, RESTART_POLICIES,
+  type EditForm, type MacAction, type MacInstance, type MacUpdateAnswer, type MacView,
 } from '../lib/mac';
 
 const ICON: Record<MacAction, typeof Play> = { start: Play, stop: Square, restart: RotateCw, kill: Skull, rm: Trash2 };
@@ -59,9 +59,56 @@ function HostHealth({ notify }: { notify: Notify }) {
   );
 }
 
+/** Edit one instance like `docker update`: the same fields as `fluxctl mac update`, and the command for exactly what you changed. */
+function EditPanel({ inst, notify }: { inst: MacInstance; notify: Notify }) {
+  const [form, setForm] = useState<EditForm>(() => editFormFor(inst));
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ text: string; tone: 'ok' | 'warn' | 'bad' } | null>(null);
+  const plan = useMemo(() => planEdit(inst, form), [inst, form]);
+  const set = (p: Partial<EditForm>) => setForm((f) => ({ ...f, ...p }));
+  const live = inst.status === 'running' || inst.status === 'paused';
+  const save = async () => {
+    setBusy(true);
+    setResult(null);
+    try {
+      const a = await api.patch<MacUpdateAnswer>(`/v1/mac/instances/${encodeURIComponent(inst.id)}`, plan.body);
+      setResult({ text: updateAnswerText(inst.name, a), tone: a.pending_restart.length ? 'warn' : 'ok' });
+      notify(a.pending_restart.length ? `${inst.name}: saved, the new size waits for a restart` : `${inst.name} updated`);
+      if (!a.pending_restart.length) setForm((f) => ({ ...f, restartNow: false }));
+    } catch (e) {
+      setResult({ text: explainError(inst.name, (e as Error).message), tone: 'bad' });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div>
+      <p className="fx-muted">Change what you need; only the changes are sent. CPUs and memory are read when a macOS VM boots, so {live ? `${inst.name} is running and needs a restart for them` : `${inst.name} is stopped, so they apply now and are used at the next start`}.</p>
+      <Field label="CPUs">{(i) => <input id={i} className="fx-input" inputMode="numeric" value={form.cpus} onChange={(e) => set({ cpus: e.target.value.replace(/\D/g, '') })} />}</Field>
+      <Field label="Memory" hint="8g, 512m or MiB.">{(i) => <input id={i} className="fx-input" value={form.memory} onChange={(e) => set({ memory: e.target.value })} />}</Field>
+      <Field label="Restart policy" hint="Applied by fluxctl mac supervise.">{(i) => <select id={i} className="fx-input" value={form.restart} onChange={(e) => set({ restart: e.target.value })}>{RESTART_POLICIES.map((p) => <option key={p} value={p}>{p}</option>)}</select>}</Field>
+      <Field label="Labels" hint="One KEY=VALUE per line. Delete a line to remove that label.">{(i) => <textarea id={i} className="fx-input fx-mono" rows={4} value={form.labels} onChange={(e) => set({ labels: e.target.value })} />}</Field>
+      <p className="fx-muted">Environment variables are not stored on a macOS VM. Pass them per command: <code className="fx-mono">fluxctl mac exec {inst.name} -e KEY=VALUE -- CMD</code>.</p>
+      {plan.needsRestart ? (
+        <>
+          <label className="fx-check"><input type="checkbox" checked={form.restartNow} onChange={(e) => set({ restartNow: e.target.checked })} /> Restart now to apply the new size ({inst.name} stops for a moment; same name and disk)</label>
+          {form.restartNow ? <label className="fx-check"><input type="checkbox" checked={form.checkpoint} onChange={(e) => set({ checkpoint: e.target.checked })} /> Save a checkpoint first, so you can go back</label> : <p className="fx-muted">Without this, the labels and policy are saved but the new size is not applied.</p>}
+        </>
+      ) : null}
+      {plan.error ? <p className="fx-muted">{plan.error}</p> : <p>Will change: {plan.changes.join('; ')}.</p>}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <Button disabled={!!plan.error} busy={busy} onClick={() => void save()}>{plan.needsRestart && form.restartNow ? 'Save and restart' : 'Save'}</Button>
+        <Button variant="ghost" aria-label="Copy as fluxctl" disabled={!!plan.error} onClick={() => void copyText(notify, plan.command)}><Copy size={14} /> Copy as fluxctl</Button>
+        {plan.error ? null : <code className="fx-mono">{plan.command}</code>}
+      </div>
+      {result ? <p role="status"><Pill tone={result.tone}>{result.tone === 'ok' ? 'saved' : result.tone === 'warn' ? 'needs a restart' : 'not saved'}</Pill> {result.text}</p> : null}
+    </div>
+  );
+}
+
 /** One instance: its inspect record and the tail of its console log, with the command for each. */
 function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; onClose: () => void }) {
-  const [tab, setTab] = useState<'inspect' | 'logs'>('inspect');
+  const [tab, setTab] = useState<'inspect' | 'edit' | 'logs'>('inspect');
   const [lines, setLines] = useState(300);
   const rec = usePoll(() => api.get<unknown>(`/v1/vms/${encodeURIComponent(inst.id)}`), 5000, [inst.id]);
   const logs = usePoll(() => api.get<string>(`/v1/vms/${encodeURIComponent(inst.id)}/logs?lines=${lines}`, { text: true }), tab === 'logs' && inst.status === 'running' ? 3000 : 3_600_000, [inst.id, lines, tab]);
@@ -73,8 +120,8 @@ function Detail({ inst, notify, onClose }: { inst: MacInstance; notify: Notify; 
   return (
     <Card title={<>{inst.name} <span className="fx-muted">details</span></>} action={<Button size="sm" variant="ghost" onClick={onClose}>Close</Button>}>
       {inst.error ? <p><Pill tone="bad">error</Pill> {inst.error}. Run <code className="fx-mono">{DOCTOR_COMMAND}</code> on the Mac, then <code className="fx-mono">{actionCommand('start', inst.name)}</code>.</p> : null}
-      <Tabs value={tab} onChange={setTab} tabs={[{ value: 'inspect', label: 'Inspect' }, { value: 'logs', label: 'Logs' }]} />
-      {tab === 'inspect' ? (
+      <Tabs value={tab} onChange={setTab} tabs={[{ value: 'inspect', label: 'Inspect' }, { value: 'edit', label: 'Edit' }, { value: 'logs', label: 'Logs' }]} />
+      {tab === 'edit' ? <EditPanel key={inst.id} inst={inst} notify={notify} /> : tab === 'inspect' ? (
         <>
           <div className="fx-table-wrap"><table className="fx-table"><tbody>{facts.map(([k, v]) => <tr key={k}><td className="fx-muted">{k}</td><td className="fx-mono">{v}</td></tr>)}</tbody></table></div>
           {Object.keys(inst.labels).length ? <p className="fx-muted">Labels: {Object.entries(inst.labels).map(([k, v]) => `${k}=${v}`).join(', ')}</p> : null}

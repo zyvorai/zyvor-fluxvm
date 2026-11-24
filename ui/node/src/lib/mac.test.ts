@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -76,5 +76,76 @@ describe('share commands', () => {
   it('name the instance in the command', () => {
     expect(shareCommand('build-1')).toBe('fluxctl share build-1');
     expect(shareServeCommand('build-1')).toBe('fluxctl share build-1 --serve');
+  });
+});
+
+describe('edit (fluxctl mac update)', () => {
+  const ci = i('ci', 'stopped', { restart_policy: 'always', labels: { team: 'ios', old: '1' } });
+
+  it('reads and writes memory the way fluxctl does', () => {
+    expect(memoryField(8192)).toBe('8g');
+    expect(memoryField(1536)).toBe('1536m');
+    expect(parseMemory('16g')).toBe(16384);
+    expect(parseMemory(' 16 GiB ')).toBe(16384);
+    expect(parseMemory('512m')).toBe(512);
+    expect(parseMemory('4096')).toBe(4096);
+    expect(parseMemory('lots')).toBeNull();
+    expect(parseMemory('0')).toBeNull();
+  });
+
+  it('parses label lines and names the bad one', () => {
+    expect(parseLabelLines('a=b\n\n c=d=e ')).toEqual({ labels: { a: 'b', c: 'd=e' }, bad: null });
+    expect(parseLabelLines('a=b\nnovalue').bad).toBe('novalue');
+    expect(parseLabelLines('a b=c').bad).toBe('a b=c');
+  });
+
+  it('starts from the instance, so nothing is sent until you change something', () => {
+    const p = planEdit(ci, editFormFor(ci));
+    expect(p.body).toEqual({});
+    expect(p.error).toMatch(/Nothing is different/);
+  });
+
+  it('sends only what changed, with the fluxctl command for it', () => {
+    const f = { ...editFormFor(ci), cpus: '8', memory: '16g', restart: 'unless-stopped', labels: 'team=android\nnew=x y' };
+    const p = planEdit(ci, f);
+    expect(p.error).toBeNull();
+    expect(p.body).toEqual({ cpus: 8, memory_mib: 16384, restart: 'unless-stopped', labels: { team: 'android', new: 'x y' }, rm_labels: ['old'] });
+    expect(p.command).toBe("fluxctl mac update ci --cpus 8 --memory 16g --restart unless-stopped --label team=android --label 'new=x y' --rm-label old");
+    expect(p.needsRestart).toBe(false);
+  });
+
+  it('a running instance needs a restart for the size, and restart now adds it with a checkpoint by default', () => {
+    const run = i('ci', 'running');
+    const f = { ...editFormFor(run), cpus: '8' };
+    const p = planEdit(run, f);
+    expect(p.needsRestart).toBe(true);
+    expect(p.body.restart_now).toBeUndefined();
+    const now = planEdit(run, { ...f, restartNow: true });
+    expect(now.body).toEqual({ cpus: 8, restart_now: true });
+    expect(now.command).toBe('fluxctl mac update ci --cpus 8 --restart-now');
+    const skip = planEdit(run, { ...f, restartNow: true, checkpoint: false });
+    expect(skip.body.checkpoint).toBe(false);
+    expect(skip.command).toMatch(/--restart-now --no-checkpoint$/);
+    // Labels alone never need a restart.
+    expect(planEdit(run, { ...editFormFor(run), labels: 'a=b' }).needsRestart).toBe(false);
+  });
+
+  it('says what is wrong in plain words', () => {
+    expect(planEdit(ci, { ...editFormFor(ci), cpus: '0' }).error).toMatch(/CPUs/);
+    expect(planEdit(ci, { ...editFormFor(ci), memory: 'lots' }).error).toMatch(/8g, 512m/);
+    expect(planEdit(ci, { ...editFormFor(ci), memory: '64m' }).error).toMatch(/512 MiB/);
+    expect(planEdit(ci, { ...editFormFor(ci), labels: 'oops' }).error).toMatch(/KEY=VALUE/);
+  });
+
+  it('quotes a name or label with spaces', () => {
+    expect(updateCommand("o'neil", { cpus: 2 })).toBe("fluxctl mac update 'o'\\''neil' --cpus 2");
+  });
+
+  it('describes the daemon answer, pending restarts and checkpoints included', () => {
+    const base = { ok: true, name: 'ci', applied: [], pending_restart: [], restarted: false, checkpoint: null, explain: null, next: null, fluxctl: '' };
+    expect(updateAnswerText('ci', { ...base, applied: ['cpus 4 -> 8'], restarted: true, checkpoint: 'auto-before-update-5' })).toMatch(/applied cpus 4 -> 8.*checkpoint restore ci auto-before-update-5.*restarted/);
+    const pend = updateAnswerText('ci', { ...base, ok: false, pending_restart: [{ change: 'cpus 4 -> 8' }], next: 'Add restart now.' });
+    expect(pend).toMatch(/Not applied, needs a restart: cpus 4 -> 8\..*Add restart now/);
+    expect(updateAnswerText('ci', base)).toMatch(/nothing to change/);
   });
 });

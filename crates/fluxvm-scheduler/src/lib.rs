@@ -4670,6 +4670,60 @@ impl VmManager {
         Ok(vm)
     }
 
+    /// Change the CPU count and/or memory of a stopped `vz` VM (`fluxctl mac update`). The request is what the runner is
+    /// started from, so the new size takes effect at the next start. A running or paused VM, and any other backend, is
+    /// refused in plain words; nothing is changed on a refusal.
+    pub async fn resize_stopped(
+        &self,
+        id: Uuid,
+        vcpus: Option<u8>,
+        memory_mib: Option<u64>,
+    ) -> Result<VmRecord> {
+        let mut vm = self.get(id).await?;
+        if vm.backend != BackendKind::Vz {
+            bail!(
+                "only a macOS (vz) VM can be resized with this call; {} runs on the {:?} backend",
+                vm.name,
+                vm.backend
+            );
+        }
+        if matches!(
+            vm.status,
+            VmStatus::Running | VmStatus::Paused | VmStatus::Creating
+        ) {
+            bail!(
+                "{} is {}: stop it first (a macOS VM's CPUs and memory are read when it boots)",
+                vm.name,
+                match vm.status {
+                    VmStatus::Running => "running",
+                    VmStatus::Paused => "paused",
+                    _ => "still being created",
+                }
+            );
+        }
+        let mut req = vm.request.clone();
+        if let Some(c) = vcpus {
+            req.vcpus = c;
+        }
+        if let Some(m) = memory_mib {
+            req.memory_mib = m;
+        }
+        if req.vcpus != vm.request.vcpus || req.memory_mib != vm.request.memory_mib {
+            fluxvm_apple::validate_request(&req)?;
+            vm.request = req;
+            self.store.update(vm.clone()).await?;
+            audit_event(
+                "vm.resize",
+                &[
+                    ("vm_id", &id.to_string()),
+                    ("vcpus", &vm.request.vcpus.to_string()),
+                    ("memory_mib", &vm.request.memory_mib.to_string()),
+                ],
+            );
+        }
+        Ok(vm)
+    }
+
     /// Snapshots taken by [`Self::create_vm_snapshot`]: qcow2-internal for
     /// QEMU, `workspace/snapshots/<tag>` for every other backend.
     pub async fn list_vm_snapshots(

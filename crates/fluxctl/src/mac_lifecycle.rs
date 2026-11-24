@@ -334,17 +334,19 @@ pub enum MacLife {
         #[arg(required = true)]
         names: Vec<String>,
     },
-    /// Change an instance: `--restart` and `--label` work on a stopped or running instance. `--cpus` and `--memory` cannot be
-    /// changed on a macOS VM that exists (the daemon has no call for it): the command says what to do instead.
+    /// Change an instance the way `docker update` does. `--restart`, `--label` and `--rm-label` apply at once, running or stopped.
+    /// `--cpus` and `--memory` are read when a macOS VM boots: on a stopped instance they apply now; on a running one the command
+    /// says so plainly and changes nothing about the size unless you add `--restart-now` (checkpoint, stop, apply, start; same
+    /// name and disk).
     #[command(
-        after_help = "Examples:\n  fluxctl mac update ci --restart always\n  fluxctl mac update ci --label team=ios --label tier=ci\n\nTo resize: fluxctl mac stop ci && fluxctl mac commit ci ci-img:1 && fluxctl mac rm ci && fluxctl mac create --name ci --cpus 8 ci-img:1"
+        after_help = "Examples:\n  fluxctl mac update ci --restart always\n  fluxctl mac update ci --label team=ios --rm-label old\n  fluxctl mac update ci --cpus 8 --memory 16g            (stopped: applied now; running: says a restart is needed)\n  fluxctl mac update ci --cpus 8 --restart-now            (saves a checkpoint first; --no-checkpoint skips it)\n\nEnvironment variables cannot be stored on a macOS VM: pass them per command with `fluxctl mac exec ci -e K=V -- CMD`. Studio: the Edit panel on the Mac page does the same. If it fails: fluxctl explain MAC_UPDATE_NEEDS_RESTART"
     )]
     Update {
         name: String,
-        /// Not changeable on an existing macOS VM: explained, nothing changed.
+        /// New CPU count (read when the VM boots).
         #[arg(long, value_name = "N")]
         cpus: Option<u8>,
-        /// Not changeable on an existing macOS VM: explained, nothing changed.
+        /// New memory: `8g`, `512m` or MiB (read when the VM boots).
         #[arg(long, value_name = "SIZE")]
         memory: Option<String>,
         /// Restart policy: `no`, `always`, `unless-stopped` or `on-failure` (applied by `mac supervise` / `mac reconcile`).
@@ -353,6 +355,18 @@ pub enum MacLife {
         /// Set a label: `KEY=VALUE`. Repeatable; an existing key is replaced.
         #[arg(long = "label", value_name = "KEY=VALUE")]
         label: Vec<String>,
+        /// Remove a label by key. Repeatable.
+        #[arg(long = "rm-label", value_name = "KEY")]
+        rm_label: Vec<String>,
+        /// Not stored on a macOS VM: explained, nothing changed. Use `mac exec NAME -e K=V -- CMD`.
+        #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// A running instance: save a checkpoint, stop it, apply `--cpus` / `--memory` and start it again (same name, same disk).
+        #[arg(long)]
+        restart_now: bool,
+        /// With `--restart-now`: do not save the `auto-before-update-<time>` checkpoint first.
+        #[arg(long, requires = "restart_now")]
+        no_checkpoint: bool,
         /// Print one JSON object (schema in docs/macos-containers.md).
         #[arg(long)]
         json: bool,
@@ -369,9 +383,7 @@ impl MacLife {
                 .err()
                 .or_else(|| create_refusal(opts, *rm, cmd)),
             MacLife::Kill { signal, .. } => signal.as_deref().and_then(|s| signal_refusal(s).err()),
-            MacLife::Update {
-                cpus, memory, name, ..
-            } => resources_refusal(name, *cpus, memory.as_deref()),
+            MacLife::Update { name, env, .. } => env_refusal(name, env),
         }
     }
 
@@ -414,23 +426,16 @@ fn create_refusal(opts: &RunOpts, rm: bool, cmd: &[String]) -> Option<anyhow::Er
     ))
 }
 
-/// `--cpus` / `--memory` on an existing instance.
-pub fn resources_refusal(
-    name: &str,
-    cpus: Option<u8>,
-    memory: Option<&str>,
-) -> Option<anyhow::Error> {
-    let what = match (cpus, memory) {
-        (None, None) => return None,
-        (Some(_), None) => "--cpus",
-        (None, Some(_)) => "--memory",
-        (Some(_), Some(_)) => "--cpus and --memory",
-    };
+/// `--env` on an instance: a macOS VM keeps no environment, so there is nothing to change.
+pub fn env_refusal(name: &str, env: &[String]) -> Option<anyhow::Error> {
+    if env.is_empty() {
+        return None;
+    }
     Some(coded(
         format!(
-            "{what}: the CPU count and memory of a macOS VM are fixed when it is created, and the daemon has no call to change them on an instance that exists, running or stopped. Nothing was changed. To resize {name}: `fluxctl mac stop {name}`, `fluxctl mac commit {name} {name}-img:1` (keeps its disk), `fluxctl mac rm {name}`, then `fluxctl mac create --name {name} --cpus N --memory SIZE {name}-img:1`"
+            "--env: a macOS VM stores no environment (the guest keeps none between runs; `mac run` and `mac exec` send it over SSH each time), so there is nothing on {name} to update. Nothing was changed. Pass it when you run something: `fluxctl mac exec {name} -e KEY=VALUE -- CMD`"
         ),
-        "MAC_UPDATE_NOT_SUPPORTED",
+        "MAC_UPDATE_ENV_NOT_STORED",
     ))
 }
 
@@ -474,8 +479,12 @@ fn kill_unavailable(name: &str, e: &anyhow::Error) -> anyhow::Error {
     )
 }
 
-/// The `PATCH` body of `mac update`: `--restart` (`no` removes the label) and `--label`.
-pub fn update_patch(restart: Option<&str>, labels: &[String]) -> Result<Value> {
+/// The label part of an update: `--restart` (`no` removes the label), `--label` and `--rm-label`.
+fn labels_part(
+    restart: Option<&str>,
+    labels: &[String],
+    rm: &[String],
+) -> Result<Map<String, Value>> {
     let mut l = Map::new();
     if let Some(r) = restart {
         let p = Restart::parse(r)?;
@@ -496,11 +505,98 @@ pub fn update_patch(restart: Option<&str>, labels: &[String]) -> Result<Value> {
         );
         l.insert(k, json!(v));
     }
+    for k in rm {
+        anyhow::ensure!(
+            !is_internal_label(k) && !k.is_empty(),
+            "label {k:?}: keys starting with fluxvm.mac are reserved"
+        );
+        anyhow::ensure!(
+            !labels
+                .iter()
+                .any(|x| x.split('=').next() == Some(k.as_str())),
+            "label {k:?} is both set (--label) and removed (--rm-label); pick one"
+        );
+        l.insert(k.clone(), Value::Null);
+    }
+    Ok(l)
+}
+
+/// The `PATCH /v1/vms/{id}` body of `mac update` for labels and the restart policy (what an older daemon understands).
+pub fn update_patch(restart: Option<&str>, labels: &[String], rm: &[String]) -> Result<Value> {
+    let l = labels_part(restart, labels, rm)?;
     anyhow::ensure!(
         !l.is_empty(),
-        "nothing to update: pass --restart POLICY and/or --label KEY=VALUE (see `fluxctl mac update --help`)"
+        "nothing to update: pass --cpus, --memory, --restart POLICY, --label KEY=VALUE or --rm-label KEY (see `fluxctl mac update --help`)"
     );
     Ok(json!({ "labels": l }))
+}
+
+/// What `mac update` was asked to do.
+#[derive(Debug, Default, Clone)]
+pub struct UpdateArgs {
+    pub name: String,
+    pub cpus: Option<u8>,
+    pub memory: Option<String>,
+    pub restart: Option<String>,
+    pub label: Vec<String>,
+    pub rm_label: Vec<String>,
+    pub restart_now: bool,
+    pub no_checkpoint: bool,
+    pub json: bool,
+}
+
+impl UpdateArgs {
+    fn resizes(&self) -> bool {
+        self.cpus.is_some() || self.memory.is_some()
+    }
+}
+
+/// The body of `PATCH /v1/mac/instances/{id}`, checked here so a typo never reaches the daemon.
+pub fn update_body(a: &UpdateArgs) -> Result<Value> {
+    let l = labels_part(a.restart.as_deref(), &a.label, &a.rm_label)?;
+    let mut b = Map::new();
+    if let Some(c) = a.cpus {
+        anyhow::ensure!(c >= 1, "--cpus must be at least 1");
+        b.insert("cpus".into(), json!(c));
+    }
+    if let Some(m) = &a.memory {
+        let mib = crate::mac_config::parse_memory_mib(m)?;
+        anyhow::ensure!(
+            mib >= 512,
+            "--memory {m}: a macOS VM needs at least 512 MiB (use 8g, 16g, ...)"
+        );
+        b.insert("memory_mib".into(), json!(mib));
+    }
+    if let Some(r) = &a.restart {
+        Restart::parse(r)?;
+        b.insert("restart".into(), json!(r));
+    }
+    let set: Map<String, Value> = l
+        .iter()
+        .filter(|(k, v)| !v.is_null() && k.as_str() != crate::mac_inspect::RESTART_LABEL)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if !set.is_empty() {
+        b.insert("labels".into(), Value::Object(set));
+    }
+    if !a.rm_label.is_empty() {
+        b.insert("rm_labels".into(), json!(a.rm_label));
+    }
+    anyhow::ensure!(
+        !b.is_empty(),
+        "nothing to update: pass --cpus, --memory, --restart POLICY, --label KEY=VALUE or --rm-label KEY (see `fluxctl mac update --help`)"
+    );
+    anyhow::ensure!(
+        !a.restart_now || a.resizes(),
+        "--restart-now only matters together with --cpus or --memory (those are what need a restart)"
+    );
+    if a.restart_now {
+        b.insert("restart_now".into(), json!(true));
+    }
+    if a.no_checkpoint {
+        b.insert("checkpoint".into(), json!(false));
+    }
+    Ok(Value::Object(b))
 }
 
 /// The labels `mac start` changes: it is no longer "created only" or "stopped by you", and a new start period begins.
@@ -582,11 +678,38 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacLife) -> Result<()> {
         MacLife::Kill { names, .. } => kill(r, &names).await,
         MacLife::Update {
             name,
+            cpus,
+            memory,
             restart,
             label,
+            rm_label,
+            restart_now,
+            no_checkpoint,
             json,
             ..
-        } => update(r, &name, restart.as_deref(), &label, json).await,
+        } => {
+            let a = UpdateArgs {
+                name,
+                cpus,
+                memory,
+                restart,
+                label,
+                rm_label,
+                restart_now,
+                no_checkpoint,
+                json,
+            };
+            let out = update_with(r, &a).await?;
+            if let Some(t) = &out.progress {
+                eprintln!("{t}");
+            }
+            if let Some(d) = &out.document {
+                println!("{}", serde_json::to_string(d)?);
+            } else if out.error.is_none() {
+                println!("{}", a.name);
+            }
+            out.error.map_or(Ok(()), Err)
+        }
     }
 }
 
@@ -676,32 +799,178 @@ async fn kill(r: &crate::remote::Remote, names: &[String]) -> Result<()> {
     Ok(())
 }
 
-async fn update(
-    r: &crate::remote::Remote,
-    name: &str,
-    restart: Option<&str>,
-    labels: &[String],
-    json_out: bool,
-) -> Result<()> {
-    let patch = update_patch(restart, labels)?;
-    let vm = crate::mac_cmd::find_instance(r, name).await?;
-    let id = vm["id"].as_str().context("the daemon record has no id")?;
-    r.call(
-        reqwest::Method::PATCH,
-        &format!("/v1/vms/{id}"),
-        Some(patch.clone()),
+/// What `mac update` needs from the daemon; a fake in tests.
+#[allow(async_fn_in_trait)]
+pub trait UpdateApi {
+    async fn find(&self, name: &str) -> Result<Value>;
+    /// `PATCH /v1/mac/instances/{id}`.
+    async fn update_instance(&self, id: &str, body: Value) -> Result<Value>;
+    /// `PATCH /v1/vms/{id}`: labels only (an older daemon).
+    async fn patch_vm(&self, id: &str, body: Value) -> Result<Value>;
+}
+
+impl UpdateApi for crate::remote::Remote {
+    async fn find(&self, name: &str) -> Result<Value> {
+        crate::mac_cmd::find_instance(self, name).await
+    }
+    async fn update_instance(&self, id: &str, body: Value) -> Result<Value> {
+        self.call(
+            reqwest::Method::PATCH,
+            &format!("/v1/mac/instances/{id}"),
+            Some(body),
+        )
+        .await
+    }
+    async fn patch_vm(&self, id: &str, body: Value) -> Result<Value> {
+        self.call(reqwest::Method::PATCH, &format!("/v1/vms/{id}"), Some(body))
+            .await
+    }
+}
+
+/// What `mac update` prints: a progress text (stderr), the `--json` document (stdout, when asked) and the failure, if any.
+/// A change that needs a restart is both: the rest is applied and reported, and the command still fails so a script notices.
+#[derive(Debug, Default)]
+pub struct UpdateOutcome {
+    pub progress: Option<String>,
+    pub document: Option<Value>,
+    pub error: Option<anyhow::Error>,
+}
+
+fn route_missing(e: &anyhow::Error) -> bool {
+    let t = format!("{e:#}");
+    t.contains(": 404 ") || t.contains(": 405 ")
+}
+
+/// The older-daemon path: labels and the restart policy through `PATCH /v1/vms/{id}`; a size change cannot be done there.
+async fn update_via_vm_patch<A: UpdateApi>(
+    api: &A,
+    a: &UpdateArgs,
+    id: &str,
+    cause: &anyhow::Error,
+) -> Result<Value> {
+    if a.resizes() || a.restart_now {
+        return Err(coded(
+            format!(
+                "this daemon is older than this fluxctl and has no call to change the CPUs or memory of {n} (it only edits labels and the restart policy). Nothing was changed. Update the daemon on the Mac, or resize the long way: `fluxctl mac stop {n}`, `fluxctl mac commit {n} {n}-img:1` (keeps its disk), `fluxctl mac rm {n}`, `fluxctl mac create --name {n} --cpus N --memory SIZE {n}-img:1`. Daemon said: {cause:#}",
+                n = a.name
+            ),
+            "MAC_UPDATE_NOT_SUPPORTED",
+        ));
+    }
+    api.patch_vm(
+        id,
+        update_patch(a.restart.as_deref(), &a.label, &a.rm_label)?,
     )
     .await
-    .map_err(|e| crate::mac_instance::explain(e, &format!("update {name}")))?;
-    if json_out {
-        println!(
-            "{}",
-            serde_json::to_string(&crate::mac_json::update_document(name, id, &patch))?
-        );
-    } else {
-        println!("{name}");
+    .map_err(|e| crate::mac_instance::explain(e, &format!("update {}", a.name)))?;
+    Ok(
+        json!({"ok": true, "applied": ["labels and restart policy"], "pending_restart": [],
+        "restarted": false, "checkpoint": null, "explain": null, "next": null}),
+    )
+}
+
+/// The progress text of an answer: what was applied, what needs a restart, and what to do next.
+pub fn answer_text(name: &str, answer: &Value) -> String {
+    let mut lines = Vec::new();
+    let list = |k: &str| -> Vec<String> {
+        answer[k]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| {
+                v.as_str()
+                    .or_else(|| v["change"].as_str())
+                    .map(str::to_owned)
+            })
+            .collect()
+    };
+    let applied = list("applied");
+    if !applied.is_empty() {
+        lines.push(format!("{name}: applied {}", applied.join("; ")));
     }
-    Ok(())
+    if let Some(t) = answer["checkpoint"].as_str() {
+        lines.push(format!(
+            "{name}: saved checkpoint {name}:{t} first; to go back: fluxctl mac checkpoint restore {name} {t}"
+        ));
+    }
+    if answer["restarted"].as_bool() == Some(true) {
+        lines.push(format!("{name}: restarted with the new size"));
+    }
+    let pending = list("pending_restart");
+    if !pending.is_empty() {
+        lines.push(format!(
+            "{name}: NOT applied, needs a restart: {}",
+            pending.join("; ")
+        ));
+    }
+    if let Some(n) = answer["next"].as_str() {
+        lines.push(n.to_owned());
+    }
+    lines.join("\n")
+}
+
+/// `mac update`: validate, call the daemon (falling back to the label-only call on an older one) and describe the result.
+pub async fn update_with<A: UpdateApi>(api: &A, a: &UpdateArgs) -> Result<UpdateOutcome> {
+    let body = update_body(a)?;
+    let vm = api.find(&a.name).await?;
+    let id = vm["id"]
+        .as_str()
+        .context("the daemon record has no id")?
+        .to_owned();
+    let answer = match api.update_instance(&id, body.clone()).await {
+        Ok(v) => v,
+        Err(e) if route_missing(&e) => update_via_vm_patch(api, a, &id, &e).await?,
+        Err(e) => {
+            return Err(crate::mac_instance::explain(
+                e,
+                &format!("update {}", a.name),
+            ));
+        }
+    };
+    let pending = answer["pending_restart"]
+        .as_array()
+        .is_some_and(|p| !p.is_empty());
+    let text = answer_text(&a.name, &answer);
+    let document = a.json.then(|| {
+        let labels = labels_part(a.restart.as_deref(), &a.label, &a.rm_label).unwrap_or_default();
+        crate::mac_json::update_document_ext(
+            &a.name,
+            &id,
+            &json!({ "labels": labels }),
+            &answer,
+            body["cpus"].clone(),
+            body["memory_mib"].clone(),
+        )
+    });
+    let error = pending.then(|| {
+        coded(
+            format!(
+                "{} was not resized: {}",
+                a.name,
+                answer["next"].as_str().unwrap_or("it needs a restart")
+            ),
+            "MAC_UPDATE_NEEDS_RESTART",
+        )
+    });
+    Ok(UpdateOutcome {
+        // The pending text is in the error already; do not print it twice.
+        progress: (!text.is_empty())
+            .then(|| {
+                if pending {
+                    text.lines()
+                        .filter(|l| {
+                            !l.contains("NOT applied") && Some(*l) != answer["next"].as_str()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    text.clone()
+                }
+            })
+            .filter(|t| !t.is_empty()),
+        document,
+        error,
+    })
 }
 
 #[cfg(test)]
@@ -1025,52 +1294,262 @@ mod tests {
 
     #[test]
     fn update_patch_sets_and_clears() {
-        let p = update_patch(Some("always"), &["team=ios".into()]).unwrap();
+        let p = update_patch(Some("always"), &["team=ios".into()], &[]).unwrap();
         assert_eq!(
             p,
             json!({"labels": {"fluxvm.mac.restart": "always", "team": "ios"}})
         );
-        let p = update_patch(Some("no"), &[]).unwrap();
-        assert_eq!(p, json!({"labels": {"fluxvm.mac.restart": null}}));
+        let p = update_patch(Some("no"), &[], &["old".into()]).unwrap();
+        assert_eq!(
+            p,
+            json!({"labels": {"fluxvm.mac.restart": null, "old": null}})
+        );
         assert!(
-            update_patch(Some("sometimes"), &[])
+            update_patch(Some("sometimes"), &[], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("restart policy")
         );
         assert!(
-            update_patch(None, &["fluxvm.mac.image=x".into()])
+            update_patch(None, &["fluxvm.mac.image=x".into()], &[])
                 .unwrap_err()
                 .to_string()
                 .contains("reserved")
         );
-        assert!(update_patch(None, &["novalue".into()]).is_err());
-        let e = update_patch(None, &[]).unwrap_err().to_string();
+        assert!(update_patch(None, &[], &["fluxvm.mac.image".into()]).is_err());
+        assert!(update_patch(None, &["a=1".into()], &["a".into()]).is_err());
+        assert!(update_patch(None, &["novalue".into()], &[]).is_err());
+        let e = update_patch(None, &[], &[]).unwrap_err().to_string();
         assert!(
             e.contains("nothing to update") && e.contains("--restart"),
             "{e}"
         );
     }
 
+    fn args(v: &[&str]) -> UpdateArgs {
+        let c = parse(&[&["update", "ci"][..], v].concat());
+        let crate::mac_cmd::MacCommand::Life(MacLife::Update {
+            cpus,
+            memory,
+            restart,
+            label,
+            rm_label,
+            restart_now,
+            no_checkpoint,
+            json,
+            ..
+        }) = c
+        else {
+            panic!()
+        };
+        UpdateArgs {
+            name: "ci".into(),
+            cpus,
+            memory,
+            restart,
+            label,
+            rm_label,
+            restart_now,
+            no_checkpoint,
+            json,
+        }
+    }
+
     #[test]
-    fn update_refuses_resources_before_touching_anything() {
+    fn update_body_carries_size_policy_and_labels() {
+        let b = update_body(&args(&[
+            "--cpus",
+            "8",
+            "--memory",
+            "16g",
+            "--restart",
+            "always",
+            "--label",
+            "team=ios",
+            "--rm-label",
+            "old",
+            "--restart-now",
+            "--no-checkpoint",
+        ]))
+        .unwrap();
+        assert_eq!(
+            b,
+            json!({"cpus": 8, "memory_mib": 16384, "restart": "always", "labels": {"team": "ios"},
+                "rm_labels": ["old"], "restart_now": true, "checkpoint": false})
+        );
+        assert_eq!(
+            update_body(&args(&["--memory", "4096"])).unwrap(),
+            json!({"memory_mib": 4096})
+        );
+    }
+
+    #[test]
+    fn update_mistakes_are_caught_before_the_daemon() {
+        let msg = |v: &[&str]| update_body(&args(v)).unwrap_err().to_string();
+        assert!(msg(&[]).contains("nothing to update"));
+        assert!(msg(&["--memory", "lots"]).contains("not a memory size"));
+        assert!(msg(&["--memory", "64m"]).contains("512 MiB"));
+        assert!(msg(&["--cpus", "0"]).contains("at least 1"));
+        assert!(msg(&["--label", "a=b", "--restart-now"]).contains("--cpus or --memory"));
+        assert!(
+            T::try_parse_from(["t", "update", "ci", "--no-checkpoint", "--cpus", "2"]).is_err(),
+            "--no-checkpoint needs --restart-now"
+        );
+    }
+
+    #[test]
+    fn update_refuses_env_before_touching_anything() {
         use crate::mac_cmd::MacCommand as C;
-        let c = parse(&["update", "ci", "--cpus", "8", "--restart", "always"]);
+        let c = parse(&["update", "ci", "-e", "A=b", "--restart", "always"]);
         assert!(c.is_client_side());
         let C::Life(l) = &c else { panic!() };
         let e = l.refusal().unwrap().to_string();
         assert!(
-            e.contains("--cpus")
+            e.contains("Nothing was changed") && e.contains("mac exec ci -e KEY=VALUE"),
+            "{e}"
+        );
+        assert!(e.contains("fluxctl explain MAC_UPDATE_ENV_NOT_STORED"));
+        let ok = parse(&["update", "ci", "--cpus", "8", "--label", "a=b"]);
+        assert!(!ok.is_client_side(), "sizes go to the daemon now");
+    }
+
+    #[derive(Default)]
+    struct Fake {
+        calls: std::cell::RefCell<Vec<String>>,
+        /// The daemon's answer to PATCH /v1/mac/instances/{id}, or an error text.
+        answer: Option<Result<Value, String>>,
+    }
+
+    impl UpdateApi for Fake {
+        async fn find(&self, name: &str) -> Result<Value> {
+            self.calls.borrow_mut().push(format!("find {name}"));
+            Ok(json!({"id": "vm-1", "name": name}))
+        }
+        async fn update_instance(&self, id: &str, body: Value) -> Result<Value> {
+            self.calls
+                .borrow_mut()
+                .push(format!("instance {id} {body}"));
+            match self.answer.clone() {
+                Some(Ok(v)) => Ok(v),
+                Some(Err(e)) => bail!("{e}"),
+                None => bail!("PATCH /v1/mac/instances/vm-1: 404 Not Found"),
+            }
+        }
+        async fn patch_vm(&self, id: &str, body: Value) -> Result<Value> {
+            self.calls.borrow_mut().push(format!("vm {id} {body}"));
+            Ok(json!({}))
+        }
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    #[test]
+    fn a_new_daemon_answer_is_described_and_a_restart_need_fails_the_command() {
+        let f = Fake {
+            answer: Some(Ok(
+                json!({"ok": false, "applied": ["labels and restart policy"],
+                "pending_restart": [{"change": "cpus 4 -> 8"}], "restarted": false, "checkpoint": null,
+                "explain": "MAC_UPDATE_NEEDS_RESTART",
+                "next": "ci is running; to apply it now: `fluxctl mac update ci --cpus 8 --restart-now`"}),
+            )),
+            ..Fake::default()
+        };
+        let out = run(update_with(
+            &f,
+            &args(&["--cpus", "8", "--restart", "always", "--json"]),
+        ))
+        .unwrap();
+        let e = out.error.unwrap().to_string();
+        assert!(
+            e.contains("not resized")
+                && e.contains("--restart-now")
+                && e.contains("fluxctl explain MAC_UPDATE_NEEDS_RESTART"),
+            "{e}"
+        );
+        assert_eq!(
+            out.progress.as_deref(),
+            Some("ci: applied labels and restart policy")
+        );
+        let d = out.document.unwrap();
+        assert_eq!(
+            (d["cpus"].as_u64(), d["restarted"].as_bool()),
+            (Some(8), Some(false))
+        );
+        assert_eq!(d["pending_restart"][0]["change"], "cpus 4 -> 8");
+        assert_eq!(d["restart_policy"], "always");
+    }
+
+    #[test]
+    fn a_restart_now_answer_says_what_was_saved_and_how_to_go_back() {
+        let f = Fake {
+            answer: Some(Ok(
+                json!({"ok": true, "applied": ["cpus 4 -> 8"], "pending_restart": [],
+                "restarted": true, "checkpoint": "auto-before-update-5", "next": null}),
+            )),
+            ..Fake::default()
+        };
+        let out = run(update_with(&f, &args(&["--cpus", "8", "--restart-now"]))).unwrap();
+        assert!(out.error.is_none());
+        let t = out.progress.unwrap();
+        assert!(
+            t.contains("applied cpus 4 -> 8")
+                && t.contains("checkpoint restore ci auto-before-update-5")
+                && t.contains("restarted"),
+            "{t}"
+        );
+        assert!(f.calls.borrow()[1].contains("\"restart_now\":true"));
+    }
+
+    #[test]
+    fn an_older_daemon_still_takes_labels_but_explains_a_resize() {
+        let f = Fake::default();
+        let out = run(update_with(
+            &f,
+            &args(&["--label", "a=b", "--rm-label", "x"]),
+        ))
+        .unwrap();
+        assert!(out.error.is_none());
+        assert!(
+            f.calls
+                .borrow()
+                .last()
+                .unwrap()
+                .starts_with("vm vm-1 {\"labels\":{\"a\":\"b\",\"x\":null}}")
+        );
+        let g = Fake::default();
+        let e = run(update_with(&g, &args(&["--cpus", "8"])))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            e.contains("older than this fluxctl")
                 && e.contains("Nothing was changed")
                 && e.contains("mac commit ci"),
             "{e}"
         );
         assert!(e.contains("fluxctl explain MAC_UPDATE_NOT_SUPPORTED"));
-        let m = parse(&["update", "ci", "--memory", "16g"]);
-        let C::Life(l) = &m else { panic!() };
-        assert!(l.refusal().unwrap().to_string().contains("--memory:"));
-        let ok = parse(&["update", "ci", "--label", "a=b"]);
-        assert!(!ok.is_client_side());
+        assert!(!g.calls.borrow().iter().any(|c| c.starts_with("vm ")));
+    }
+
+    #[test]
+    fn a_daemon_refusal_is_passed_on_with_its_advice() {
+        let f = Fake {
+            answer: Some(Err(
+                "PATCH x: 409 Conflict: ci: the checkpoint before the update could not be saved"
+                    .into(),
+            )),
+            ..Fake::default()
+        };
+        let e = run(update_with(&f, &args(&["--cpus", "8", "--restart-now"])))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("checkpoint before the update"), "{e}");
     }
 
     #[test]

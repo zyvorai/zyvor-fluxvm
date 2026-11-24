@@ -169,22 +169,38 @@ Only `KILL`/`SIGKILL`/`9` is accepted for `--signal`: a VM cannot be sent other 
 alternatives (`mac stop`, or `mac exec NAME -- kill -TERM PID` inside the guest) (`MAC_KILL_SIGNAL`). A daemon without the route gives
 `MAC_KILL_UNAVAILABLE`. Needs a running instance. **Whether the vz runner exits cleanly and the daemon records `stopped` after a kill is unverified.**
 
-### `fluxctl mac update NAME [--restart POLICY] [--label KEY=VALUE]... [--json]`
+### `fluxctl mac update NAME [--cpus N] [--memory SIZE] [--restart POLICY] [--label K=V] [--rm-label K] [--restart-now] [--json]`
 
-The daemon's `PATCH /v1/vms/{id}` edits only the name and labels, so that is what `update` can change, on a running or a stopped instance:
-`--restart` (`no` removes the policy) and `--label`. **`--cpus` and `--memory` are accepted only to be refused**: there is no daemon call
-that resizes an existing macOS VM, running or stopped, so nothing is changed and the message gives the way that works (`mac stop`,
-`mac commit NAME NAME-img:1`, `mac rm`, `mac create --cpus N --memory SIZE NAME-img:1`) (`MAC_UPDATE_NOT_SUPPORTED`).
+Like `docker update`. `--restart` (`no` removes the policy), `--label` and `--rm-label` apply at once, running or stopped. `--cpus` and
+`--memory` are read from the VM's request when it boots, so on a **stopped** instance they are applied at once (the daemon checks them
+with the vz admission rules) and take effect at the next `mac start`. On a **running** instance they are not applied: the labels and
+policy that were asked for are, the size is listed as needing a restart, and the command exits 1 with `MAC_UPDATE_NEEDS_RESTART` and
+the exact `--restart-now` command. `--restart-now` does: mark the instance stopped-by-you (so `mac supervise` leaves it alone), stop
+it, save a disk checkpoint `auto-before-update-<unix time>` (`--no-checkpoint` skips it; a checkpoint that cannot be saved, usually
+for lack of disk, starts the VM again unchanged and says so), apply the size, start it and restart the health clock. Same VM, same
+name, same disk and shared folders. If the start fails the answer names `mac checkpoint restore NAME auto-before-update-<time>`.
+The `auto-before-update-*` checkpoints are not pruned (an APFS clone costs little until the disk diverges; `mac checkpoint rm` them).
+
+`--env` is refused (`MAC_UPDATE_ENV_NOT_STORED`): a macOS VM stores no environment; use `mac exec NAME -e K=V -- CMD`. An older daemon
+(no `PATCH /v1/mac/instances/{id}`) still takes labels and the policy through `PATCH /v1/vms/{id}`; a size change gets
+`MAC_UPDATE_NOT_SUPPORTED` with the stop/commit/rm/create way. Studio: the Edit panel of an instance on the Mac page (same fields, a
+"restart now" box, and Copy as fluxctl). **Nothing here has run against a real Mac: that the runner picks up the new request on the
+next boot is read from the code, not observed.**
+
+API: `PATCH /v1/mac/instances/{id}` (admin), body `{cpus?, memory_mib?, restart?, labels?: {k: v}, rm_labels?: [k], restart_now?, checkpoint?}`;
+the answer is `{ok, name, applied[], pending_restart[], restarted, checkpoint, explain, next, fluxctl}`. `ok` is false when something
+is pending a restart.
 
 ### JSON
 
 `mac create --json` prints `{"schema_version":1,"name","id","image","status":"created","started":false}`; `mac update --json` prints
-`{"schema_version":1,"name","id","restart_policy" (new policy, "no" when cleared, null when not given),"labels" (the user labels set)}`.
+`{"schema_version":1,"name","id","restart_policy" (new policy, "no" when cleared, null when not given),"labels" (the user labels set),
+"cpus","memory_mib" (asked for, else null),"applied","pending_restart","restarted","checkpoint"}` (the last six keys were added later; keys only get added).
 Both are pinned by golden files in `crates/fluxctl/src/mac_json_golden/`.
 
 ### Explain codes
 
-`MAC_FLAG_NOT_APPLICABLE`, `MAC_PULL_POLICY`, `MAC_HEALTHCHECK_FLAGS`, `MAC_CREATE_RUN_ONLY`, `MAC_UPDATE_NOT_SUPPORTED`, `MAC_KILL_SIGNAL`,
+`MAC_FLAG_NOT_APPLICABLE`, `MAC_PULL_POLICY`, `MAC_HEALTHCHECK_FLAGS`, `MAC_CREATE_RUN_ONLY`, `MAC_UPDATE_NOT_SUPPORTED`, `MAC_UPDATE_NEEDS_RESTART`, `MAC_UPDATE_ENV_NOT_STORED`, `MAC_KILL_SIGNAL`,
 `MAC_KILL_UNAVAILABLE`: `fluxctl explain CODE`.
 
 ## Instance commands
@@ -581,8 +597,8 @@ fluxctl mac diff ci warm [OTHER]            # how much of the disk differs from 
   never pruned. If the safety checkpoint cannot be saved (usually no room) the restore is refused and nothing changes
   (`MAC_CHECKPOINT_SAFETY`); `--no-safety-checkpoint` skips it. This lives in the daemon (`restore_vm_snapshot_safe`, and the
   `safety_checkpoint` request field of `/restore`, default true), so Studio gets it too. Other callers of the restore (agent
-  sessions, the self-control socket) are unchanged. `mac update` only edits the restart policy and labels, so it has nothing to
-  roll back and takes no checkpoint.
+  sessions, the self-control socket) are unchanged. `mac update --restart-now` saves its own `auto-before-update-<time>` checkpoint
+  before a restart that changes the size.
 - **Host safety.** Before a checkpoint of a macOS instance the daemon checks free disk (at least 4 GiB, plus the guest's memory size
   when memory is saved; an unreadable figure never blocks) and refuses in plain words with the next step (`MAC_DISK_FULL`);
   the runner's own `save-support` check still refuses a device set that cannot be saved, with its reason

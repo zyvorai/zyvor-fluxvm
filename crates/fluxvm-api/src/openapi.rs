@@ -426,6 +426,7 @@ fn ops() -> Vec<Op> {
         op("post", "/v1/mac/schedules", "Add a schedule (name, cron, image, cmd, ttl, notify, webhook). 400 explains a bad cron, name, TTL or webhook (admin)", VMS),
         op("delete", "/v1/mac/schedules/{name}", "Remove a schedule (admin)", VMS),
         op("post", "/v1/mac/schedules/{name}/{action}", "enable, disable or run-now a schedule; run-now is picked up by the next `fluxctl mac schedule tick` (admin)", VMS),
+        op("patch", "/v1/mac/instances/{id}", "Update a `fluxctl mac` instance like `docker update`: restart policy and labels at once; CPUs and memory on a stopped instance, or on a running one with restart_now (checkpoint, stop, apply, start). Body {cpus, memory_mib, restart, labels, rm_labels, restart_now, checkpoint}; the answer lists applied and pending_restart changes (admin)", VMS),
         op("get", "/v1/docker", "The Docker engine `fluxctl docker` runs: reachability, containers and images (read-only; admin)", VMS),
         op("get", "/v1/mac-fleet", "The Mac fleet as `fluxctl mac-fleet top` last saw it: per Mac the macOS guests against the 2-per-Mac limit, thermal state, free disk and the fluxctl commands to cordon, uncordon and drain (read-only; admin)", HOST),
         op("get", "/v1/docker/context", "The `fluxvm` Docker CLI context: whether it exists, is current and its socket answers, with the command to run next (read-only; admin)", VMS),
