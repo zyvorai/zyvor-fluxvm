@@ -29,8 +29,13 @@ export type MacProject = { name: string; running: number; total: number; service
 
 export type MacImage = { reference: string; digest: string; source: string; added_unix: number; size_bytes: number | null; present: boolean };
 
+/** Whether the background restarter (`fluxctl mac supervise`) is installed; without it a restart policy is only a label. */
+export type MacSupervisor = { installed: boolean; label: string; install_command: string; status_command: string };
+
 export type MacView = {
   schema: number;
+  /** Absent on an older daemon. */
+  supervisor?: MacSupervisor;
   /** False on a host that is not a Mac: the page explains instead of listing. */
   supported: boolean;
   macos_limit: number;
@@ -135,6 +140,19 @@ export const composeCommands = (project: string): { label: string; cmd: string }
   { label: 'Scale', cmd: `fluxctl mac compose -p ${project} up --scale SERVICE=2 --dry-run` },
   { label: 'Fleet plan', cmd: `fluxctl mac compose up -p ${project} --dry-run --fleet hosts.yaml` },
 ];
+export const SUPERVISE_INSTALL_COMMAND = 'fluxctl mac supervise --install';
+export const SUPERVISE_STATUS_COMMAND = 'fluxctl mac supervise --status';
+
+/** The instances whose restart policy nothing applies yet: they have a policy, and the restarter is not installed. */
+export const unrestarted = (list: MacInstance[], sup: MacSupervisor | undefined): MacInstance[] => (sup && !sup.installed ? list.filter((i) => i.restart_policy !== 'no') : []);
+
+/** One sentence for the banner above the instance list; empty when there is nothing to say. */
+export const supervisorNote = (list: MacInstance[], sup: MacSupervisor | undefined): string => {
+  const n = unrestarted(list, sup).length;
+  if (!n) return '';
+  return `${n} instance${n === 1 ? ' has' : 's have'} a restart policy, but nothing restarts ${n === 1 ? 'it' : 'them'}: the macOS daemon never restarts a VM by itself. Install the restarter once with ${SUPERVISE_INSTALL_COMMAND} (a LaunchAgent of your user, no sudo).`;
+};
+
 export const DOCTOR_COMMAND = 'fluxctl mac doctor';
 
 /** What to say when the Mac page is opened on a host that is not a Mac. */

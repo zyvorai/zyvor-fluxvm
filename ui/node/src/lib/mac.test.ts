@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand, supervisorNote, unrestarted } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -147,5 +147,22 @@ describe('edit (fluxctl mac update)', () => {
     const pend = updateAnswerText('ci', { ...base, ok: false, pending_restart: [{ change: 'cpus 4 -> 8' }], next: 'Add restart now.' });
     expect(pend).toMatch(/Not applied, needs a restart: cpus 4 -> 8\..*Add restart now/);
     expect(updateAnswerText('ci', base)).toMatch(/nothing to change/);
+  });
+});
+
+describe('restart policies and the supervisor', () => {
+  const sup = { installed: false, label: 'x', install_command: 'fluxctl mac supervise --install', status_command: 'fluxctl mac supervise --status' };
+  const list = [i('a', 'stopped', { restart_policy: 'always' }), i('b', 'running'), i('c', 'failed', { restart_policy: 'on-failure' })];
+  it('says nothing when the restarter is installed or no policy is set', () => {
+    expect(supervisorNote(list, { ...sup, installed: true })).toBe('');
+    expect(supervisorNote([i('b', 'running')], sup)).toBe('');
+    expect(supervisorNote(list, undefined)).toBe('');
+  });
+  it('names the problem and the command when a policy has no restarter', () => {
+    expect(unrestarted(list, sup).map((x) => x.name)).toEqual(['a', 'c']);
+    const n = supervisorNote(list, sup);
+    expect(n).toContain('2 instances have a restart policy');
+    expect(n).toContain('fluxctl mac supervise --install');
+    expect(supervisorNote([list[0]], sup)).toContain('1 instance has');
   });
 });

@@ -132,6 +132,23 @@ fn projects(rows: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// The LaunchAgent label of `fluxctl mac supervise --install`, the one thing that applies a restart policy.
+const SUPERVISOR_LABEL: &str = "dev.zyvor.fluxvm.mac-supervise";
+
+/// Whether the restarter is installed for the account the daemon runs as. Without it a restart policy is only a label.
+fn supervisor_view(home: Option<&FsPath>) -> Value {
+    let plist = home.map(|h| {
+        h.join("Library/LaunchAgents")
+            .join(format!("{SUPERVISOR_LABEL}.plist"))
+    });
+    json!({
+        "installed": plist.as_ref().is_some_and(|p| p.exists()),
+        "label": SUPERVISOR_LABEL,
+        "install_command": "fluxctl mac supervise --install",
+        "status_command": "fluxctl mac supervise --status",
+    })
+}
+
 fn store_root() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("FLUXVM_MAC_STORE").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
@@ -279,6 +296,7 @@ async fn get_mac(
         "instances": rows,
         "images": images,
         "logins": logins,
+        "supervisor": supervisor_view(std::env::var_os("HOME").map(PathBuf::from).as_deref()),
     })))
 }
 
@@ -863,6 +881,19 @@ mod tests {
         assert!(!ok.to_string().contains("hunter2"));
         assert_eq!(logins_view(Some(&d.join("none.json")))["items"], json!([]));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_supervisor_is_installed_when_its_launch_agent_exists() {
+        let dir = scratch("supervisor");
+        assert_eq!(supervisor_view(Some(&dir))["installed"], false);
+        assert_eq!(supervisor_view(None)["installed"], false);
+        let agents = dir.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join(format!("{SUPERVISOR_LABEL}.plist")), "x").unwrap();
+        let v = supervisor_view(Some(&dir));
+        assert_eq!(v["installed"], true);
+        assert_eq!(v["install_command"], "fluxctl mac supervise --install");
     }
 
     #[test]

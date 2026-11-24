@@ -10,8 +10,8 @@ import { MacSchedules } from './MacSchedules';
 import { navigate, Button, Card, EmptyState, Field, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
 import {
-  COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, UNSUPPORTED_NOTE,
-  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, editFormFor, updateAnswerText, RESTART_POLICIES,
+  COMPOSE_COMMAND, DOCTOR_COMMAND, IMAGES_COMMAND, LOGINS_COMMAND, PS_COMMAND, SUPERVISE_INSTALL_COMMAND, UNSUPPORTED_NOTE,
+  actionCommand, actionDone, composeCommands, actionLabel, actionsFor, ageText, attachCommand, execCommand, explainError, filterInstances, inspectCommand, loginCommand, logsCommand, memoryText, planEdit, portsText, shareCommand, sizeText, statusTone, summarize, supervisorNote, editFormFor, updateAnswerText, RESTART_POLICIES,
   type EditForm, type MacAction, type MacInstance, type MacUpdateAnswer, type MacView,
 } from '../lib/mac';
 
@@ -218,6 +218,7 @@ export function MacPage({ notify }: { notify: Notify }) {
                   <input className="fx-input" style={{ flex: 1, paddingLeft: 28 }} aria-label="Filter instances" placeholder="Filter by name, image, address, project or state" value={q} onChange={(e) => setQ(e.target.value)} />
                 </span>
               </div>
+              {supervisorNote(d.instances, d.supervisor) ? <p><Pill tone="warn">not restarted</Pill> {supervisorNote(d.instances, d.supervisor)} <CopyCmd notify={notify} cmd={SUPERVISE_INSTALL_COMMAND} /></p> : null}
               {shown.length === 0 ? (
                 <EmptyState title={d.instances.length ? 'No instance matches' : 'No instances yet'} body={d.instances.length ? 'Change the filter to see more.' : 'Start one with fluxctl mac run IMAGE; it shows here. See Images for what is available.'} action={d.instances.length ? undefined : <CopyCmd notify={notify} cmd="fluxctl mac run IMAGE" />} />
               ) : (
@@ -226,7 +227,7 @@ export function MacPage({ notify }: { notify: Notify }) {
                     <tr key={i.id}>
                       <td className="vm-name">{i.name}<div className="fx-muted fx-mono">{i.ip ?? 'no address yet'}</div></td>
                       <td className="fx-mono">{i.image ?? '—'}</td>
-                      <td><Pill tone={statusTone(i.status)}>{i.status}</Pill></td>
+                      <td><Pill tone={statusTone(i.status)}>{i.status}</Pill>{i.restart_policy !== 'no' ? <div className="fx-muted" title="fluxctl mac run --restart">restart: {i.restart_policy}</div> : null}</td>
                       <td className="fx-muted">{i.cpus ?? '—'} CPU · {memoryText(i.memory_mib)}</td>
                       <td className="fx-mono">{portsText(i.ports) || '—'}</td>
                       <td className="fx-muted">{ageText(i.created, now)}</td>

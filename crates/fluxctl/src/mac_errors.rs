@@ -164,6 +164,22 @@ pub const CODES: &[MacCode] = &[
         signatures: &["unsupported template syntax"],
     },
     MacCode {
+        code: "MAC_SUPERVISOR_MISSING",
+        status: None,
+        summary: "An instance has a restart policy or a healthcheck, but nothing on this Mac is running to apply it: the daemon never restarts a macOS VM or probes its health by itself.",
+        causes: &[
+            "the background supervisor (`fluxctl mac supervise`, which restarts instances and runs healthchecks) is not installed as a LaunchAgent",
+            "it could not be installed automatically (not a Mac, no launchctl, or `FLUXCTL_NO_AUTO_SUPERVISE` is set)",
+        ],
+        fixes: &[
+            "install it once: `fluxctl mac supervise --install` (a LaunchAgent of your user, no sudo)",
+            "check it: `fluxctl mac supervise --status`",
+            "or run it in a terminal: `fluxctl mac supervise`",
+        ],
+        aliases: &["supervisor-missing", "no-supervisor", "restart-not-applied"],
+        signatures: &["background supervisor is not installed"],
+    },
+    MacCode {
         code: "MAC_FILTER_INVALID",
         status: None,
         summary: "A `--filter` was not `KEY=VALUE`, used a key the command does not know, or had a value it cannot use.",
