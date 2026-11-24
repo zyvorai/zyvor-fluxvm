@@ -47,6 +47,7 @@ mod docker_host;
 mod doctor;
 mod exec_policy_check;
 mod explain;
+mod find_cmd;
 mod fleet_cli;
 mod fleet_client;
 mod gateway;
@@ -2103,6 +2104,9 @@ enum Command {
     },
     /// Snapshot of identities, groups, CNPs, and labeled VMs.
     Observe,
+    /// Find a machine, image, kube app or volume by name, label (`env=dev`), image reference or port, and print the command
+    /// that opens each hit. The same search as Studio's Cmd/Ctrl-K. Example: `fluxctl find web`, `fluxctl find :8080 --json`.
+    Find(find_cmd::FindArgs),
     /// The audit log: what was changed, by whom, when, and whether it worked. `ls` to look, `export` to keep a copy.
     /// REST: `GET /v1/audit`.
     Audit {
@@ -6673,6 +6677,20 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         };
         return mac_cmd::run(command).await;
     }
+    if matches!(cli.command, Command::Find(_)) {
+        let r = match remote::endpoint(
+            cli.server.clone(),
+            cli.server_token.clone(),
+            cli.context.as_deref(),
+        )? {
+            Some(r) => r,
+            None => remote::Remote::new(&load_cfg(&cli)?.listen, cli.server_token.clone()),
+        };
+        let Command::Find(a) = cli.command else {
+            unreachable!()
+        };
+        return find_cmd::run(&r, &a).await;
+    }
     if matches!(cli.command, Command::Audit { .. }) {
         let r = remote::endpoint(
             cli.server.clone(),
@@ -7058,6 +7076,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Events { .. }
         | Command::Context { .. }
         | Command::Usage(_)
+        | Command::Find(_)
         | Command::Netobs { .. }
         | Command::Agent { .. }
         | Command::Infer { .. }

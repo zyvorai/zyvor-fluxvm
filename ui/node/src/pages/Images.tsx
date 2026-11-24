@@ -281,8 +281,15 @@ function PoolsTab({ notify }: { notify: Notify }) {
   );
 }
 
+const TABS: Tab[] = ['builds', 'catalog', 'oci', 'security', 'templates', 'pools'];
+/** `#/images?tab=oci` (from the global search) opens that tab. */
+const tabFromHash = (): Tab => {
+  const t = new URLSearchParams(location.hash.split('?')[1] ?? '').get('tab');
+  return TABS.find((x) => x === t) ?? 'catalog';
+};
+
 export function ImagesPage({ notify, macos }: { notify: Notify; macos: boolean }) {
-  const [tab, setTab] = useState<Tab>('catalog');
+  const [tab, setTab] = useState<Tab>(() => tabFromHash());
   return (
     <>
       <Hero eyebrow="Images" title="Start from something" accent="you trust." lede="Checksum-pinned base images, reusable machine templates and warm pools that make a new machine instant." />
