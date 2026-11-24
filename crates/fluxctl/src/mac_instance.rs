@@ -501,17 +501,19 @@ pub async fn run_outcome(
     );
     let cwd = std::env::current_dir().context("current directory")?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let name = name.unwrap_or_else(crate::mac_cmd::random_name);
+    let token = uuid::Uuid::new_v4().to_string();
     let mounts = opts
         .volume
         .iter()
-        .map(|v| crate::mac_volume::parse_mount_default(v, &cwd, home.as_deref()))
+        .map(|v| crate::mac_volume::parse_mount_default(v, &cwd, home.as_deref(), Some(&token)))
         .collect::<Result<Vec<_>>>()?;
-    let labels = opts
+    let mut labels = opts
         .label
         .iter()
         .map(|l| parse_label(l))
         .collect::<Result<Vec<_>>>()?;
-    let name = name.unwrap_or_else(crate::mac_cmd::random_name);
+    labels.push((crate::mac_volume::INSTANCE_ID_LABEL.into(), token));
     let spec = LaunchSpec {
         name: name.clone(),
         image: image.clone(),

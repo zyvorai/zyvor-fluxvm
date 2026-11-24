@@ -158,6 +158,7 @@ mod mac_queue;
 mod mac_ready;
 mod mac_reap;
 mod mac_res;
+mod mac_rm;
 mod mac_runner;
 mod mac_runner_life;
 mod mac_runner_pool;

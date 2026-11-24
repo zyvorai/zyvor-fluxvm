@@ -954,6 +954,23 @@ pub const CODES: &[MacCode] = &[
         signatures: &["mac_volume_not_found"],
     },
     MacCode {
+        code: "MAC_RM_FAILED",
+        status: None,
+        summary: "`mac rm` could not remove one or more of the instances (or volumes with `-v`) you named.",
+        causes: &[
+            "the name does not exist (a typo, or it was already removed)",
+            "the daemon refused to delete the VM, or the volume folder could not be deleted",
+        ],
+        fixes: &[
+            "see what is left: `fluxctl mac ps -a`",
+            "ignore names that are already gone: `fluxctl mac rm -f NAME...`",
+            "retry only the ones that failed; the reason for each was printed above this message",
+            "for a volume: `fluxctl mac volume ls`, then `fluxctl mac volume rm NAME`",
+        ],
+        aliases: &["rm-failed"],
+        signatures: &["could not remove:"],
+    },
+    MacCode {
         code: "MAC_VOLUME_IN_USE",
         status: Some(409),
         summary: "A volume cannot be removed while an instance still has it mounted (running or stopped).",

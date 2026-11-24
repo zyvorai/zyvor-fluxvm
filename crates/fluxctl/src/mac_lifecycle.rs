@@ -536,14 +536,22 @@ fn spec_from(
 ) -> Result<LaunchSpec> {
     let cwd = std::env::current_dir().context("current directory")?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let name = name.unwrap_or_else(crate::mac_cmd::random_name);
+    let token = uuid::Uuid::new_v4().to_string();
+    let mut labels: Vec<(String, String)> = opts
+        .label
+        .iter()
+        .map(|l| crate::mac_instance::parse_label(l))
+        .collect::<Result<_>>()?;
+    labels.push((crate::mac_volume::INSTANCE_ID_LABEL.into(), token.clone()));
     Ok(LaunchSpec {
-        name: name.unwrap_or_else(crate::mac_cmd::random_name),
+        name: name.clone(),
         image: image.to_string(),
         publish,
         mounts: opts
             .volume
             .iter()
-            .map(|v| crate::mac_volume::parse_mount_default(v, &cwd, home.as_deref()))
+            .map(|v| crate::mac_volume::parse_mount_default(v, &cwd, home.as_deref(), Some(&token)))
             .collect::<Result<_>>()?,
         cpus: opts.cpus,
         memory_mib: opts
@@ -551,11 +559,7 @@ fn spec_from(
             .as_deref()
             .map(crate::mac_config::parse_memory_mib)
             .transpose()?,
-        labels: opts
-            .label
-            .iter()
-            .map(|l| crate::mac_instance::parse_label(l))
-            .collect::<Result<_>>()?,
+        labels,
         restart: Some(Restart::parse(&opts.restart)?),
         project: None,
         healthcheck: health,

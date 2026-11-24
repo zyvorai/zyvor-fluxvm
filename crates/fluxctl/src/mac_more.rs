@@ -239,6 +239,9 @@ fields: Name, CPUPerc, CPUPercent, MemUsage, MemBytes, DiskRead, DiskWrite, Disk
     Stop {
         #[arg(required = true)]
         names: Vec<String>,
+        /// Docker's grace period in seconds. Accepted so Docker scripts run; see the note printed when it is used.
+        #[arg(short = 't', long = "time", value_name = "SECONDS")]
+        time: Option<u64>,
     },
     /// Start stopped instances. Needs a free slot: a Mac runs at most 2 macOS VMs.
     Start {
@@ -249,6 +252,9 @@ fields: Name, CPUPerc, CPUPercent, MemUsage, MemBytes, DiskRead, DiskWrite, Disk
     Restart {
         #[arg(required = true)]
         names: Vec<String>,
+        /// Docker's grace period in seconds. Accepted so Docker scripts run; see the note printed when it is used.
+        #[arg(short = 't', long = "time", value_name = "SECONDS")]
+        time: Option<u64>,
     },
     /// Freeze a running instance's vCPUs (the VM keeps its memory and its macOS slot).
     Pause {
@@ -620,6 +626,17 @@ async fn lifecycle(
         failures.join(", ")
     );
     Ok(())
+}
+
+/// `-t SECONDS` on stop/restart: the daemon stops a VM in one step and has no grace period to set, so say so once and go on.
+fn grace_note(time: Option<u64>) {
+    if let Some(t) = time {
+        eprintln!(
+            "note: -t {t} is accepted but has no effect: a macOS VM is stopped in one step (a guest shutdown, then power off), \
+             so there is no grace period to set. To shut the guest down cleanly yourself first: \
+             `fluxctl mac exec NAME -- sudo shutdown -h now`."
+        );
+    }
 }
 
 /// The refusals of `mac logs --since` and `-t` without `-f`: the console log has no per-line times to use.
@@ -1004,7 +1021,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
                 print!("{table}");
             }
         }
-        MacMore::Stop { names } => {
+        MacMore::Stop { names, time } => {
+            grace_note(time);
             lifecycle(r, &names, "stop", "stop", async |r, id, _| {
                 set_label(r, id, STOPPED_LABEL, Some("true")).await
             })
@@ -1016,7 +1034,8 @@ pub async fn run_daemon(r: &crate::remote::Remote, cmd: MacMore) -> Result<()> {
             })
             .await?
         }
-        MacMore::Restart { names } => {
+        MacMore::Restart { names, time } => {
+            grace_note(time);
             lifecycle(r, &names, "restart", "restart", async |r, id, vm| {
                 crate::mac_lifecycle::after_start(r, id, vm).await
             })
@@ -1377,10 +1396,27 @@ mod tests {
     }
 
     #[test]
+    fn docker_style_flags_on_stop_restart_and_rm_parse() {
+        use crate::mac_cmd::MacCommand as C;
+        assert!(matches!(
+            parse(&["stop", "-t", "5", "a"]),
+            C::More(MacMore::Stop { time: Some(5), .. })
+        ));
+        assert!(matches!(
+            parse(&["restart", "--time", "0", "a"]),
+            C::More(MacMore::Restart { time: Some(0), .. })
+        ));
+        assert!(
+            matches!(parse(&["rm", "-f", "-v", "a", "b"]), C::Rm { names, force: true, volumes: true } if names == ["a", "b"])
+        );
+        assert!(T::try_parse_from(["t", "rm"]).is_err());
+    }
+
+    #[test]
     fn instance_verbs_parse() {
         use crate::mac_cmd::MacCommand as C;
         assert!(
-            matches!(parse(&["stop", "a", "b"]), C::More(MacMore::Stop { names }) if names.len() == 2)
+            matches!(parse(&["stop", "a", "b"]), C::More(MacMore::Stop { names, .. }) if names.len() == 2)
         );
         assert!(matches!(
             parse(&["logs", "-f", "--tail", "5", "a"]),

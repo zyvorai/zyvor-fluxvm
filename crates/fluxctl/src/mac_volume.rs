@@ -285,6 +285,12 @@ pub fn render_ls(vols: &[Volume], used: &BTreeMap<String, Vec<String>>) -> Strin
     out
 }
 
+/// The volume label that holds the token of the instance whose `-v NAME:/path` made the volume.
+pub const CREATED_BY: &str = "fluxvm.created-by";
+/// The instance label that holds that instance's unique token (a fresh random id per launch, never reused with a name). A volume's
+/// [`CREATED_BY`] holds the token, so a later instance with the same name does not own an earlier one's volume.
+pub const INSTANCE_ID_LABEL: &str = "fluxvm.instance-id";
+
 /// A `-v` host part that is a volume name: the guest path and mode follow. `parse_mount` does the rest, with a placeholder host.
 /// The volume is created when it is new (Docker does the same). Anything that is not a bare name is a path and goes to
 /// [`crate::mac_instance::parse_mount`] unchanged.
@@ -293,12 +299,19 @@ pub fn parse_mount_named(
     cwd: &Path,
     home: Option<&Path>,
     store: &VolumeStore,
+    creator: Option<&str>,
 ) -> Result<crate::mac_instance::Mount> {
     if let Some((name, rest)) = s.split_once(':')
         && valid_name(name)
     {
         let mut m = crate::mac_instance::parse_mount(&format!("/volume:{rest}"), cwd, home)?;
-        let (v, _) = store.create(name, BTreeMap::new())?;
+        // A volume this very command makes is recorded as made by the instance, so `mac rm -v` may delete it with that
+        // instance; one that already existed is never claimed.
+        let mut labels = BTreeMap::new();
+        if let Some(c) = creator {
+            labels.insert(CREATED_BY.to_string(), c.to_string());
+        }
+        let (v, _) = store.create(name, labels)?;
         m.host = v.data;
         return Ok(m);
     }
@@ -310,11 +323,12 @@ pub fn parse_mount_default(
     s: &str,
     cwd: &Path,
     home: Option<&Path>,
+    creator: Option<&str>,
 ) -> Result<crate::mac_instance::Mount> {
     // A path form never touches the volume store, so a Mac without HOME-based state still parses `-v ./src:/src`.
     match s.split_once(':') {
         Some((name, _)) if valid_name(name) => {
-            parse_mount_named(s, cwd, home, &VolumeStore::open_default()?)
+            parse_mount_named(s, cwd, home, &VolumeStore::open_default()?, creator)
         }
         _ => crate::mac_instance::parse_mount(s, cwd, home),
     }
@@ -405,14 +419,34 @@ mod tests {
     fn dash_v_with_a_name_makes_the_volume_and_a_path_is_untouched() {
         let (_d, s) = store();
         let cwd = Path::new("/work");
-        let m = parse_mount_named("cache:/var/cache:ro", cwd, None, &s).unwrap();
+        let m = parse_mount_named("cache:/var/cache:ro", cwd, None, &s, None).unwrap();
         assert_eq!(m.host, s.data_path("cache"));
         assert_eq!(m.guest, "/var/cache");
         assert!(m.read_only && m.host.is_dir());
-        let p = parse_mount_named("./src:/src", cwd, None, &s).unwrap();
+        let p = parse_mount_named("./src:/src", cwd, None, &s, None).unwrap();
         assert_eq!(p.host, PathBuf::from("/work/./src"));
         assert!(s.get("src").unwrap().is_none());
-        assert!(parse_mount_named("cache:rel", cwd, None, &s).is_err());
+        assert!(parse_mount_named("cache:rel", cwd, None, &s, None).is_err());
+    }
+
+    #[test]
+    fn only_a_volume_made_by_the_command_is_labelled_with_its_creator() {
+        let (_d, s) = store();
+        let cwd = Path::new("/work");
+        parse_mount_named("fresh:/a", cwd, None, &s, Some("web")).unwrap();
+        s.create("old", BTreeMap::new()).unwrap();
+        parse_mount_named("old:/b", cwd, None, &s, Some("web")).unwrap();
+        assert_eq!(
+            s.get("fresh")
+                .unwrap()
+                .unwrap()
+                .meta
+                .labels
+                .get(CREATED_BY)
+                .map(String::as_str),
+            Some("web")
+        );
+        assert!(s.get("old").unwrap().unwrap().meta.labels.is_empty());
     }
 
     #[test]
