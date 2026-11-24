@@ -82,7 +82,7 @@ fn home() -> Result<PathBuf> {
         .context("HOME is not set")
 }
 
-fn domain() -> String {
+pub(crate) fn domain() -> String {
     // SAFETY: getuid has no preconditions and cannot fail.
     format!("gui/{}", unsafe { libc::getuid() })
 }
