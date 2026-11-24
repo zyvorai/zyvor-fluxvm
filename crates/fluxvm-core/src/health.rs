@@ -865,6 +865,18 @@ pub const CODES: &[HealthCode] = &[
         ]
     ),
     hc!(
+        "KUBE_OP_BUSY",
+        "The cluster is already busy with an upgrade or a node change, so a second one was not started.",
+        [
+            "an upgrade or node add started from Studio or a terminal is still running",
+            "a previous one was interrupted and its k3s processes are still working"
+        ],
+        [
+            "wait for it to finish: Studio shows its progress, or `fluxctl cluster status`",
+            "then repeat the action"
+        ]
+    ),
+    hc!(
         "DOCKER_SOCKET_DOWN",
         "The Docker-compatible socket does not answer.",
         [
@@ -2381,6 +2393,7 @@ mod tests {
             "KUBE_CERT_PROBLEM",
             "KUBE_UPGRADE_REFUSED",
             "KUBE_NODE_UNSUPPORTED",
+            "KUBE_OP_BUSY",
             "DOCKER_SOCKET_DOWN",
             "SCHEDULER_NOT_ANSWERING",
         ] {

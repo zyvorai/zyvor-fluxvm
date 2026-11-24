@@ -8,6 +8,7 @@ import type { Notify } from '../App';
 import { CopyCmd } from './Images';
 import { MacHomeCard } from './Mac';
 import { BackupsCard } from './Backups';
+import { KubeOpsCard } from './KubeOps';
 import { useAct } from '../lib/act';
 import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle, previewLines, previewSummary, previewSupportBundle, type BundlePreview } from '../lib/bundle';
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
@@ -263,6 +264,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       </div>
       <MacHomeCard notify={notify} />
       <BackupsCard notify={notify} />
+      <KubeOpsCard notify={notify} />
       <div className="fx-section"><CheckMySetup notify={notify} /></div>
       <div className="fx-section"><SelfTestCard notify={notify} /></div>
       <div className="fx-section"><UpdatesCard notify={notify} /></div>
