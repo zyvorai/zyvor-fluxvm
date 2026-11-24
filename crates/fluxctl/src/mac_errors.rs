@@ -1407,6 +1407,122 @@ pub const CODES: &[MacCode] = &[
         aliases: &["ttl-remove-failed"],
         signatures: &["reached its time limit but could not be removed"],
     },
+    MacCode {
+        code: "MAC_BACKUP_NO_ROOM",
+        status: None,
+        summary: "Not enough free disk to take (or restore) the backup safely.",
+        causes: &[
+            "a backup needs its data's size plus 2 GiB left free so macOS itself never runs out of room",
+            "the Mac's internal disk is nearly full",
+        ],
+        fixes: &[
+            "see what uses the disk: `fluxctl mac system df`",
+            "free room: `fluxctl mac system prune --dry-run`, then without `--dry-run`; or remove an old backup: `fluxctl mac backup rm ID`",
+            "keep backups on a bigger disk: `export FLUXVM_MAC_BACKUPS=/Volumes/Big/fluxvm-backups`",
+        ],
+        aliases: &["backup-no-room"],
+        signatures: &["mac_backup_no_room"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_CHECKSUM",
+        status: None,
+        summary: "A backup's archive does not match its checksum, so it was not used.",
+        causes: &[
+            "the archive was damaged, truncated or changed after it was written",
+            "the disk holding the backups has a fault",
+        ],
+        fixes: &[
+            "nothing was restored; try an older backup: `fluxctl mac backup ls`",
+            "check all of them: `fluxctl mac backup verify --all`",
+            "delete the bad one: `fluxctl mac backup rm ID`, and take a new backup",
+        ],
+        aliases: &["backup-checksum"],
+        signatures: &["mac_backup_checksum"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_NOT_FOUND",
+        status: None,
+        summary: "There is no usable backup with that id or name.",
+        causes: &[
+            "the id is misspelled, the backup was removed by `--keep`, or it is still being written or failed",
+            "a name matches both an instance and a volume",
+        ],
+        fixes: &[
+            "list them: `fluxctl mac backup ls`",
+            "say which: `instance:NAME` or `volume:NAME`, or use the id",
+        ],
+        aliases: &["backup-not-found"],
+        signatures: &["mac_backup_not_found"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_EXISTS",
+        status: None,
+        summary: "An instance or volume with that name already exists, and a restore never overwrites quietly.",
+        causes: &["restoring would replace what is there now"],
+        fixes: &[
+            "restore under another name: `fluxctl mac backup restore BACKUP --as NEW-NAME`",
+            "or replace it: `fluxctl mac backup restore BACKUP --replace` (the current state is saved as an automatic backup first; an instance must be stopped, a volume unused)",
+        ],
+        aliases: &["backup-exists"],
+        signatures: &["mac_backup_exists"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_RUNNING",
+        status: None,
+        summary: "A running instance cannot be backed up: its disk is changing.",
+        causes: &["a copy of a disk the guest is writing to may not boot"],
+        fixes: &[
+            "stop it, back it up, start it again: `fluxctl mac stop NAME && fluxctl mac backup create NAME && fluxctl mac start NAME`",
+            "or take a checkpoint of a running instance: `fluxctl mac checkpoint NAME`",
+        ],
+        aliases: &["backup-running"],
+        signatures: &["mac_backup_running"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_SCHEDULE",
+        status: None,
+        summary: "The backup schedule is not valid.",
+        causes: &[
+            "the interval must be a number and a unit (30m, 24h, 7d) between 5 minutes and 90 days",
+            "--keep must be between 1 and 1000",
+        ],
+        fixes: &[
+            "example: `fluxctl mac backup schedule ci --every 24h --keep 7`",
+            "see the current ones: `fluxctl mac backup schedule`",
+        ],
+        aliases: &["backup-schedule"],
+        signatures: &["mac_backup_schedule"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_IO",
+        status: None,
+        summary: "FluxVM could not write or read the backups folder.",
+        causes: &[
+            "the disk is full or read-only",
+            "the folder (default `~/.fluxvm/mac-backups`) is not writable by this user",
+        ],
+        fixes: &[
+            "check free space: `fluxctl mac system df`",
+            "or keep backups elsewhere: `export FLUXVM_MAC_BACKUPS=/Volumes/Big/fluxvm-backups`",
+        ],
+        aliases: &["backup-io"],
+        signatures: &["mac_backup_io"],
+    },
+    MacCode {
+        code: "MAC_BACKUP_SOURCE",
+        status: None,
+        summary: "The files to back up are not on this Mac.",
+        causes: &[
+            "`fluxctl mac backup` reads the instance's disk files, so it must run on the Mac whose daemon owns the instance",
+            "the instance or volume was removed, or has not finished being created",
+        ],
+        fixes: &[
+            "run it on that Mac, or point --server at the daemon that runs on this one",
+            "check the name: `fluxctl mac ps -a`, `fluxctl mac volume ls`",
+        ],
+        aliases: &["backup-source"],
+        signatures: &["mac_backup_source"],
+    },
 ];
 
 fn norm(s: &str) -> String {

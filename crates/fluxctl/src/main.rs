@@ -101,6 +101,7 @@ mod kube_tls;
 mod kube_trim;
 mod kube_upgrade;
 mod launch_agent;
+mod mac_backup;
 mod mac_build;
 mod mac_build_exec;
 mod mac_cache;
@@ -7557,6 +7558,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             }
             #[cfg(target_os = "macos")]
             api::self_control::spawn(m.clone(), &cfg.state_dir);
+            api::spawn_mac_backup_scheduler(m.clone());
             fluxvm_scheduler::backup_verify::spawn(
                 cfg.state_dir.clone(),
                 cfg.qemu_img_binary.clone(),

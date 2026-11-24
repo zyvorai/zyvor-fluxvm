@@ -234,6 +234,9 @@ pub enum MacCommand {
     /// `volume` and `network`: Docker resource parity.
     #[command(flatten)]
     Res(crate::mac_res::MacRes),
+    /// `backup create|ls|restore|rm|verify|schedule`: backups of instances and named volumes.
+    #[command(flatten)]
+    Backup(crate::mac_backup::MacBackup),
 }
 
 impl MacCommand {
@@ -248,6 +251,7 @@ impl MacCommand {
             }
             Self::Life(l) => l.is_client_side(),
             Self::Imgx(i) => i.is_client_side(),
+            Self::Backup(b) => b.is_client_side(),
             Self::Ckpt(_) => false,
             Self::Ps { opts, .. } => opts.fleet.is_some(),
             Self::More(m) => m.is_client_side(),
@@ -553,6 +557,7 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
         MacCommand::Dp(d) => crate::mac_dp::run_daemon(r, d).await,
         MacCommand::Life(l) => crate::mac_lifecycle::run_daemon(r, l).await,
         MacCommand::Imgx(i) => crate::mac_imgx::run_daemon(r, i).await,
+        MacCommand::Backup(b) => crate::mac_backup::run_daemon(r, b).await,
         MacCommand::Ckpt(c) => crate::mac_checkpoint::run_daemon(r, c).await,
         MacCommand::Ops(o) => crate::mac_ops::run_daemon(r, o).await,
         MacCommand::Sched(s) => crate::mac_sched::run_daemon(r, s).await,
@@ -969,6 +974,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         }
         MacCommand::Life(l) => return l.run_client(),
         MacCommand::Imgx(i) => return crate::mac_imgx::run_client(i).await,
+        MacCommand::Backup(b) => return crate::mac_backup::run_client(b),
         c => c,
     };
     match command {
@@ -1140,6 +1146,7 @@ pub async fn run(command: MacCommand) -> Result<()> {
         | MacCommand::Dp(_)
         | MacCommand::Life(_)
         | MacCommand::Imgx(_)
+        | MacCommand::Backup(_)
         | MacCommand::Ckpt(_)
         | MacCommand::Res(_)
         | MacCommand::Ops(_)

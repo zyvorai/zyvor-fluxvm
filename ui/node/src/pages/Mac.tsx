@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react';
 import { Copy, Play, RotateCw, ScrollText, Search, Skull, Square, Trash2 } from 'lucide-react';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
+import { BackupsCard } from './MacBackups';
 import { MacSchedules } from './MacSchedules';
 import { navigate, Button, Card, EmptyState, Field, Hero, Pill, Skeleton, Tabs, api, usePoll } from '@fluxvm/ui-core';
 import { copyFor, lightWord, tone, type ClusterHealth } from '../lib/health';
@@ -196,6 +197,7 @@ export function MacPage({ notify }: { notify: Notify }) {
       ) : (
         <>
           <HostHealth notify={notify} />
+          <BackupsCard notify={notify} />
           {!d.supported ? <Card title="Not a Mac"><p className="fx-muted">{UNSUPPORTED_NOTE}</p></Card> : null}
           <Tabs value={tab} onChange={setTab} tabs={[
             { value: 'instances', label: `Instances · ${d.instances.length}` },

@@ -616,6 +616,32 @@ fluxctl mac diff ci warm [OTHER]            # how much of the disk differs from 
 - `mac build` still refuses `SNAPSHOT`: a saved running state is bound to this Mac and its macOS build and cannot move to
   another one.
 
+## Backups: instances and named volumes
+
+`fluxctl mac backup create NAME` writes a compressed archive and a manifest (sha256, size, what was captured) of a **stopped** instance, or of a named volume with `--volume`, into `~/.fluxvm/mac-backups` (`FLUXVM_MAC_BACKUPS` moves it). A checkpoint is the fast, same-disk way back; a backup is a file you can move, verify and keep.
+
+```
+fluxctl mac stop ci && fluxctl mac backup create ci          # --keep N (default 7) deletes the oldest ordinary ones afterwards
+fluxctl mac backup create --volume build-cache
+fluxctl mac backup ls                                        # size, age, state, free room, schedules (--json)
+fluxctl mac backup verify --all                              # re-read every archive against its sha256, no daemon needed
+fluxctl mac backup restore ci                                # newest backup of ci; refuses if an instance ci exists
+fluxctl mac backup restore ci --replace                      # saves the current ci as an automatic backup first
+fluxctl mac backup restore INSTANCE-CI-ID --as ci-copy
+fluxctl mac backup schedule ci --every 24h --keep 7          # --off to stop; no NAME lists them
+fluxctl mac backup rm ID
+```
+
+- **Captured:** the instance's disk and macOS hardware identity (`disk.raw`, `hardware.bin`, `auxiliary.bin`), its labels (so the restart policy), CPUs, memory and published ports; for a volume, its files (permissions and symlinks kept) and labels. Everything inside the guest's disk goes with it, including keychain items you stored there.
+- **Never captured:** FluxVM secret values, registry logins, a running guest's memory; labels whose name looks like a secret are left out. A volume's extended attributes and ACLs are not kept. Every manifest and the `create` output list this.
+- **Disk safety:** a Mac's internal disk is often nearly full. Before writing, the data's allocated size plus 2 GiB must be free; otherwise nothing is written and the message gives the amount needed and what to do (`MAC_BACKUP_NO_ROOM`). Compression usually makes the archive smaller than the estimate, and a sparse disk is archived at its full size, so a large disk takes a while.
+- **Restore:** the checksum is verified first (nothing is touched on a mismatch). An existing instance or volume of that name is never overwritten without `--replace`; with it, what is there is first backed up as an `automatic` backup (the newest 3 per instance or volume are kept, apart from `--keep`), because deleting an instance also deletes its own checkpoints. The replaced instance must be stopped and the volume unused. A restored instance is created **stopped** (`mac start NAME`), with a hidden image in the local store like `mac fork`.
+- **Schedule:** the daemon checks `schedule.json` every minute and takes what is due; `fluxctl mac backup run-due` does the same from cron. An instance that is running when its time comes is skipped until the next interval. Intervals are `30m`, `24h`, `7d` (5 minutes to 90 days).
+- **Studio:** the Mac page has a Backups card (back up now, schedule, verify, details, delete, free room, Copy as fluxctl). The API is `GET|POST /v1/mac/backups`, `POST /v1/mac/backups/{id}/verify`, `DELETE /v1/mac/backups/{id}`, `POST /v1/mac/backup-schedules` (admin). Restoring stays a copied terminal command.
+- **Explain codes:** `MAC_BACKUP_NO_ROOM`, `MAC_BACKUP_CHECKSUM`, `MAC_BACKUP_NOT_FOUND`, `MAC_BACKUP_EXISTS`, `MAC_BACKUP_RUNNING`, `MAC_BACKUP_SCHEDULE`, `MAC_BACKUP_IO`, `MAC_BACKUP_SOURCE`.
+
+Not run against a real Mac or macOS VM: the archive, checksum, retention, schedule and restore logic is unit-tested with temporary folders and a fake daemon.
+
 ## Preflight: `fluxctl mac doctor [--json]`
 
 Read-only checks of the limits listed under "Hard limits", so they fail early with a fix instead of late with a 409, a 503 or a
