@@ -44,46 +44,14 @@ pub struct UpgradeArgs {
     pub json: bool,
 }
 
-pub fn platform_tag(os: &str, arch: &str) -> Option<&'static str> {
-    match (os, arch) {
-        ("macos", "aarch64") => Some("macos-arm64"),
-        ("linux", "x86_64") => Some("linux-x86_64"),
-        ("linux", "aarch64") => Some("linux-aarch64"),
-        _ => None,
-    }
-}
+use fluxvm_api::release_check::{self, ReleaseStatus, State};
+pub use fluxvm_api::release_check::{compare, platform_tag, valid_version};
 
 /// `https://…/releases/tag/v0.4.22` (or a bare tag) to `0.4.22`.
 pub fn version_from_url(url: &str) -> Option<String> {
     let last = url.trim_end_matches('/').rsplit('/').next()?;
     let v = last.strip_prefix('v').unwrap_or(last);
     valid_version(v).then(|| v.to_owned())
-}
-
-pub fn valid_version(v: &str) -> bool {
-    !v.is_empty()
-        && v.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-        && v.chars().next().is_some_and(|c| c.is_ascii_digit())
-}
-
-fn parts(v: &str) -> ([u64; 3], bool) {
-    let (core, pre) = match v.split_once('-') {
-        Some((c, _)) => (c, true),
-        None => (v, false),
-    };
-    let mut n = [0u64; 3];
-    for (i, p) in core.split('.').take(3).enumerate() {
-        n[i] = p.parse().unwrap_or(0);
-    }
-    (n, pre)
-}
-
-/// `Greater` when `a` is newer than `b`; a pre-release is older than its release.
-pub fn compare(a: &str, b: &str) -> std::cmp::Ordering {
-    let (na, pa) = parts(a);
-    let (nb, pb) = parts(b);
-    na.cmp(&nb).then(pb.cmp(&pa))
 }
 
 /// The SHA-256 a checksum file names for `asset`: the first word of a bare file, or of the line that names the asset.
@@ -264,6 +232,75 @@ fn confirm(question: &str) -> bool {
         && matches!(l.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+/// The latest release as a status: from the release list when the source has one, else from `<base>/latest`.
+async fn latest_status(
+    base: &str,
+    current: &str,
+    platform: Option<&'static str>,
+    check_only: bool,
+) -> Result<ReleaseStatus> {
+    if release_check::list_url(base).is_some() {
+        return Ok(release_check::check(base, current).await);
+    }
+    match latest(base).await {
+        Ok(t) => {
+            let name = format!("fluxvm-{t}-{}.tar.gz", platform.unwrap_or("unknown"));
+            let asset = |n: String| release_check::Asset {
+                browser_download_url: format!("{base}/download/v{t}/{n}"),
+                name: n,
+            };
+            let rel = release_check::Release {
+                tag_name: format!("v{t}"),
+                draft: false,
+                prerelease: false,
+                assets: vec![asset(name.clone()), asset(format!("{name}.sha256"))],
+            };
+            Ok(release_check::assess(&[rel], current, platform, base))
+        }
+        Err(e) if check_only => Ok(release_check::unreachable(
+            current,
+            base,
+            platform,
+            e.to_string().lines().next().unwrap_or(""),
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Prints what `--check` / `--json` / "nothing to install" calls for. `Some(result)` means the command is finished.
+fn emit_status(
+    a: &UpgradeArgs,
+    st: &ReleaseStatus,
+    from: &str,
+    exe: &Path,
+) -> Result<Option<Result<()>>> {
+    if a.json {
+        let mut v = serde_json::to_value(st)?;
+        v["source_from"] = from.into();
+        v["binary"] = exe.display().to_string().into();
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    }
+    let installable = matches!(st.state, State::UpToDate | State::UpdateAvailable);
+    if a.check {
+        if !a.json {
+            println!("{}", st.line);
+        }
+        return Ok(Some(Ok(())));
+    }
+    if installable {
+        return Ok(None);
+    }
+    if a.json {
+        return Ok(Some(Ok(())));
+    }
+    let text = release_check::explain(st).join("\n");
+    if st.state == State::Unreachable {
+        return Err(coded(text, "UPGRADE_NO_CHANNEL"));
+    }
+    println!("{text}");
+    Ok(Some(Ok(())))
+}
+
 pub async fn run(a: &UpgradeArgs, config: Option<&Path>) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let (base, from) = if let Some(u) = &a.url {
@@ -284,13 +321,11 @@ pub async fn run(a: &UpgradeArgs, config: Option<&Path>) -> Result<()> {
     {
         bail!("{v:?} is not a version (for example 0.4.22)");
     }
-    let target = match &explicit {
-        Some(v) => v.clone(),
-        None => latest(&base).await?,
-    };
-    let newer = compare(&target, current).is_gt();
-    let same = target == current;
-    let platform = platform_tag(std::env::consts::OS, std::env::consts::ARCH).ok_or_else(|| {
+    let platform = platform_tag(std::env::consts::OS, std::env::consts::ARCH);
+    let exe = std::env::current_exe()?
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("fluxctl"));
+    let no_platform = || {
         coded(
             format!(
                 "no release package is published for {} {}",
@@ -299,35 +334,63 @@ pub async fn run(a: &UpgradeArgs, config: Option<&Path>) -> Result<()> {
             ),
             "UPGRADE_NO_CHANNEL",
         )
-    })?;
-    let asset = format!("fluxvm-{target}-{platform}.tar.gz");
-    let asset_url = format!("{base}/download/v{target}/{asset}");
-    let exe = std::env::current_exe()?
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from("fluxctl"));
+    };
 
-    if a.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "current": current, "latest": target, "update_available": newer, "source": base, "source_from": from,
-                "package": asset_url, "checksum": format!("{asset_url}.sha256"), "binary": exe,
-            }))?
-        );
-        if a.check {
-            return Ok(());
+    // Which release, and where its package and checksum are. `--to VERSION` uses the install.sh address convention; the
+    // latest comes from the release list (GitHub API) or, for a mirror without one, the `<base>/latest` redirect.
+    let (target, tag, asset_url, sum_url, status) = match &explicit {
+        Some(v) => {
+            let platform = platform.ok_or_else(no_platform)?;
+            let url = format!("{base}/download/v{v}/fluxvm-{v}-{platform}.tar.gz");
+            (
+                v.clone(),
+                format!("v{v}"),
+                url.clone(),
+                format!("{url}.sha256"),
+                None,
+            )
         }
-    } else {
+        None => {
+            let st = latest_status(&base, current, platform, a.check).await?;
+            if let Some(code) = emit_status(a, &st, from, &exe)? {
+                return code;
+            }
+            let t = st.latest.clone().unwrap_or_default();
+            (
+                t,
+                st.tag.clone().unwrap_or_default(),
+                st.package.clone().unwrap_or_default(),
+                st.checksum.clone().unwrap_or_default(),
+                Some(st),
+            )
+        }
+    };
+    let newer = compare(&target, current).is_gt();
+    let same = target == current;
+    let platform = platform.ok_or_else(no_platform)?;
+    let asset = asset_url.rsplit('/').next().unwrap_or("").to_owned();
+
+    if status.is_none() {
+        if a.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "current": current, "latest": target, "update_available": newer, "source": base, "source_from": from,
+                    "package": asset_url, "checksum": sum_url, "binary": exe,
+                }))?
+            );
+            if a.check {
+                return Ok(());
+            }
+        } else {
+            println!("release source: {base} ({from})");
+            println!("this fluxctl:   {current}  ({})", exe.display());
+            println!("requested      :  {target}");
+        }
+    } else if !a.json {
         println!("release source: {base} ({from})");
         println!("this fluxctl:   {current}  ({})", exe.display());
-        println!(
-            "{}:  {target}",
-            if explicit.is_some() {
-                "requested     "
-            } else {
-                "latest        "
-            }
-        );
+        println!("latest        :  {target}  ({tag})");
     }
     if same || (explicit.is_none() && !newer) {
         if !a.json {
@@ -342,12 +405,12 @@ pub async fn run(a: &UpgradeArgs, config: Option<&Path>) -> Result<()> {
             if newer { "Upgrade" } else { "Change" }
         );
         println!("  download   {asset_url}");
-        println!("  verify     SHA-256 from {asset_url}.sha256 (refuses if missing or different)");
+        println!("  verify     SHA-256 from {sum_url} (refuses if missing or different)");
         println!(
             "  replace    {} (the old one is kept as fluxctl.previous)",
             exe.display()
         );
-        println!("  notes      {base}/tag/v{target}");
+        println!("  notes      {base}/tag/{tag}");
         println!("  This does not touch the daemon, your config or your VMs.");
     }
     if a.check {
@@ -375,7 +438,7 @@ pub async fn run(a: &UpgradeArgs, config: Option<&Path>) -> Result<()> {
             .await
             .map_err(|e| coded(format!("could not download {asset_url}: {e}"), "UPGRADE_NO_CHANNEL"))?
             .ok_or_else(|| coded(format!("{asset_url} does not exist (no package for {platform} in v{target}?)"), "UPGRADE_NO_CHANNEL"))?;
-        let sums = fetch(&format!("{asset_url}.sha256"))
+        let sums = fetch(&sum_url)
             .await
             .map_err(|e| coded(format!("could not download the checksum: {e}"), "UPGRADE_NO_CHANNEL"))?
             .map(|b| String::from_utf8_lossy(&b).into_owned());
