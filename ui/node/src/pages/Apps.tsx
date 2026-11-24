@@ -13,7 +13,7 @@ import { PodWindow, type PodTab } from './PodWindow';
 export function AppsPage({ notify }: { notify: Notify }) {
   const clusters = usePoll(async () => (await api.get<{ items: KubeClusterItem[] }>('/v1/kube')).items ?? [], 8000);
   const items = clusters.data ?? [];
-  const [picked, setPicked] = useState('');
+  const [picked, setPicked] = useState(() => new URLSearchParams(location.hash.split('?')[1] ?? '').get('cluster') ?? '');
   const current = items.find((c) => c.name === picked)?.name ?? items[0]?.name ?? '';
   const poll = usePoll(async () => (current ? await api.get<Apps>(appsPath(current)) : null), 4000, [current]);
   const [form, setForm] = useState<RunForm>(emptyRunForm);

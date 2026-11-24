@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Archive, BookOpen, Layers, Bot, BarChart3, Boxes, Container, Cpu, Disc3, GitBranch, HardDrive, Home, LayoutDashboard, LogOut, Moon, Network, Laptop, Package, Rocket, ScrollText, Server } from 'lucide-react';
+import { Archive, BookOpen, Layers, Bot, BarChart3, Boxes, Container, Cpu, Disc3, GitBranch, HardDrive, Home, LayoutDashboard, LogOut, Network, Laptop, Package, Rocket, ScrollText, Server } from 'lucide-react';
 import {
-  CommandPalette, GlobalNav, LoginCard, Toasts, api, navigate, onUnauthorized, setToken, toggleTheme,
-  useCapabilities, useRoute, type Command, type NavGroup, type ToastItem, type Vm,
+  GlobalNav, LoginCard, Toasts, api, navigate, onUnauthorized, setToken, toggleTheme,
+  useCapabilities, useRoute, type NavGroup, type ToastItem, type Vm,
 } from '@fluxvm/ui-core';
 import { NAV } from './nav';
 import { Overview } from './pages/Overview';
@@ -29,6 +29,7 @@ import { KubernetesPage } from './pages/Kubernetes';
 import { TemplatesPage } from './pages/Templates';
 import { UsagePage } from './pages/Usage';
 import { CheatsheetPage } from './pages/Cheatsheet';
+import { GlobalSearch, useFocusFromRoute } from './pages/GlobalSearch';
 
 export type Notify = (text: string, tone?: 'ok' | 'bad') => void;
 
@@ -41,6 +42,7 @@ export function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [vms, setVms] = useState<Vm[]>([]);
   const caps = useCapabilities(auth === 'in');
+  useFocusFromRoute(route);
 
   const notify = useCallback<Notify>((text, tone = 'ok') => {
     const id = Date.now() + Math.random();
@@ -67,16 +69,6 @@ export function App() {
   }, []);
 
   const groups: NavGroup[] = useMemo(() => NAV.map((g) => ({ ...g, items: g.items.map((i) => ({ ...i, icon: icons[i.to] })) })), []);
-  const commands: Command[] = useMemo(
-    () => [
-      ...groups.flatMap((g) => g.items.map((i) => ({ id: 'nav' + i.to, label: `Go to ${i.label}`, group: 'Navigate', icon: i.icon, run: () => navigate(i.to) }))),
-      ...vms.slice(0, 200).map((v) => ({ id: 'vm' + v.id, label: v.name, group: 'Machines', hint: v.status, icon: <Server size={16} />, run: () => navigate('/machines?q=' + encodeURIComponent(v.name)) })),
-      { id: 'theme', label: 'Toggle light / dark theme', group: 'Appearance', icon: <Moon size={16} />, run: () => void toggleTheme() },
-      { id: 'out', label: 'Sign out', group: 'Session', icon: <LogOut size={16} />, run: () => (setToken(''), setAuth('out')) },
-    ],
-    [groups, vms],
-  );
-
   if (auth === 'checking') return null;
   if (auth === 'out')
     return (
@@ -101,7 +93,7 @@ export function App() {
         right={<button className="fx-icon-btn" aria-label="Sign out" onClick={() => (setToken(''), setAuth('out'))}><LogOut size={16} /></button>}
       />
       <main className="fx-page">{page}</main>
-      <CommandPalette open={palette} onClose={() => setPalette(false)} commands={commands} />
+      <GlobalSearch open={palette} onClose={() => setPalette(false)} vms={vms} groups={groups} onTheme={() => void toggleTheme()} onSignOut={() => (setToken(''), setAuth('out'))} />
       <Toasts items={toasts} />
     </>
   );

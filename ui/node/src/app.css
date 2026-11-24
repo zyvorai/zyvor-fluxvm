@@ -133,3 +133,10 @@
 .kx-tl-sleep::before { background: var(--accent-blue, var(--text-secondary)); }
 .kx-tl-label { color: var(--text-primary); font-size: 13px; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 .kx-tl-when { color: var(--text-secondary); font-size: 12px; }
+
+/* Global search: the row it just opened, and the command under the list. */
+.fx-search-hit { animation: fxSearchHit 2.4s ease-out; }
+@keyframes fxSearchHit { 0%, 60% { background: color-mix(in srgb, var(--apple-blue) 22%, transparent); } 100% { background: transparent; } }
+.fx-search-sub { display: block; font-size: 12px; margin-top: 2px; }
+.fx-search-foot { display: flex; align-items: center; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--hairline-1); color: var(--text-tertiary); font-size: 12px; }
+.fx-search-foot code { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
