@@ -13,6 +13,7 @@ import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle, prev
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
 import { checkTone, checkWord, needsAttention, notChecked, type SetupReport } from '../lib/doctor';
 import { UPGRADE_COMMAND, upgradeDetails, upgradeTone, upgradeWord, type UpgradeStatus } from '../lib/upgrade';
+import { SELF_TEST_COMMAND, SELF_TEST_FIX_COMMAND, explainCommand, selfTestTone, selfTestWord, todo, type SelfTestReport } from '../lib/selfTest';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
 function ItemRow({ i, notify }: { i: HealthItem; notify: Notify }) {
@@ -128,6 +129,45 @@ function CheckMySetup({ notify }: { notify: Notify }) {
   );
 }
 
+/** "Self-test": the smoke check of `fluxctl self-test`, run when the button is pressed. It changes nothing. */
+function SelfTestCard({ notify }: { notify: Notify }) {
+  const { busy, run } = useAct(notify);
+  const [r, setR] = useState<SelfTestReport | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const go = () => void run('self-test', async () => {
+    try {
+      setR(await api.post<SelfTestReport>('/v1/self-test', {}));
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  });
+  return (
+    <Card title="Self-test" action={<><CopyCmd notify={notify} cmd={SELF_TEST_COMMAND} /> <Button size="sm" onClick={go} busy={busy === 'self-test'}><ListChecks size={14} /> {r ? 'Run again' : 'Run'}</Button></>}>
+      {!r && !err ? <p className="fx-muted">A quick end-to-end check of this install: the daemon, the Docker socket, the VM backend, the cache folder, disk space, the scheduler and the service. It changes nothing. <code className="fx-mono">{SELF_TEST_FIX_COMMAND}</code> in a terminal applies the safe fixes.</p> : null}
+      {err ? <p className="fx-muted">Could not run the self-test: {err}. An older FluxVM daemon does not have it; run <code className="fx-mono">{SELF_TEST_COMMAND}</code> on the machine instead.</p> : null}
+      {r ? (
+        <>
+          <p><Pill tone={selfTestTone(r.status)}>{selfTestWord(r.status)}</Pill> {r.headline}</p>
+          <ul className="fx-feed">
+            {r.checks.map((c) => (
+              <li key={c.id}>
+                <Pill tone={selfTestTone(c.status)}>{selfTestWord(c.status)}</Pill>
+                <span>
+                  {c.name}: {c.detail}
+                  {c.what_to_do && (c.status === 'fail' || c.status === 'warn') ? <div className="fx-muted">What to do: {c.what_to_do}</div> : null}
+                  {explainCommand(c) ? <div className="fx-muted">More: <code className="fx-mono">{explainCommand(c)}</code></div> : null}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {todo(r).length ? <p className="fx-muted">Run <code className="fx-mono">{SELF_TEST_FIX_COMMAND}</code> in a terminal to apply the safe repairs, then run this again.</p> : null}
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
 /** "Updates": the status of `fluxctl upgrade --check`, read when the button is pressed (it asks the release list, installs nothing). */
 function UpdatesCard({ notify }: { notify: Notify }) {
   const { busy, run } = useAct(notify);
@@ -195,7 +235,8 @@ export function HomePage({ notify }: { notify: Notify }) {
         <Hero eyebrow="Home" title="Cluster health is not available" lede="This node did not answer the health request." />
         <EmptyState title="Could not read the health report" body={`${h.error?.message ?? 'No answer'}. An older FluxVM daemon does not have this page's data; run fluxctl cluster status on the machine instead.`} action={<Button onClick={() => void copy('fluxctl cluster status')}><Copy size={14} /> Copy as fluxctl</Button>} />
         <div className="fx-section"><CheckMySetup notify={notify} /></div>
-        <div className="fx-section"><UpdatesCard notify={notify} /></div>
+        <div className="fx-section"><SelfTestCard notify={notify} /></div>
+      <div className="fx-section"><UpdatesCard notify={notify} /></div>
         <div className="fx-section"><SupportBundle notify={notify} /></div>
       </>
     );
@@ -223,6 +264,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <MacHomeCard notify={notify} />
       <BackupsCard notify={notify} />
       <div className="fx-section"><CheckMySetup notify={notify} /></div>
+      <div className="fx-section"><SelfTestCard notify={notify} /></div>
       <div className="fx-section"><UpdatesCard notify={notify} /></div>
       <div className="fx-section"><SupportBundle notify={notify} /></div>
       <p className="fx-muted fx-section">This page shows the node you are connected to. For every Mac of a fleet, run <code className="fx-mono">fluxctl cluster status -f inventory.yaml</code>.</p>

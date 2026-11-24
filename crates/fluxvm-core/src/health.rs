@@ -864,6 +864,33 @@ pub const CODES: &[HealthCode] = &[
             "see the VMs: `fluxctl cluster status`"
         ]
     ),
+    hc!(
+        "DOCKER_SOCKET_DOWN",
+        "The Docker-compatible socket does not answer.",
+        [
+            "the daemon is not running, so the socket was never created",
+            "a stale socket file is left from a crashed daemon",
+            "the socket is switched off in the config"
+        ],
+        [
+            "start the daemon: `fluxctl fix` (macOS) or `sudo systemctl start fluxvm`",
+            "remove the stale file and restart the daemon",
+            "run `fluxctl self-test` to check again"
+        ]
+    ),
+    hc!(
+        "SCHEDULER_NOT_ANSWERING",
+        "The daemon is running but its VM list (the scheduler API) failed.",
+        [
+            "the daemon is still starting or is stuck",
+            "the request was refused because no or a wrong --server-token was given"
+        ],
+        [
+            "wait a few seconds and run `fluxctl self-test` again",
+            "restart the daemon",
+            "collect the log with `fluxctl support-bundle`"
+        ]
+    ),
 ];
 
 pub fn code(name: &str) -> Option<&'static HealthCode> {
@@ -2354,6 +2381,8 @@ mod tests {
             "KUBE_CERT_PROBLEM",
             "KUBE_UPGRADE_REFUSED",
             "KUBE_NODE_UNSUPPORTED",
+            "DOCKER_SOCKET_DOWN",
+            "SCHEDULER_NOT_ANSWERING",
         ] {
             seen.insert(extra.to_owned());
         }

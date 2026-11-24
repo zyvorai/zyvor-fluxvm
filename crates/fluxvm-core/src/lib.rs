@@ -35,6 +35,7 @@ pub mod policy;
 pub mod pressure_admission;
 pub mod process;
 pub mod security;
+pub mod self_test;
 pub mod setup_doctor;
 pub mod signing;
 pub mod spec_lint;
