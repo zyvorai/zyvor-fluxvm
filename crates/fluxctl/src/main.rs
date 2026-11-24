@@ -86,6 +86,7 @@ mod kube_logs;
 mod kube_mcp;
 mod kube_menubar;
 mod kube_names;
+mod kube_node_agent;
 mod kube_notify;
 mod kube_ops;
 mod kube_pin;
@@ -1067,6 +1068,12 @@ enum KubeAgentCommand {
     Uninstall,
     /// Whether it is installed and loaded, its pid and last exit code, as JSON.
     Status,
+    /// One LaunchAgent per worker VM that restarts just that worker when it stops, without the cluster supervisor. Opt-in;
+    /// it stands down while the supervisor runs, the cluster sleeps, or the Mac is locked.
+    Node {
+        #[command(subcommand)]
+        command: kube_node_agent::NodeAgentCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -9727,6 +9734,27 @@ async fn kube_command<A: run::VmApi>(api: &A, command: KubeCommand) -> Result<()
                     serde_json::to_string_pretty(&kube_host::agent_status()?)?
                 );
             }
+            KubeAgentCommand::Node { command } => match command {
+                kube_node_agent::NodeAgentCommand::Install(n) => {
+                    let plist = kube_node_agent::install(&n)?;
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok": true, "plist": plist, "label": n.label()})
+                    );
+                }
+                kube_node_agent::NodeAgentCommand::Uninstall(n) => println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "removed": kube_node_agent::uninstall(&n)?})
+                ),
+                kube_node_agent::NodeAgentCommand::Status(n) => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&kube_node_agent::status(&n)?)?
+                ),
+                kube_node_agent::NodeAgentCommand::Run { node, every } => {
+                    kube_node_agent::run(api, &node, std::time::Duration::from_secs(every.max(5)))
+                        .await?
+                }
+            },
         },
     }
     Ok(())

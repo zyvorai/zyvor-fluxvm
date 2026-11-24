@@ -313,7 +313,7 @@ pub(crate) fn mark_sleeping(o: &KubeOptions, on: bool) {
 }
 
 /// A `kube sleep` started less than five minutes ago and has not finished.
-fn sleep_in_progress(o: &KubeOptions) -> bool {
+pub(crate) fn sleep_in_progress(o: &KubeOptions) -> bool {
     std::fs::metadata(sleeping_marker(o))
         .and_then(|m| m.modified())
         .ok()
@@ -375,7 +375,7 @@ pub fn offline_path_ok(p: &Path) -> bool {
         })
 }
 
-fn worker_name(o: &KubeOptions, i: u8) -> String {
+pub(crate) fn worker_name(o: &KubeOptions, i: u8) -> String {
     format!("{}-w{i}", o.name)
 }
 
@@ -1996,7 +1996,7 @@ fn session_blocks_restore(s: fluxvm_core::login_session::LoginSession, told: &mu
     }
 }
 
-async fn restore_blocked(told: &mut bool) -> bool {
+pub(crate) async fn restore_blocked(told: &mut bool) -> bool {
     let s = tokio::task::spawn_blocking(fluxvm_core::login_session::LoginSession::current)
         .await
         .unwrap_or(fluxvm_core::login_session::LoginSession::Unknown);
