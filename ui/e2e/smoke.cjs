@@ -18,7 +18,7 @@ if (!PAGES || !base) {
 const widths = (rest.includes('--widths') ? rest[rest.indexOf('--widths') + 1] : '390,1280').split(',').map(Number);
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ ...(process.env.PW_CHROME ? { executablePath: process.env.PW_CHROME } : { channel: 'chrome' }), headless: true });
   const findings = [];
   let checked = 0;
   for (const theme of ['dark', 'light']) {

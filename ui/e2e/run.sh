@@ -4,12 +4,14 @@
 
 # Smoke-test the built UI against its mock API: ./run.sh node|fleet [--widths 390,1280]
 # ./run.sh vmtools drives a fleet VM's screen, snapshots and commands against the same mock.
-# Needs node, npm and Google Chrome (playwright-core drives the installed Chrome; no browser download).
+# ./run.sh studio checks Home (Self-test, cluster operations), Events, Audit, Usage, Mac, Apps and the Mac fleet against the node mock.
+# Needs node, npm and Google Chrome (playwright-core drives the installed Chrome; no browser download), or set PW_CHROME=/path/to/chrome.
 set -euo pipefail
 cd "$(dirname "$0")"
 APP="${1:?usage: run.sh node|fleet|vmtools}"; shift || true
 MOCK="$APP"; SCRIPT=smoke.cjs; ARGS=("$APP")
 if [[ "$APP" == vmtools ]]; then MOCK=fleet; SCRIPT=vmtools.cjs; ARGS=(); fi
+if [[ "$APP" == studio ]]; then MOCK=node; SCRIPT=studio.cjs; ARGS=(); fi
 CACHE="${FLUXVM_E2E_CACHE:-${TMPDIR:-/tmp}/fluxvm-ui-e2e}"
 PW_VERSION="${PW_VERSION:-1.60.0}"
 if [[ ! -d "$CACHE/node_modules/playwright-core" ]]; then
