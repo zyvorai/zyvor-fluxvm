@@ -50,7 +50,10 @@ pub struct NodeArgs {
 impl NodeArgs {
     pub fn validate(&self) -> Result<()> {
         if !kh::name_ok(&self.name) {
-            bail!("--name {:?} must be 1 to 40 lowercase letters, digits or dashes", self.name);
+            bail!(
+                "--name {:?} must be 1 to 40 lowercase letters, digits or dashes",
+                self.name
+            );
         }
         if self.worker == 0 || self.worker > kh::MAX_WORKERS {
             bail!("--worker must be 1 to {}", kh::MAX_WORKERS);
@@ -70,8 +73,10 @@ impl NodeArgs {
 
 fn paths(home: &Path, n: &NodeArgs) -> (PathBuf, PathBuf) {
     (
-        home.join("Library/LaunchAgents").join(format!("{}.plist", n.label())),
-        home.join("Library/Logs").join(format!("fluxvm-kube-{}-w{}.log", n.name, n.worker)),
+        home.join("Library/LaunchAgents")
+            .join(format!("{}.plist", n.label())),
+        home.join("Library/Logs")
+            .join(format!("fluxvm-kube-{}-w{}.log", n.name, n.worker)),
     )
 }
 
@@ -226,7 +231,10 @@ mod tests {
 
     #[test]
     fn the_label_and_plist_are_per_node() {
-        let n = NodeArgs { name: "dev".into(), worker: 2 };
+        let n = NodeArgs {
+            name: "dev".into(),
+            worker: 2,
+        };
         assert_eq!(n.label(), "dev.zyvor.fluxvm.kube.dev-w2");
         let p = render(Path::new("/x/fluxctl"), &n, Path::new("/l"), &[]);
         assert!(p.contains("<string>dev.zyvor.fluxvm.kube.dev-w2</string>"));
@@ -235,9 +243,37 @@ mod tests {
 
     #[test]
     fn bad_names_and_worker_numbers_are_refused() {
-        assert!(NodeArgs { name: "dev".into(), worker: 0 }.validate().is_err());
-        assert!(NodeArgs { name: "dev".into(), worker: 99 }.validate().is_err());
-        assert!(NodeArgs { name: "Bad Name".into(), worker: 1 }.validate().is_err());
-        assert!(NodeArgs { name: "dev".into(), worker: 1 }.validate().is_ok());
+        assert!(
+            NodeArgs {
+                name: "dev".into(),
+                worker: 0
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NodeArgs {
+                name: "dev".into(),
+                worker: 99
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NodeArgs {
+                name: "Bad Name".into(),
+                worker: 1
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NodeArgs {
+                name: "dev".into(),
+                worker: 1
+            }
+            .validate()
+            .is_ok()
+        );
     }
 }
