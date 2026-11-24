@@ -41,6 +41,7 @@ mod compose;
 mod config_check;
 mod contexts;
 mod create;
+mod docker_builds_cmd;
 mod docker_context_cmd;
 mod docker_host;
 mod doctor;
@@ -362,7 +363,9 @@ enum DockerCommand {
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
-    /// The `fluxvm` docker CLI context (`docker --context fluxvm ps`): install, uninstall, status. `up` makes it for you.
+    /// The `docker build` history of the daemon's built-in Docker socket (what Studio shows under Images, Builds).
+    Builds(docker_builds_cmd::BuildsArgs),
+    /// The `fluxvm` docker CLI context (`docker --context fluxvm ps`): install, uninstall, repair, status. `up` makes it for you.
     Context {
         #[command(subcommand)]
         command: docker_context_cmd::ContextCommand,
@@ -6416,6 +6419,12 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     {
         return docker_context_cmd::run(command.clone());
     }
+    if let Command::Docker {
+        command: DockerCommand::Builds(a),
+    } = &cli.command
+    {
+        return docker_builds_cmd::run(a.clone());
+    }
     if let Command::VmSpec { command } = &cli.command {
         std::process::exit(vm_spec::run(command)?);
     }
@@ -9110,6 +9119,7 @@ async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Resul
             .await?;
         }
         DockerCommand::Context { command } => docker_context_cmd::run(command)?,
+        DockerCommand::Builds(a) => docker_builds_cmd::run(a)?,
         DockerCommand::Agent { command } => match command {
             DockerAgentCommand::Install(a) => {
                 let plist = docker_host::agent_install(&a.options())?;

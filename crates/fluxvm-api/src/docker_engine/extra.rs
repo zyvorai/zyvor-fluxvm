@@ -32,13 +32,6 @@ pub(super) async fn fallback(method: axum::http::Method, uri: Uri) -> DockerErro
     ))
 }
 
-pub(super) async fn build() -> DockerError {
-    unsupported(
-        "`docker build` is not supported by the built-in FluxVM Docker engine. On a Mac, build an image with `fluxctl mac build`; \
-         for a real Docker build run `fluxctl docker up`, then `eval \"$(fluxctl docker env)\"` and run `docker build` again.",
-    )
-}
-
 fn not_running(vm: &VmRecord) -> DockerError {
     conflict(format!(
         "Container {} is not running. Start it with `docker start {}`.",
@@ -684,15 +677,6 @@ mod tests {
         // A known path with the wrong method gets the same kind of body.
         let (s, v) = call(&app, "PUT", "/containers/json").await;
         assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
-        assert!(msg(&v).contains("fluxctl docker up"));
-    }
-
-    #[tokio::test]
-    async fn build_points_at_the_two_real_ways_to_build() {
-        let (app, _) = app(&[]).await;
-        let (s, v) = call(&app, "POST", "/v1.43/build?t=x").await;
-        assert_eq!(s, StatusCode::NOT_IMPLEMENTED);
-        assert!(msg(&v).contains("fluxctl mac build"));
         assert!(msg(&v).contains("fluxctl docker up"));
     }
 

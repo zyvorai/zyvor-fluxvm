@@ -307,6 +307,13 @@ pub(crate) async fn get_context(Extension(role): Extension<Role>) -> ApiResult<J
     )))
 }
 
+/// `GET /v1/docker/builds` (admin): the `docker build` history of the built-in Docker socket, and whether this host can build.
+pub(crate) async fn get_builds(Extension(role): Extension<Role>) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    let engine = crate::docker_build::global();
+    Ok(Json(crate::docker_build::view(engine.as_deref())))
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct LogQuery {
     tail: Option<u32>,

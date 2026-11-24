@@ -6,7 +6,7 @@
 //! Maps containers to OCI sandboxes and images to the FluxVM OCI cache.
 //! Supported CLI: `docker pull|images|run|ps|rm|logs|exec|stop`.
 //! Also: `restart|kill|pause|unpause|top|stats|rename|events|network ls|volume ls`.
-//! Not supported (a Docker-shaped error says what to do): `build`, Compose, bind mounts, user-defined networks, named volumes.
+//! `docker build` is forwarded to the FluxVM Mac builder (`docker_build`). Not supported (a Docker-shaped error says what to do): Compose, bind mounts, user-defined networks, named volumes.
 
 use axum::{
     Json, Router,
@@ -36,7 +36,8 @@ use std::{
 use tokio::net::UnixListener;
 use uuid::Uuid;
 
-const API_VERSION: &str = "1.43";
+// 1.44 is the oldest API the current docker CLI (v29) accepts ("API version 1.43 is not supported by this client").
+const API_VERSION: &str = "1.44";
 const DOCKER_VERSION: &str = "24.0.0-fluxvm";
 const PLATFORM_NAME: &str = "FluxVM";
 
@@ -44,6 +45,7 @@ const PLATFORM_NAME: &str = "FluxVM";
 struct DockerState {
     manager: Arc<VmManager>,
     execs: Arc<Mutex<BTreeMap<String, ExecSession>>>,
+    build: Arc<crate::docker_build::BuildEngine>,
 }
 
 #[derive(Clone)]
@@ -92,9 +94,22 @@ type DockerResult<T> = Result<T, DockerError>;
 
 /// Axum router for the Docker Engine API subset (no FluxVM bearer auth).
 pub fn router(manager: Arc<VmManager>) -> Router {
+    let engine = crate::docker_build::BuildEngine::new(
+        Arc::new(crate::docker_build::FluxctlBuilder::new(None, None)),
+        Arc::new(crate::docker_build::History::new(None)),
+    );
+    router_with_build(manager, Arc::new(engine))
+}
+
+/// [`router`] with the builder and the build history to use for `docker build` (tests pass a fake builder).
+pub fn router_with_build(
+    manager: Arc<VmManager>,
+    build: Arc<crate::docker_build::BuildEngine>,
+) -> Router {
     let state = DockerState {
         manager,
         execs: Arc::new(Mutex::new(BTreeMap::new())),
+        build,
     };
     let routes = Router::new()
         .route("/_ping", get(ping))
@@ -132,7 +147,12 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/volumes/{name}",
             get(extra::volume_missing).delete(extra::volume_missing),
         )
-        .route("/build", post(extra::build))
+        .route(
+            "/build",
+            post(build::build).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route("/grpc", post(build::buildkit))
+        .route("/session", post(build::buildkit))
         .fallback(extra::fallback)
         .method_not_allowed_fallback(extra::fallback)
         .with_state(state);
@@ -142,7 +162,11 @@ pub fn router(manager: Arc<VmManager>) -> Router {
 }
 
 /// Bind `{path}` and serve the Docker shim until the process exits.
-pub async fn serve_unix(path: PathBuf, manager: Arc<VmManager>) -> anyhow::Result<()> {
+pub async fn serve_unix(
+    path: PathBuf,
+    manager: Arc<VmManager>,
+    build: Arc<crate::docker_build::BuildEngine>,
+) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -154,7 +178,7 @@ pub async fn serve_unix(path: PathBuf, manager: Arc<VmManager>) -> anyhow::Resul
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     tracing::info!(path = %path.display(), "Docker Engine API listening");
-    axum::serve(listener, router(manager)).await?;
+    axum::serve(listener, router_with_build(manager, build)).await?;
     Ok(())
 }
 
@@ -163,8 +187,35 @@ pub fn spawn_if_configured(manager: Arc<VmManager>, cfg: &fluxvm_core::config::C
     let Some(path) = cfg.docker_sock_path() else {
         return;
     };
+    // `docker build` goes to `fluxctl mac build` against this daemon: its address and an admin token travel in the child's
+    // environment, never on a command line.
+    let url = {
+        let scheme = if cfg.tls.enabled() { "https" } else { "http" };
+        let listen = cfg
+            .listen
+            .replace("0.0.0.0", "127.0.0.1")
+            .replace("[::]", "[::1]");
+        (!listen.is_empty()).then(|| format!("{scheme}://{listen}"))
+    };
+    let token = cfg
+        .auth
+        .tokens
+        .iter()
+        .find(|t| t.role == fluxvm_core::config::Role::Admin)
+        .map(|t| t.token.clone());
+    let history = crate::docker_build::History::new(
+        path.parent()
+            .map(|d| d.join(crate::docker_build::HISTORY_FILE)),
+    );
+    let mut engine = crate::docker_build::BuildEngine::new(
+        Arc::new(crate::docker_build::FluxctlBuilder::new(url, token)),
+        Arc::new(history),
+    );
+    engine.socket = Some(path.clone());
+    let engine = Arc::new(engine);
+    crate::docker_build::set_global(engine.clone());
     tokio::spawn(async move {
-        if let Err(e) = serve_unix(path, manager).await {
+        if let Err(e) = serve_unix(path, manager, engine).await {
             tracing::error!(error = %e, "Docker Engine API socket exited");
         }
     });
@@ -204,6 +255,8 @@ fn docker_headers() -> HeaderMap {
     h.insert("Docker-Experimental", HeaderValue::from_static("false"));
     h.insert("Ostype", HeaderValue::from_static("linux"));
     h.insert("Server", HeaderValue::from_static("FluxVM"));
+    // The classic builder: the docker CLI then sends a plain `POST /build` and never tries BuildKit.
+    h.insert("Builder-Version", HeaderValue::from_static("1"));
     h
 }
 
@@ -312,6 +365,15 @@ struct CreateQuery {
     name: Option<String>,
 }
 
+/// The docker CLI (v29) sends `null` for empty lists and maps (`"Env": null`); read that as the default.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ContainerCreateBody {
@@ -321,24 +383,24 @@ struct ContainerCreateBody {
     cmd: Option<Vec<String>>,
     #[serde(rename = "Entrypoint")]
     entrypoint: Option<Value>,
-    #[serde(rename = "Env")]
+    #[serde(rename = "Env", deserialize_with = "null_default")]
     env: Vec<String>,
-    #[serde(rename = "WorkingDir")]
+    #[serde(rename = "WorkingDir", deserialize_with = "null_default")]
     working_dir: String,
-    #[serde(rename = "User")]
+    #[serde(rename = "User", deserialize_with = "null_default")]
     user: String,
-    #[serde(rename = "Labels")]
+    #[serde(rename = "Labels", deserialize_with = "null_default")]
     labels: BTreeMap<String, String>,
     #[serde(rename = "HostConfig")]
     host_config: HostConfigBody,
-    #[serde(rename = "ExposedPorts")]
+    #[serde(rename = "ExposedPorts", deserialize_with = "null_default")]
     exposed_ports: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct HostConfigBody {
-    #[serde(rename = "PortBindings")]
+    #[serde(rename = "PortBindings", deserialize_with = "null_default")]
     port_bindings: BTreeMap<String, Option<Vec<PortBinding>>>,
     #[serde(rename = "Memory")]
     memory: i64,
@@ -346,7 +408,7 @@ struct HostConfigBody {
     nano_cpus: i64,
     #[serde(rename = "AutoRemove")]
     auto_remove: bool,
-    #[serde(rename = "Binds")]
+    #[serde(rename = "Binds", deserialize_with = "null_default")]
     binds: Vec<String>,
     #[serde(rename = "RestartPolicy")]
     restart_policy: RestartPolicyBody,
@@ -451,6 +513,19 @@ async fn containers_create(
     Query(q): Query<CreateQuery>,
     Json(body): Json<ContainerCreateBody>,
 ) -> DockerResult<impl IntoResponse> {
+    if build::is_buildkit_image(&body.image) {
+        return Err(build::buildkit_refusal());
+    }
+    if st.build.history.image_for(&body.image).is_some() {
+        return Err(DockerError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            format!(
+                "{} is a macOS image that `docker build` made through FluxVM, and the Docker API cannot start macOS images yet. \
+                 Run it with `fluxctl mac run {}` (add `-d` to keep it running).",
+                body.image, body.image
+            ),
+        ));
+    }
     let req = map_create_request(body, q.name)?;
     let vm = st
         .manager
@@ -740,7 +815,15 @@ async fn containers_delete(
 
 async fn images_list(State(st): State<DockerState>) -> DockerResult<Json<Value>> {
     let entries = st.manager.oci_list()?;
-    let items: Vec<Value> = entries.iter().map(image_summary).collect();
+    let mut items: Vec<Value> = entries.iter().map(image_summary).collect();
+    // Images built through this socket (macOS images in FluxVM's store), so `docker images` shows what `docker build` made.
+    for (id, tags, created) in st.build.history.images() {
+        items.push(json!({
+            "Id": id, "RepoTags": tags, "RepoDigests": null, "Created": created as i64,
+            "Size": 0, "SharedSize": -1, "VirtualSize": 0,
+            "Labels": {"fluxvm.image": "macos"}, "Containers": -1
+        }));
+    }
     Ok(Json(Value::Array(items)))
 }
 
@@ -759,6 +842,9 @@ async fn images_create(
     let image = q
         .from_image
         .ok_or_else(|| DockerError::bad("fromImage is required"))?;
+    if build::is_buildkit_image(&image) {
+        return Err(build::buildkit_refusal());
+    }
     let reference = match q.tag.as_deref() {
         Some(t) if !t.is_empty() && !image.contains(':') && !image.contains('@') => {
             format!("{image}:{t}")
@@ -1190,6 +1276,7 @@ async fn run_exec(
     }
 }
 
+mod build;
 mod extra;
 
 #[cfg(test)]
@@ -1257,6 +1344,18 @@ mod tests {
         assert_eq!(oci.exit_policy, ExitPolicy::Poweroff);
         assert_eq!(req.memory_mib, Some(512));
         assert_eq!(req.vcpus, Some(2));
+    }
+
+    #[test]
+    fn create_accepts_the_nulls_docker_29_sends() {
+        let b: ContainerCreateBody = serde_json::from_value(json!({
+            "Image": "alpine", "Cmd": null, "Env": null, "WorkingDir": null, "User": null,
+            "Labels": null, "ExposedPorts": null,
+            "HostConfig": {"Binds": null, "PortBindings": null, "Memory": 0}
+        }))
+        .unwrap();
+        assert!(b.env.is_empty() && b.host_config.binds.is_empty());
+        assert!(map_create_request(b, None).is_ok());
     }
 
     #[test]

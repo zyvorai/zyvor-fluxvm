@@ -64,6 +64,11 @@ pub fn default_socket() -> PathBuf {
         .join("docker-engine.sock")
 }
 
+/// The daemon's built-in Docker socket (`docker_sock`, next to the engine socket). `docker build` on it goes to the Mac builder.
+pub fn builtin_socket() -> PathBuf {
+    default_socket().with_file_name("docker.sock")
+}
+
 fn socket_of(o: &EngineOptions) -> PathBuf {
     o.socket.clone().unwrap_or_else(default_socket)
 }
