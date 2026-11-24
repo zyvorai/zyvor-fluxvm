@@ -3,6 +3,7 @@
 
 // Pure helpers for the Apps page: the apps `fluxctl kube run` makes, and the fluxctl command for everything the page does.
 import { type KubePod, type Tone } from './kube';
+import { labelsMatch, parseQuery } from './labelFilter';
 
 export type AppState = 'running' | 'starting' | 'stopped' | 'problem';
 
@@ -22,6 +23,8 @@ export type App = {
   next: string | null;
   pods: KubePod[];
   created: string | null;
+  /** The labels you gave it with `kube run --label`; absent on an older daemon. */
+  labels?: Record<string, string>;
 };
 
 export type Apps = { schema?: number; cluster?: string; apps: App[]; error?: { message: string; next: string } };
@@ -95,6 +98,12 @@ export const runCommand = (cluster: string, f: RunForm): string => {
 };
 
 /** A one-line count for the page: `3 apps, 1 with a problem`. */
+/** Apps whose name, image, namespace or state contain every word, and that carry every `key=value` label term. */
+export const filterApps = (apps: App[], q: string): App[] => {
+  const { words, labels } = parseQuery(q);
+  return apps.filter((a) => labelsMatch(a.labels, labels) && words.every((w) => `${a.name} ${a.image} ${a.namespace} ${a.state}`.toLowerCase().includes(w)));
+};
+
 export const appsSummary = (apps: App[]): string => {
   if (!apps.length) return 'No apps yet';
   const bad = apps.filter((a) => a.state === 'problem').length;

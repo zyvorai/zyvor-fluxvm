@@ -45,6 +45,9 @@ pub(crate) struct RunBody {
     namespace: Option<String>,
     #[serde(default)]
     env: Vec<EnvVar>,
+    /// Your own labels, `{"team": "ios"}`.
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 /// The [`Spec`] a request body asks for, checked.
@@ -62,6 +65,7 @@ pub(crate) fn spec_of(b: RunBody) -> Result<Spec, ApiError> {
         port: b.port.unwrap_or_else(|| kube_app::default_port(&image)),
         replicas: b.replicas.unwrap_or(1),
         env: b.env.into_iter().map(|e| (e.name, e.value)).collect(),
+        labels: b.labels.into_iter().collect(),
         image,
     };
     kube_app::validate(&spec).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;

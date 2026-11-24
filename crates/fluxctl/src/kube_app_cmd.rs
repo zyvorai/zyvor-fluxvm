@@ -40,6 +40,9 @@ pub enum AppCommand {
         /// An environment variable for the app: `--env KEY=value`. Repeatable.
         #[arg(short, long = "env", value_name = "KEY=VALUE")]
         env: Vec<String>,
+        /// A label for the app: `--label team=ios`. Repeatable. `fluxctl kube apps --filter label=team=ios` finds it again.
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        label: Vec<String>,
         #[arg(short = 'n', long, default_value = "default")]
         namespace: String,
         /// The port on this machine for the URL (default: the first free one from 8080).
@@ -366,12 +369,20 @@ pub fn execute(
             port,
             replicas,
             env: vars,
+            label,
             namespace,
             local_port,
             detach,
             wait,
             target,
         } => {
+            let mut tags = vec![];
+            for l in &label {
+                let (k, v) = l.split_once('=').ok_or_else(|| {
+                    anyhow!("{l:?} is not KEY=value. Label an app like --label team=ios")
+                })?;
+                tags.push((k.to_owned(), v.to_owned()));
+            }
             let mut pairs = vec![];
             for v in &vars {
                 let (k, val) = v.split_once('=').ok_or_else(|| {
@@ -386,6 +397,7 @@ pub fn execute(
                 image,
                 replicas,
                 env: pairs,
+                labels: tags,
             };
             let (sel, prefix) = selection(&target)?;
             let c = Cluster::new(prefix, runner);
@@ -833,8 +845,18 @@ pub fn table(rows: &[Value]) -> Option<String> {
     Some(s)
 }
 
+/// The keys `kube apps --filter` accepts besides `label`.
+pub const FILTER_FIELDS: &[&str] = &["name", "namespace", "state", "image"];
+
+/// The rows that pass `--filter`.
+pub fn filter_rows(rows: Vec<Value>, filters: &[crate::label_filter::Filter]) -> Vec<Value> {
+    rows.into_iter()
+        .filter(|r| crate::label_filter::matches(r, crate::label_filter::text, filters))
+        .collect()
+}
+
 /// The "your apps" part of `fluxctl kube apps`: best effort, so a missing cluster never hides the catalog above it.
-pub fn apps_section(cluster: Option<&str>) -> String {
+pub fn apps_section(cluster: Option<&str>, filters: &[crate::label_filter::Filter]) -> String {
     let t = Target {
         kube_context: None,
         cluster: cluster
@@ -850,10 +872,19 @@ pub fn apps_section(cluster: Option<&str>) -> String {
     };
     let c = Cluster::new(prefix, &SystemKubectl);
     match read_apps(&c, None) {
-        Ok(rows) => match table(&rows) {
-            Some(t) => format!("\nYour apps (run with `fluxctl kube run IMAGE`):\n{t}"),
-            None => "\nYour apps: none yet. Start one with `fluxctl kube run nginx`.\n".to_owned(),
-        },
+        Ok(rows) => {
+            let total = rows.len();
+            let rows = filter_rows(rows, filters);
+            match table(&rows) {
+                Some(t) => format!("\nYour apps (run with `fluxctl kube run IMAGE`):\n{t}"),
+                None if total > 0 => format!(
+                    "\nYour apps: none of the {total} match the filter. Run `fluxctl kube apps` without --filter to see them all.\n"
+                ),
+                None => {
+                    "\nYour apps: none yet. Start one with `fluxctl kube run nginx`.\n".to_owned()
+                }
+            }
+        }
         Err(_) => String::new(),
     }
 }
@@ -907,6 +938,7 @@ mod tests {
             port: 80,
             replicas: 1,
             env: vec![],
+            labels: vec![],
         }
     }
     fn opts(detach: bool) -> RunOpts {
@@ -1178,6 +1210,27 @@ mod tests {
             .to_string()
             .contains("leaves it alone")
         );
+    }
+
+    #[test]
+    fn apps_filter_by_label_state_and_name() {
+        let rows = vec![
+            json!({"name": "web", "namespace": "default", "state": "running", "image": "nginx", "labels": {"team": "ios"}}),
+            json!({"name": "db", "namespace": "data", "state": "problem", "image": "postgres:16", "labels": {}}),
+        ];
+        let f = |l: &[&str]| {
+            let l: Vec<String> = l.iter().map(|s| s.to_string()).collect();
+            let fl = crate::label_filter::parse_all(&l, FILTER_FIELDS).unwrap();
+            filter_rows(rows.clone(), &fl)
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(f(&[]), ["web", "db"]);
+        assert_eq!(f(&["label=team=ios"]), ["web"]);
+        assert_eq!(f(&["state=problem"]), ["db"]);
+        assert_eq!(f(&["image=postgres", "namespace=data"]), ["db"]);
+        assert!(f(&["label=team=android"]).is_empty());
     }
 
     #[test]

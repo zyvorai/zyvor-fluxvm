@@ -237,6 +237,37 @@ fn items(v: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// The keys `fleet nodes --filter` accepts besides `label`.
+const NODE_FILTER_FIELDS: &[&str] = &["name", "state"];
+
+/// `healthy`, `unhealthy` or `cordoned`, as the filter spells it.
+fn node_state(n: &Value) -> &'static str {
+    if n.get("cordoned").and_then(Value::as_bool) == Some(true) {
+        "cordoned"
+    } else if n.get("healthy").and_then(Value::as_bool) == Some(true) {
+        "healthy"
+    } else {
+        "unhealthy"
+    }
+}
+
+fn filter_nodes(nodes: &[Value], filters: &[crate::label_filter::Filter]) -> Vec<Value> {
+    nodes
+        .iter()
+        .filter(|n| {
+            crate::label_filter::matches(
+                n,
+                |n, k| match k {
+                    "state" => Some(node_state(n).to_owned()),
+                    other => crate::label_filter::text(n, other),
+                },
+                filters,
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 fn num(x: u64) -> String {
     x.to_string()
 }
@@ -410,12 +441,25 @@ async fn dispatch(
 ) -> Result<()> {
     match command {
         FleetCommand::Status => status(central, token, &out).await,
-        FleetCommand::Nodes => {
-            let v = fleet_client::list_nodes(central, token).await?;
+        FleetCommand::Nodes { filter } => {
+            let filters = crate::label_filter::parse_all(&filter, NODE_FILTER_FIELDS)?;
+            let mut v = fleet_client::list_nodes(central, token).await?;
+            let all = items(&v);
+            let nodes = filter_nodes(&all, &filters);
+            if !filters.is_empty() {
+                v["items"] = Value::Array(nodes.clone());
+            }
             if !out.human {
                 return out.json(&v);
             }
-            let nodes = items(&v);
+            if nodes.is_empty() && !all.is_empty() {
+                println!(
+                    "None of the {} registered Macs match the filter.",
+                    all.len()
+                );
+                out.next("run `fluxctl fleet nodes` without --filter to see them all");
+                return Ok(());
+            }
             if nodes.is_empty() {
                 println!("No Macs have registered yet.");
                 out.next("run `fluxvm-agent node --central …` on each Mac, or scripts/fleet-sim.sh to try it");

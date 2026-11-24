@@ -6,6 +6,7 @@ import { Play, Pause, Plus, RotateCw, Square, Trash2 } from 'lucide-react';
 import { Button, Card, EmptyState, Hero, Pill, Segmented, Sheet, Skeleton, api, fmtMiB, statusTone, usePoll, type Vm } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { CreateMachine } from './CreateMachine';
+import { labelsMatch, parseQuery } from '../lib/labelFilter';
 
 type Filter = 'all' | 'running' | 'stopped' | 'failed';
 type Op = 'start' | 'stop' | 'restart' | 'pause' | 'resume';
@@ -47,10 +48,10 @@ export function Machines({ vms, setVms, notify, q: initialQ }: { vms: Vm[]; setV
   }, 4000);
 
   const shown = useMemo(() => {
-    const needle = q.trim().toLowerCase();
+    const terms = parseQuery(q);
     return vms
       .filter((v) => (filter === 'all' ? true : filter === 'stopped' ? v.status === 'stopped' || v.status === 'paused' : v.status === filter))
-      .filter((v) => !needle || `${v.name} ${v.id} ${v.guest_ip ?? ''} ${v.backend}`.toLowerCase().includes(needle))
+      .filter((v) => labelsMatch(v.labels, terms.labels) && terms.words.every((w) => `${v.name} ${v.id} ${v.guest_ip ?? ''} ${v.backend}`.toLowerCase().includes(w)))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [vms, q, filter]);
 
@@ -86,7 +87,7 @@ export function Machines({ vms, setVms, notify, q: initialQ }: { vms: Vm[]; setV
         <Button variant="primary" size="lg" onClick={() => setCreating(true)}><Plus size={18} />New machine</Button>
       </Hero>
       <div className="fx-toolbar">
-        <input className="fx-input" placeholder="Search name, id, IP…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search machines" />
+        <input className="fx-input" placeholder="Search name, id, IP or team=ios…" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search machines" />
         <Segmented label="Filter by state" value={filter} onChange={setFilter} options={[{ value: 'all', label: 'All' }, { value: 'running', label: 'Running' }, { value: 'stopped', label: 'Stopped' }, { value: 'failed', label: 'Failed' }]} />
       </div>
       {stacks.length ? (

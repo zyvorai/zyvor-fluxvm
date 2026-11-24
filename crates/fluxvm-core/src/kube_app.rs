@@ -93,6 +93,37 @@ pub struct Spec {
     pub port: u16,
     pub replicas: u32,
     pub env: Vec<(String, String)>,
+    /// Your own labels (`kube run --label team=ios`): on the Deployment and the Service, shown by `kube apps` and filtered with
+    /// `kube apps --filter label=team=ios`. Not on the pods, so they never change what the Deployment selects.
+    pub labels: Vec<(String, String)>,
+}
+
+/// Why a user label cannot be used, or `None`. Keys follow Kubernetes (letters, digits, `-`, `_`, `.`, at most 63) and may not
+/// start with `app.kubernetes.io/` or `fluxvm`, which fluxctl keeps for itself.
+pub fn label_problem(k: &str, v: &str) -> Option<String> {
+    let part = |s: &str| {
+        s.len() <= 63
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            && s.chars().next().is_none_or(|c| c.is_ascii_alphanumeric())
+            && s.chars().last().is_none_or(|c| c.is_ascii_alphanumeric())
+    };
+    if k.is_empty() || !part(k) {
+        return Some(format!(
+            "{k:?} is not a label name. Use letters, digits, dashes, underscores and dots, as in --label team=ios"
+        ));
+    }
+    if !part(v) {
+        return Some(format!(
+            "the value {v:?} of label {k} is not usable. Use letters, digits, dashes, underscores and dots (at most 63)"
+        ));
+    }
+    if k.starts_with("app.kubernetes.io/") || k.starts_with("fluxvm") {
+        return Some(format!(
+            "label {k:?} is kept by fluxctl. Choose another name, for example team or env"
+        ));
+    }
+    None
 }
 
 /// Checks a [`Spec`] before anything is sent anywhere; the error is a sentence saying what to change.
@@ -123,6 +154,11 @@ pub fn validate(s: &Spec) -> Result<(), String> {
             "an app can have at most {MAX_REPLICAS} copies; give a smaller number"
         ));
     }
+    for (k, v) in &s.labels {
+        if let Some(p) = label_problem(k, v) {
+            return Err(p);
+        }
+    }
     for (k, _) in &s.env {
         let mut c = k.chars();
         let ok = c
@@ -142,6 +178,28 @@ fn labels(name: &str) -> Value {
     json!({NAME_KEY: name, MANAGED_BY_KEY: MANAGED_BY})
 }
 
+/// The labels of the Deployment and the Service: fluxctl's, then the user's.
+fn object_labels(s: &Spec) -> Value {
+    let mut l = labels(&s.name);
+    for (k, v) in &s.labels {
+        l[k.as_str()] = json!(v);
+    }
+    l
+}
+
+/// The labels a person set: everything except the `app.kubernetes.io/` and `fluxvm` keys.
+fn user_labels(meta: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(o) = meta["labels"].as_object() {
+        for (k, v) in o {
+            if !k.starts_with("app.kubernetes.io/") && !k.starts_with("fluxvm") {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 /// The Deployment and the Service for an app. The Service is a ClusterIP on the app's port; `kube forward` and `kube expose` make
 /// it reachable from this machine.
 pub fn manifests(s: &Spec) -> Vec<Value> {
@@ -154,7 +212,7 @@ pub fn manifests(s: &Spec) -> Vec<Value> {
         json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
-            "metadata": {"name": s.name, "namespace": s.namespace, "labels": labels(&s.name),
+            "metadata": {"name": s.name, "namespace": s.namespace, "labels": object_labels(s),
                          "annotations": {"fluxvm.dev/image": s.image}},
             "spec": {
                 "replicas": s.replicas,
@@ -173,7 +231,7 @@ pub fn manifests(s: &Spec) -> Vec<Value> {
         json!({
             "apiVersion": "v1",
             "kind": "Service",
-            "metadata": {"name": s.name, "namespace": s.namespace, "labels": labels(&s.name)},
+            "metadata": {"name": s.name, "namespace": s.namespace, "labels": object_labels(s)},
             "spec": {
                 "selector": {NAME_KEY: s.name},
                 "ports": [{"name": "http", "port": s.port, "targetPort": s.port}]
@@ -363,6 +421,7 @@ pub fn summarize(deployments: &Value, services: &Value, pods: &Value) -> Vec<Val
                 "next": problem.as_ref().map(|p| p.next.clone()),
                 "pods": pod_rows,
                 "created": d["metadata"]["creationTimestamp"],
+                "labels": user_labels(&d["metadata"]),
             })
         })
         .collect();
@@ -385,7 +444,45 @@ mod tests {
             port: 80,
             replicas: 1,
             env: vec![("MODE".into(), "dev".into())],
+            labels: vec![],
         }
+    }
+
+    #[test]
+    fn user_labels_go_on_the_deployment_and_service_but_never_on_the_pods() {
+        let mut s = spec();
+        s.labels = vec![("team".into(), "ios".into())];
+        validate(&s).unwrap();
+        let m = manifests(&s);
+        assert_eq!(m[0]["metadata"]["labels"]["team"], "ios");
+        assert_eq!(m[1]["metadata"]["labels"]["team"], "ios");
+        assert_eq!(m[0]["metadata"]["labels"][MANAGED_BY_KEY], MANAGED_BY);
+        assert!(m[0]["spec"]["template"]["metadata"]["labels"]["team"].is_null());
+        assert!(m[0]["spec"]["selector"]["matchLabels"]["team"].is_null());
+    }
+
+    #[test]
+    fn bad_and_reserved_labels_say_what_to_change() {
+        for (k, v) in [
+            ("", "x"),
+            ("a b", "x"),
+            ("team", "has space"),
+            ("app.kubernetes.io/name", "x"),
+            ("fluxvm.io/x", "y"),
+        ] {
+            let mut s = spec();
+            s.labels = vec![(k.into(), v.into())];
+            assert!(validate(&s).unwrap_err().contains("label"), "{k}={v}");
+        }
+    }
+
+    #[test]
+    fn rows_list_only_the_labels_a_person_set() {
+        let d = json!({"items": [{"metadata": {"name": "web", "namespace": "default",
+            "labels": {"app.kubernetes.io/managed-by": "fluxctl-app", "app.kubernetes.io/name": "web", "team": "ios"}},
+            "spec": {"replicas": 1, "template": {"spec": {"containers": [{"image": "nginx"}]}}}, "status": {}}]});
+        let rows = summarize(&d, &json!({"items": []}), &json!({"items": []}));
+        assert_eq!(rows[0]["labels"], json!({"team": "ios"}));
     }
 
     #[test]
