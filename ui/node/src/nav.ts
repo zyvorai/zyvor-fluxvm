@@ -43,6 +43,7 @@ export const NAV: NavGroup[] = [
       { to: '/host', label: 'Host', desc: 'Memory, GPUs and topology' },
       { to: '/access', label: 'Access & audit', desc: 'Quota, events and the API' },
       { to: '/audit', label: 'Audit log', desc: 'Who changed what, and when' },
+      { to: '/events', label: 'Events', desc: 'Everything that happened, live' },
       { to: '/cheatsheet', label: 'Cheatsheet', desc: 'The commands you will want' },
     ],
   },

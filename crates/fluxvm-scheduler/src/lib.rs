@@ -34,6 +34,7 @@ pub mod confidential;
 pub mod container_sandbox;
 pub mod density;
 pub mod diagnostics;
+pub mod event_feed;
 pub mod events;
 pub mod fork;
 pub mod fork_plan;

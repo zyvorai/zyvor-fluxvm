@@ -97,13 +97,6 @@ pub const CONTEXT_COLUMNS: &[Column] = &[
     col("TOKEN", "/token"),
 ];
 
-pub const EVENT_COLUMNS: &[Column] = &[
-    col("TIME", "/ts"),
-    col("EVENT", "/event"),
-    col("VM", "/vm_id"),
-    wide("FIELDS", "/fields"),
-];
-
 fn cell(v: Option<&Value>) -> String {
     match v {
         None | Some(Value::Null) => "-".into(),
