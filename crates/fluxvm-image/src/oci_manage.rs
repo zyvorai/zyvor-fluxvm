@@ -1552,7 +1552,10 @@ mod tests {
             layer_media_type: Some("application/json".into()),
             // attach() stamps the current second into the manifest; pin it so re-attaching the same
             // content below always yields the same digest, whatever second the test runs in.
-            annotations: BTreeMap::from([(ANN_CREATED.to_string(), "2026-01-02T03:04:05Z".to_string())]),
+            annotations: BTreeMap::from([(
+                ANN_CREATED.to_string(),
+                "2026-01-02T03:04:05Z".to_string(),
+            )]),
         };
         let a1 = attach(
             &format!("{addr}/app:v1"),
