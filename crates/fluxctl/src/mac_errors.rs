@@ -513,17 +513,48 @@ pub const CODES: &[MacCode] = &[
     MacCode {
         code: "MAC_UPDATE_NOT_SUPPORTED",
         status: None,
-        summary: "The CPU count or memory of an existing macOS VM cannot be changed.",
+        summary: "The daemon cannot change the CPU count or memory of this macOS VM.",
         causes: &[
-            "they are fixed when the VM is created, and the daemon only lets you change an instance's name and labels",
-            "this holds for a running and for a stopped instance",
+            "the daemon on the Mac is older than this fluxctl and only edits an instance's name and labels",
+            "the VM is not a macOS (vz) VM, so `mac update` has no call for its size",
         ],
         fixes: &[
-            "keep the disk and make a new instance: `fluxctl mac stop NAME`, `fluxctl mac commit NAME NAME-img:1`, `fluxctl mac rm NAME`, `fluxctl mac create --name NAME --cpus N --memory SIZE NAME-img:1`",
-            "what `mac update` can change: `--restart POLICY` and `--label KEY=VALUE`",
+            "update the daemon on the Mac, then repeat the command",
+            "or keep the disk and make a new instance: `fluxctl mac stop NAME`, `fluxctl mac commit NAME NAME-img:1`, `fluxctl mac rm NAME`, `fluxctl mac create --name NAME --cpus N --memory SIZE NAME-img:1`",
+            "what any daemon can change: `fluxctl mac update NAME --restart POLICY --label KEY=VALUE --rm-label KEY`",
         ],
         aliases: &["update-not-supported", "resize", "update-resources"],
         signatures: &["mac_update_not_supported"],
+    },
+    MacCode {
+        code: "MAC_UPDATE_NEEDS_RESTART",
+        status: None,
+        summary: "A new CPU count or memory was asked for on a running macOS VM, so it was not applied (labels and the restart policy were).",
+        causes: &[
+            "a macOS VM reads its CPUs and memory only when it boots, and the instance is running (or paused)",
+        ],
+        fixes: &[
+            "apply it with a restart now: `fluxctl mac update NAME --cpus N --memory SIZE --restart-now` (saves an `auto-before-update-<time>` checkpoint, stops the VM, applies the size and starts it again; same name and disk)",
+            "add `--no-checkpoint` to skip the checkpoint (it also skips when the disk is too full for one)",
+            "or choose the moment yourself: `fluxctl mac stop NAME`, repeat the update (it applies at once on a stopped instance), then `fluxctl mac start NAME`",
+            "to go back after a restart: `fluxctl mac checkpoint restore NAME auto-before-update-<time>` (list them with `fluxctl mac checkpoints NAME`)",
+        ],
+        aliases: &["update-needs-restart", "needs-restart", "restart-now"],
+        signatures: &["mac_update_needs_restart"],
+    },
+    MacCode {
+        code: "MAC_UPDATE_ENV_NOT_STORED",
+        status: None,
+        summary: "`mac update --env` was used: a macOS VM stores no environment variables.",
+        causes: &[
+            "the guest keeps no environment between runs: `mac run` and `mac exec` send it over SSH each time",
+        ],
+        fixes: &[
+            "pass it when you run something: `fluxctl mac exec NAME -e KEY=VALUE -- CMD`",
+            "for every run of an image, bake it into the image with `ENV` in its Dockerfile and `fluxctl mac build`",
+        ],
+        aliases: &["update-env", "env-not-stored"],
+        signatures: &["mac_update_env_not_stored"],
     },
     MacCode {
         code: "MAC_KILL_SIGNAL",

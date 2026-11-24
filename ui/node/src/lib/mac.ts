@@ -139,3 +139,132 @@ export const DOCTOR_COMMAND = 'fluxctl mac doctor';
 
 /** What to say when the Mac page is opened on a host that is not a Mac. */
 export const UNSUPPORTED_NOTE = 'This host is not a Mac, so it runs no macOS instances. Open Studio on a Mac, or run fluxctl cluster status -f inventory.yaml to see your Macs.';
+
+// ---- Edit: `fluxctl mac update`
+
+/** What the Edit panel holds: text boxes, exactly as typed. */
+export type EditForm = { cpus: string; memory: string; restart: string; labels: string; restartNow: boolean; checkpoint: boolean };
+
+/** The body of `PATCH /v1/mac/instances/{id}`. */
+export type MacUpdateBody = { cpus?: number; memory_mib?: number; restart?: string; labels?: Record<string, string>; rm_labels?: string[]; restart_now?: boolean; checkpoint?: boolean };
+
+export type MacUpdateAnswer = {
+  ok: boolean;
+  name: string;
+  applied: string[];
+  pending_restart: { change: string }[];
+  restarted: boolean;
+  checkpoint: string | null;
+  explain: string | null;
+  next: string | null;
+  fluxctl: string;
+};
+
+export const RESTART_POLICIES = ['no', 'always', 'unless-stopped', 'on-failure'];
+
+/** `8192` -> `8g`, `1536` -> `1536m`: the form Studio shows and `fluxctl --memory` takes. */
+export const memoryField = (mib: number | null): string => (mib == null ? '' : mib % 1024 === 0 ? `${mib / 1024}g` : `${mib}m`);
+
+/** `8g`, `16GiB`, `512m` or a bare number of MiB -> MiB, or null when it is not a size. */
+export const parseMemory = (text: string): number | null => {
+  const m = /^\s*(\d+)\s*(g|gb|gib|m|mb|mib)?\s*$/i.exec(text);
+  if (!m) return null;
+  const n = Number(m[1]) * (m[2] && m[2].toLowerCase().startsWith('g') ? 1024 : 1);
+  return n > 0 ? n : null;
+};
+
+/** The form an instance starts with: its own values, so only what you change is sent. */
+export const editFormFor = (i: MacInstance): EditForm => ({
+  cpus: i.cpus == null ? '' : String(i.cpus),
+  memory: memoryField(i.memory_mib),
+  restart: i.restart_policy || 'no',
+  labels: Object.entries(i.labels).map(([k, v]) => `${k}=${v}`).join('\n'),
+  restartNow: false,
+  checkpoint: true,
+});
+
+/** `a=b` lines into labels; the second value is the first line that is not `KEY=VALUE`. */
+export const parseLabelLines = (text: string): { labels: Record<string, string>; bad: string | null } => {
+  const labels: Record<string, string> = {};
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const eq = line.indexOf('=');
+    if (eq < 1 || /\s/.test(line.slice(0, eq))) return { labels, bad: line };
+    labels[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return { labels, bad: null };
+};
+
+const shq = (v: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(v) ? v : `'${v.replace(/'/g, "'\\''")}'`);
+
+/** The `fluxctl mac update` that sends this body; the same flags the CLI has. */
+export const updateCommand = (name: string, b: MacUpdateBody): string => {
+  const p = [`fluxctl mac update ${shq(name)}`];
+  if (b.cpus != null) p.push(`--cpus ${b.cpus}`);
+  if (b.memory_mib != null) p.push(`--memory ${memoryField(b.memory_mib)}`);
+  if (b.restart != null) p.push(`--restart ${b.restart}`);
+  for (const [k, v] of Object.entries(b.labels ?? {})) p.push(`--label ${shq(`${k}=${v}`)}`);
+  for (const k of b.rm_labels ?? []) p.push(`--rm-label ${shq(k)}`);
+  if (b.restart_now) p.push('--restart-now');
+  if (b.restart_now && b.checkpoint === false) p.push('--no-checkpoint');
+  return p.join(' ');
+};
+
+export type EditPlan = {
+  body: MacUpdateBody;
+  command: string;
+  /** What changes, in words, for the confirmation line. */
+  changes: string[];
+  /** The size changes while the instance runs: Save will not apply it unless "restart now" is ticked. */
+  needsRestart: boolean;
+  /** Why Save is disabled, or null. */
+  error: string | null;
+};
+
+const isLive = (status: string): boolean => status === 'running' || status === 'paused';
+
+/** Compares the form with the instance and builds only the changes; the one place the page decides what to send. */
+export const planEdit = (inst: MacInstance, f: EditForm): EditPlan => {
+  const body: MacUpdateBody = {};
+  const changes: string[] = [];
+  let error: string | null = null;
+  const fail = (m: string) => { error ??= m; };
+  if (f.cpus.trim() !== '' && f.cpus.trim() !== String(inst.cpus)) {
+    const n = Number(f.cpus);
+    if (!Number.isInteger(n) || n < 1 || n > 255) fail('CPUs must be a whole number from 1 to 255.');
+    else { body.cpus = n; changes.push(`CPUs ${inst.cpus ?? '?'} to ${n}`); }
+  }
+  if (f.memory.trim() !== '' && f.memory.trim() !== memoryField(inst.memory_mib)) {
+    const mib = parseMemory(f.memory);
+    if (mib == null) fail('Memory must look like 8g, 512m or a number of MiB.');
+    else if (mib < 512) fail('A macOS VM needs at least 512 MiB of memory.');
+    else if (mib !== inst.memory_mib) { body.memory_mib = mib; changes.push(`memory ${memoryText(inst.memory_mib)} to ${memoryText(mib)}`); }
+  }
+  if (f.restart !== (inst.restart_policy || 'no')) { body.restart = f.restart; changes.push(`restart policy ${inst.restart_policy || 'no'} to ${f.restart}`); }
+  const { labels, bad } = parseLabelLines(f.labels);
+  if (bad != null) fail(`"${bad}" is not KEY=VALUE. Write one label per line, like team=ios.`);
+  const set = Object.entries(labels).filter(([k, v]) => inst.labels[k] !== v);
+  if (set.length) { body.labels = Object.fromEntries(set); changes.push(`set ${set.map(([k]) => k).join(', ')}`); }
+  const rm = Object.keys(inst.labels).filter((k) => !(k in labels));
+  if (rm.length) { body.rm_labels = rm; changes.push(`remove ${rm.join(', ')}`); }
+  const resize = body.cpus != null || body.memory_mib != null;
+  const needsRestart = resize && isLive(inst.status);
+  if (resize && needsRestart && f.restartNow) {
+    body.restart_now = true;
+    if (!f.checkpoint) body.checkpoint = false;
+  }
+  if (!changes.length && !error) error = 'Nothing is different from what the instance has now.';
+  return { body, command: updateCommand(inst.name, body), changes, needsRestart, error };
+};
+
+/** The daemon's answer in plain words, for the toast under the form. */
+export const updateAnswerText = (name: string, a: MacUpdateAnswer): string => {
+  const parts: string[] = [];
+  if (a.applied.length) parts.push(`${name}: applied ${a.applied.join('; ')}.`);
+  if (a.checkpoint) parts.push(`A checkpoint was saved first (${a.checkpoint}); to go back run fluxctl mac checkpoint restore ${name} ${a.checkpoint}.`);
+  if (a.restarted) parts.push(`${name} was restarted with the new size.`);
+  if (a.pending_restart.length) parts.push(`Not applied, needs a restart: ${a.pending_restart.map((p) => p.change).join('; ')}.`);
+  if (a.next) parts.push(a.next);
+  return parts.join(' ') || `${name}: nothing to change.`;
+};
