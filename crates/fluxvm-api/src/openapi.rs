@@ -655,8 +655,11 @@ fn ops() -> Vec<Op> {
             .query(&[
                 ("vm", "VM id"),
                 ("event", "Event-name prefix"),
-                ("since", "RFC 3339 timestamp"),
-                ("limit", "Newest N (default 500)"),
+                ("since", "RFC 3339 timestamp (with source: also 30m, 2h, 7d)"),
+                ("limit", "Newest N (default 500; 100 with source)"),
+                ("source", "Merged feed: comma list of vm, mac, kube, docker, backup, audit, or all"),
+                ("until", "With source: RFC 3339 timestamp or how far back"),
+                ("level", "With source: info, warn or error (that level and worse)"),
             ]),
         op(
             "get",

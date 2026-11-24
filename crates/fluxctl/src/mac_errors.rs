@@ -1559,6 +1559,94 @@ pub const CODES: &[MacCode] = &[
         aliases: &["backup-source"],
         signatures: &["mac_backup_source"],
     },
+    MacCode {
+        code: "EVENTS_BAD_SOURCE",
+        status: None,
+        summary: "`fluxctl events --source` was given a name that is not an event source.",
+        causes: &[
+            "a typo in the source name, or a name from another tool",
+            "the sources are vm, mac, kube, docker, backup and audit",
+        ],
+        fixes: &[
+            "leave --source out to see every source at once: `fluxctl events`",
+            "or pick some of them: `fluxctl events --source mac,kube`",
+        ],
+        aliases: &["events-source"],
+        signatures: &["is not an event source"],
+    },
+    MacCode {
+        code: "EVENTS_BAD_TIME",
+        status: None,
+        summary: "`fluxctl events --since` or `--until` was given a time that cannot be read.",
+        causes: &[
+            "the time is not in one of the two accepted forms",
+            "a unit other than s, m, h, d or w was used (`2 hours` instead of `2h`)",
+        ],
+        fixes: &[
+            "say how far back to look: `fluxctl events --since 30m` (also 2h, 7d, 1w)",
+            "or give a full timestamp: `fluxctl events --since 2026-11-24T09:00:00Z`",
+        ],
+        aliases: &["events-time"],
+        signatures: &["is not a time i can read"],
+    },
+    MacCode {
+        code: "EVENTS_BAD_LEVEL",
+        status: None,
+        summary: "`fluxctl events --level` was given something other than info, warn or error.",
+        causes: &["a typo, or a level name from another tool"],
+        fixes: &[
+            "only problems: `fluxctl events --level error`",
+            "problems and refusals: `fluxctl events --level warn`",
+        ],
+        aliases: &["events-level"],
+        signatures: &["is not a level. use info"],
+    },
+    MacCode {
+        code: "EVENTS_NOT_ALLOWED",
+        status: Some(400),
+        summary: "The token in use may not read one of the event sources it asked for.",
+        causes: &[
+            "the audit log names every person who changed something, so it needs an admin token",
+            "a tenant-scoped token sees only the events of its own VMs and containers",
+        ],
+        fixes: &[
+            "use an admin token for `--source audit`, or leave the source out",
+            "for a tenant token, ask for `--source vm,docker`",
+        ],
+        aliases: &["events-not-allowed"],
+        signatures: &["needs an admin token", "can only read events of its own"],
+    },
+    MacCode {
+        code: "EVENTS_STREAM_LOST",
+        status: None,
+        summary: "`fluxctl events --follow` stopped receiving events.",
+        causes: &[
+            "the daemon restarted or the network dropped the connection",
+            "the daemon is an older version without the merged feed and closed the stream",
+        ],
+        fixes: &[
+            "run the same command again to keep watching",
+            "see what was missed meanwhile: `fluxctl events --since 5m`",
+            "check the daemon is up: `fluxctl doctor`",
+        ],
+        aliases: &["events-stream"],
+        signatures: &["the live feed stopped"],
+    },
+    MacCode {
+        code: "EVENTS_UNREADABLE",
+        status: None,
+        summary: "The event logs in the state directory could not be read.",
+        causes: &[
+            "the state directory is missing or owned by another user (run as the user that runs the daemon)",
+            "a log file has the wrong permissions",
+        ],
+        fixes: &[
+            "run `fluxctl events` as the same user as the daemon, or ask the daemon: `fluxctl --server URL events`",
+            "check the folder named in the message is readable: `ls -l` on it",
+        ],
+        aliases: &["events-unreadable"],
+        signatures: &["event logs could not be read"],
+    },
 ];
 
 fn norm(s: &str) -> String {

@@ -61,6 +61,7 @@ mod audit_api;
 mod cli_api;
 mod cluster_health;
 mod docker_view;
+mod events_feed;
 mod guest_ops;
 mod k3s_backups;
 mod kube;
@@ -4056,9 +4057,15 @@ fn in_scope(
 
 async fn list_events(
     State(m): State<Arc<VmManager>>,
+    role: Option<Extension<Role>>,
     token_tenant: Option<Extension<TokenTenant>>,
+    Query(feed): Query<fluxvm_scheduler::event_feed::FeedQuery>,
     Query(mut filter): Query<fluxvm_scheduler::EventFilter>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // `?source=` asks for the merged feed (see `events_feed.rs`); without it the reply is the plain VM event log.
+    if feed.source.is_some() {
+        return events_feed::list(&m, role.map(|Extension(r)| r), token_tenant, feed).await;
+    }
     let Some(log) = fluxvm_scheduler::events::global() else {
         return Ok(Json(json!({"items": []})));
     };
@@ -4079,9 +4086,14 @@ async fn list_events(
 /// shared events file so CLI-originated events show up too.
 async fn stream_events(
     State(m): State<Arc<VmManager>>,
+    role: Option<Extension<Role>>,
     token_tenant: Option<Extension<TokenTenant>>,
+    Query(feed): Query<fluxvm_scheduler::event_feed::FeedQuery>,
     Query(filter): Query<fluxvm_scheduler::EventFilter>,
 ) -> ApiResult<Response> {
+    if feed.source.is_some() {
+        return events_feed::stream(m, role.map(|Extension(r)| r), token_tenant, feed).await;
+    }
     let Some(log) = fluxvm_scheduler::events::global() else {
         return Err(anyhow::anyhow!("event log not initialised").into());
     };

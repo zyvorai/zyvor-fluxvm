@@ -45,6 +45,7 @@ mod docker_builds_cmd;
 mod docker_context_cmd;
 mod docker_host;
 mod doctor;
+mod events_cmd;
 mod exec_policy_check;
 mod explain;
 mod find_cmd;
@@ -2128,25 +2129,10 @@ enum Command {
         #[command(subcommand)]
         command: audit_cmd::AuditCommand,
     },
-    /// VM lifecycle / audit events from `state_dir/events.jsonl`. REST:
-    /// `GET /v1/events`, `GET /v1/events/stream` (SSE).
-    Events {
-        /// Only events for this VM (id, name, or id prefix).
-        #[arg(long, value_parser = output::parse_vm_ref)]
-        vm: Option<Uuid>,
-        /// Event-name prefix, e.g. `vm.` or `quota.deny`.
-        #[arg(long)]
-        event: Option<String>,
-        /// Only events after this RFC 3339 timestamp.
-        #[arg(long)]
-        since: Option<chrono::DateTime<chrono::Utc>>,
-        /// Newest N events (default 100).
-        #[arg(long, default_value_t = 100)]
-        limit: usize,
-        /// Keep printing new events as they are appended.
-        #[arg(long, short = 'f', default_value_t = false)]
-        follow: bool,
-    },
+    /// One chronological feed of what happened: VM lifecycle, Mac instances, Kubernetes, containers, backup and schedule
+    /// runs, and the audit log, merged. `--follow` keeps watching. REST: `GET /v1/events` (add `?source=`),
+    /// `GET /v1/events/stream` (SSE).
+    Events(events_cmd::EventsArgs),
     /// Per-token quota limits and usage. With `--token` (or `FLUXVM_TOKEN`)
     /// asks the running daemon (`GET /v1/quotas/me`); otherwise computes
     /// locally for `--name` (a configured token name).
@@ -5585,33 +5571,8 @@ async fn run_remote(
                 )?
             }
         },
-        Command::Events {
-            vm,
-            event,
-            since,
-            limit,
-            follow,
-        } => {
-            let mut q = Vec::new();
-            if let Some(vm) = vm {
-                q.push(format!("vm={vm}"));
-            }
-            if let Some(e) = event {
-                q.push(format!("event={}", remote::encode_query(&e)));
-            }
-            let tail_query = q.join("&");
-            if let Some(s) = since {
-                q.push(format!("since={}", remote::encode_query(&s.to_rfc3339())));
-            }
-            q.push(format!("limit={limit}"));
-            let v = r
-                .call(Method::GET, &format!("/v1/events?{}", q.join("&")), None)
-                .await?;
-            output::print_list(format, &v["items"], output::EVENT_COLUMNS)?;
-            if follow {
-                r.follow_events(&tail_query, |ev| print_event_line(format, &ev))
-                    .await?;
-            }
+        Command::Events(args) => {
+            events_cmd::run(args, events_cmd::Where::Remote(r), format).await?
         }
         Command::Serial { id } => run_remote_serial(r, id).await?,
         Command::PortConnect { id, name } => {
@@ -6150,58 +6111,6 @@ async fn run_remote(
              status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, branch, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
-        ),
-    }
-    Ok(())
-}
-
-/// Print events from the shared log, then optionally tail it.
-async fn print_events(
-    cfg: &Config,
-    format: output::OutputFormat,
-    filter: fluxvm_scheduler::EventFilter,
-    follow: bool,
-) -> Result<()> {
-    let log = fluxvm_scheduler::events::EventLog::new(&cfg.state_dir);
-    let items = log.list(&filter)?;
-    output::print_list(format, &items, output::EVENT_COLUMNS)?;
-    if !follow {
-        return Ok(());
-    }
-    let mut offset = log.end_offset();
-    let tail_filter = fluxvm_scheduler::EventFilter {
-        limit: None,
-        ..filter
-    };
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let (events, next) = log.read_from(offset, &tail_filter)?;
-        offset = next;
-        for ev in events {
-            print_event_line(format, &ev)?;
-        }
-    }
-}
-
-/// One followed event: JSON line, or a `ts  event  vm  k=v,...` row.
-fn print_event_line(
-    format: output::OutputFormat,
-    ev: &fluxvm_scheduler::events::VmEvent,
-) -> Result<()> {
-    match format {
-        output::OutputFormat::Json => println!("{}", serde_json::to_string(ev)?),
-        _ => println!(
-            "{}  {}  {}  {}",
-            ev.ts.to_rfc3339(),
-            ev.event,
-            ev.vm_id
-                .map(|i| i.to_string())
-                .unwrap_or_else(|| "-".into()),
-            ev.fields
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(",")
         ),
     }
     Ok(())
@@ -6753,21 +6662,13 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         return run_remote(&r, cli.command, format).await;
     }
     let cfg = load_cfg(&cli)?;
-    if let Command::Events {
-        vm,
-        event,
-        since,
-        limit,
-        follow,
-    } = &cli.command
-    {
-        let filter = fluxvm_scheduler::EventFilter {
-            vm: *vm,
-            since: *since,
-            event: event.clone(),
-            limit: Some(*limit),
-        };
-        return print_events(&cfg, format, filter, *follow).await;
+    if let Command::Events(args) = &cli.command {
+        return events_cmd::run(
+            args.clone(),
+            events_cmd::Where::Local(&cfg.state_dir),
+            format,
+        )
+        .await;
     }
     if let Command::Quota {
         token: Some(token), ..
@@ -7110,7 +7011,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Audit { .. }
-        | Command::Events { .. }
+        | Command::Events(_)
         | Command::Context { .. }
         | Command::Usage(_)
         | Command::Find(_)
@@ -11526,7 +11427,7 @@ mod backlog_tier1_cli_tests {
         );
         assert!(matches!(
             cli(&["events", "--follow", "--event", "vm."]).command,
-            Command::Events { follow: true, .. }
+            Command::Events(ref e) if e.follow
         ));
         assert!(matches!(cli(&["quota"]).command, Command::Quota { .. }));
         assert!(matches!(
