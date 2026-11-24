@@ -71,6 +71,7 @@ mod kube_flows;
 mod kube_gateways;
 mod kube_inventory;
 mod kube_metrics;
+mod kube_ops_api;
 mod kube_pod;
 mod kube_workloads;
 mod mac_backups_api;
@@ -1094,6 +1095,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(audit_api::routes())
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
+        .merge(kube_ops_api::routes())
         .merge(self_test_api::routes())
         .merge(setup_doctor::routes())
         .merge(release_check::routes())
