@@ -78,6 +78,7 @@ mod mac_fleet_api;
 mod mac_schedule_api;
 mod mac_view;
 mod macos_pool_api;
+mod self_test_api;
 mod setup_doctor;
 mod speculate_api;
 mod studio;
@@ -1092,6 +1093,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(audit_api::routes())
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
+        .merge(self_test_api::routes())
         .merge(setup_doctor::routes())
         .merge(release_check::routes())
         .merge(cli_api::routes())

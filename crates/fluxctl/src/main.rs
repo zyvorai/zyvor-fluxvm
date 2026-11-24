@@ -185,6 +185,7 @@ mod recipes;
 mod remote;
 mod run;
 mod sandbox_run;
+mod self_test_cmd;
 mod setup_doctor_cmd;
 mod share_cmd;
 mod stable_exe;
@@ -2031,6 +2032,11 @@ enum Command {
     /// image) and print the exact commands for the rest. Never runs sudo without `--sudo`, never changes a security
     /// setting, and records what it changed.
     Fix(cluster_cmd::FixArgs),
+    /// Quick end-to-end smoke check of this install: the daemon answers, the Docker socket answers /_ping and a version call,
+    /// the VM backend is available, the cache folder is writable, there is disk space, the scheduler API lists VMs and the
+    /// macOS LaunchAgent is loaded. Prints PASS/WARN/FAIL for each with a plain-English "what to do"; exit code 1 when anything
+    /// fails. `--fix` applies the safe repairs of `fluxctl fix` and checks again. Studio: Home, Self-test.
+    SelfTest(self_test_cmd::SelfTestArgs),
     /// Collect what a maintainer needs (versions, cluster health, recent logs, instances, config, disk/RAM/network) into one
     /// .tar.gz with every secret removed, and print its path. Works with the daemon down; says what it skipped and why.
     /// Studio: Home, Download support bundle.
@@ -6929,7 +6935,11 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
     // when the daemon is down, which is when they are most needed.
     if matches!(
         cli.command,
-        Command::Cluster { .. } | Command::Fix(_) | Command::SupportBundle(_) | Command::Share(_)
+        Command::Cluster { .. }
+            | Command::Fix(_)
+            | Command::SelfTest(_)
+            | Command::SupportBundle(_)
+            | Command::Share(_)
     ) {
         let env = cluster_cmd::Env {
             listen: cfg.listen.clone(),
@@ -6941,6 +6951,10 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
                 command: cluster::ClusterCommand::Status(a),
             } => cluster_cmd::run_status(a, &env).await?,
             Command::Fix(a) => cluster_cmd::run_fix(a, &env, &cfg.state_dir).await?,
+            Command::SelfTest(a) => {
+                self_test_cmd::run(a, &env, cfg.docker_sock_path(), cli.server_token.as_deref())
+                    .await?
+            }
             Command::SupportBundle(a) => support_cmd::run(a, &env, &cfg).await?,
             Command::Share(a) => {
                 share_cmd::run(&env.remote, a).await?;
@@ -7077,6 +7091,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::ExecPolicy { .. }
         | Command::Explain(_)
         | Command::Fix(_)
+        | Command::SelfTest(_)
         | Command::SupportBundle(_)
         | Command::Share(_)
         | Command::Import(_)
