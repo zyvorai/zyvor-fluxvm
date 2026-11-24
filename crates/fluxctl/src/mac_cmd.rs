@@ -139,8 +139,22 @@ pub enum MacCommand {
         #[command(flatten)]
         opts: crate::mac_more::PsOpts,
     },
-    /// Stop and delete an instance.
-    Rm { name: String },
+    /// Stop and delete instances (several names allowed, like `docker rm`). Running ones are stopped first, so `-f` is
+    /// accepted for Docker scripts and, as in Docker, makes a name that is already gone no error.
+    #[command(
+        after_help = "Examples:\n  fluxctl mac rm a b c\n  fluxctl mac rm -f stale-1 stale-2      (missing names are not an error)\n  fluxctl mac rm -v build-1             (also deletes volumes build-1 created)"
+    )]
+    Rm {
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Ignore names that do not exist. A running instance is always stopped first.
+        #[arg(short = 'f', long)]
+        force: bool,
+        /// Also delete volumes that `mac run -v NAME:/path` created for these instances and that no other instance mounts.
+        /// Volumes you made yourself (`mac volume create`) or that already existed are kept, and the ones kept are named.
+        #[arg(short = 'v', long)]
+        volumes: bool,
+    },
     /// Run a command in a running instance over SSH, like `docker exec`: `fluxctl mac exec NAME -- sw_vers`. `-it` gives a
     /// terminal (a shell, `top`, an editor); with no command you get the guest's login shell. The command's exit code is yours.
     #[command(
@@ -524,12 +538,11 @@ pub async fn run_daemon(r: &crate::remote::Remote, command: MacCommand) -> Resul
             json,
         } => crate::mac_ready::run(r, &name, timeout, &user, check, json).await,
         MacCommand::Ps { json, opts } => crate::mac_more::ps(r, json, opts).await,
-        MacCommand::Rm { name } => {
-            let vm = find_instance(r, &name).await?;
-            delete_instance(r, vm["id"].as_str().context("no id")?).await?;
-            println!("removed {name}");
-            Ok(())
-        }
+        MacCommand::Rm {
+            names,
+            force,
+            volumes,
+        } => crate::mac_rm::run(r, names, force, volumes).await,
         MacCommand::Exec {
             name,
             user,
@@ -1499,7 +1512,14 @@ mod tests {
             }
             .is_client_side()
         );
-        assert!(!MacCommand::Rm { name: "x".into() }.is_client_side());
+        assert!(
+            !MacCommand::Rm {
+                names: vec!["x".into()],
+                force: false,
+                volumes: false
+            }
+            .is_client_side()
+        );
         assert!(
             !MacCommand::Ps {
                 json: false,
