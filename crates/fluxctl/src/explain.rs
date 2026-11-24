@@ -49,7 +49,29 @@ pub fn render(args: &ExplainArgs) -> Result<(String, i32)> {
     // MAC_SLOT_LIMIT, SSH_HOSTKEY_MISMATCH, ...: failures of `fluxctl mac`, `mac-fleet` and `kube` on a Mac. A bare status
     // (409, 503) shows the API codes and the Mac ones together.
     if hits.is_empty() && !mac.is_empty() {
-        return Ok((mac_out(&mac, args.json)?, 0));
+        // A fragment such as `backup` also names cluster health codes (NO_BACKUP, STALE_BACKUP): show those after the Mac
+        // ones instead of hiding them. An exact code or alias, and `--json`, keep the single-source answer.
+        let q = query.trim().to_ascii_uppercase().replace('-', "_");
+        let exact = mac.iter().any(|c| {
+            c.code == q
+                || c.aliases
+                    .iter()
+                    .any(|a| a.to_ascii_uppercase().replace('-', "_") == q)
+        });
+        let health_too: Vec<&HealthCode> = if exact || args.json || health::code(query).is_some() {
+            Vec::new()
+        } else {
+            health::CODES
+                .iter()
+                .filter(|c| c.code.contains(q.as_str()))
+                .collect()
+        };
+        let mut out = mac_out(&mac, args.json)?;
+        for e in health_too {
+            out.push('\n');
+            out.push_str(&health_card(e));
+        }
+        return Ok((out, 0));
     }
     // IMAGE_POLICY_UNSIGNED, IMAGE_NOT_CACHED, ...: `fluxctl image sbom|sign|verify|scan|policy` and the image policy.
     if hits.is_empty() && mac.is_empty() {
