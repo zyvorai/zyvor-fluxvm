@@ -10,6 +10,7 @@
 //! | `kube`   | `kube.*` events (Apple k3s clusters and nodes) in the same file                               |
 //! | `docker` | container events: the lifecycle events of containers, in the words Docker uses                |
 //! | `backup` | backup and schedule runs: backup events, `fluxctl mac backup` archives, `fluxctl mac schedule` last runs |
+//! | `k8s`    | real Kubernetes API events of the running clusters (read live by the daemon, never stored here) |
 //! | `audit`  | the audit log, `<state_dir>/audit.jsonl` (who changed what, and whether it worked)            |
 //!
 //! `GET /v1/events?source=...`, `GET /v1/events/stream?source=...` and `fluxctl events` all read through here, so the
@@ -33,6 +34,7 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("kube", "Kubernetes clusters and nodes"),
     ("docker", "container events, as Docker words them"),
     ("backup", "backup and schedule runs"),
+    ("k8s", "events from the Kubernetes API of a running cluster"),
     ("audit", "who changed what, and whether it worked"),
 ];
 
@@ -98,6 +100,9 @@ pub struct FeedQuery {
     pub level: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Only the Kubernetes events of this cluster (the `k8s` source).
+    #[serde(default)]
+    pub cluster: Option<String>,
 }
 
 /// A [`FeedQuery`] that has been checked.
@@ -110,6 +115,7 @@ pub struct Feed {
     pub vm: Option<Uuid>,
     pub min_level: u8,
     pub limit: usize,
+    pub cluster: Option<String>,
 }
 
 fn level_rank(l: &str) -> u8 {
@@ -197,6 +203,7 @@ impl Feed {
             vm: q.vm,
             min_level,
             limit: q.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
+            cluster: q.cluster.clone().filter(|c| !c.trim().is_empty()),
         })
     }
 
@@ -208,6 +215,11 @@ impl Feed {
             && self.vm.is_none_or(|v| e.vm_id == Some(v))
             && self.event.as_deref().is_none_or(|p| e.event.starts_with(p))
             && level_rank(&e.level) >= self.min_level
+            && (e.source != "k8s"
+                || self
+                    .cluster
+                    .as_deref()
+                    .is_none_or(|c| e.target.as_deref() == Some(c)))
     }
 }
 
@@ -544,7 +556,7 @@ pub fn runs(inp: &Inputs<'_>, now: DateTime<Utc>) -> Vec<FeedEvent> {
     out
 }
 
-fn merge(mut all: Vec<FeedEvent>, feed: &Feed) -> Vec<FeedEvent> {
+pub fn merge(mut all: Vec<FeedEvent>, feed: &Feed) -> Vec<FeedEvent> {
     all.retain(|e| feed.keep(e));
     all.sort_by(|a, b| a.ts.cmp(&b.ts));
     if all.len() > feed.limit {
@@ -553,9 +565,65 @@ fn merge(mut all: Vec<FeedEvent>, feed: &Feed) -> Vec<FeedEvent> {
     all
 }
 
+/// One Kubernetes API event, as the Kubernetes page shows it (`kube_workloads::simplify_event`), as a line of the feed.
+/// `None` when it carries no usable time.
+pub fn from_k8s_event(cluster: &str, e: &serde_json::Value) -> Option<FeedEvent> {
+    let text = |k: &str| e[k].as_str().filter(|s| !s.is_empty());
+    let ts = DateTime::parse_from_rfc3339(text("last").or_else(|| text("first"))?)
+        .ok()?
+        .with_timezone(&Utc);
+    let reason = text("reason").unwrap_or("Event");
+    let object = text("object").unwrap_or("");
+    let count = e["count"].as_u64().unwrap_or(1);
+    let warning = text("type") == Some("Warning");
+    let mut summary = format!("{cluster}: {reason}");
+    if !object.is_empty() {
+        summary.push_str(&format!(" on {object}"));
+    }
+    if let Some(m) = text("message") {
+        let m: String = m.chars().take(240).collect();
+        summary.push_str(&format!(": {m}"));
+    }
+    if count > 1 {
+        summary.push_str(&format!(" (x{count})"));
+    }
+    let mut fields = BTreeMap::new();
+    for (k, v) in [
+        ("namespace", text("namespace")),
+        ("object", Some(object).filter(|o| !o.is_empty())),
+        ("reason", Some(reason)),
+        ("component", text("component")),
+    ] {
+        if let Some(v) = v {
+            fields.insert(k.to_string(), v.to_string());
+        }
+    }
+    fields.insert("count".into(), count.to_string());
+    Some(FeedEvent {
+        ts,
+        source: "k8s".into(),
+        event: format!("k8s.{reason}"),
+        summary,
+        level: if warning { "warn" } else { "info" }.into(),
+        target: Some(cluster.to_string()),
+        vm_id: None,
+        fields,
+    })
+}
+
 /// The newest `feed.limit` matching events from every wanted source, oldest first.
 pub fn collect(inp: &Inputs<'_>, feed: &Feed, now: DateTime<Utc>) -> Result<Vec<FeedEvent>> {
-    let mut all = Vec::new();
+    collect_with(inp, feed, now, Vec::new())
+}
+
+/// [`collect`] plus lines the caller gathered itself (the daemon adds the live `k8s` events), merged and limited together.
+pub fn collect_with(
+    inp: &Inputs<'_>,
+    feed: &Feed,
+    now: DateTime<Utc>,
+    extra: Vec<FeedEvent>,
+) -> Result<Vec<FeedEvent>> {
+    let mut all = extra;
     let wants = |s: &str| feed.sources.contains(s);
     if ["vm", "mac", "kube", "docker", "backup"]
         .iter()
@@ -720,7 +788,7 @@ mod tests {
         assert_eq!(e.code, "EVENTS_BAD_SOURCE");
         assert!(
             e.to_string()
-                .contains("Pick from: vm, mac, kube, docker, backup, audit")
+                .contains("Pick from: vm, mac, kube, docker, backup, k8s, audit")
         );
         assert!(e.to_string().ends_with("fluxctl explain EVENTS_BAD_SOURCE"));
         let q = FeedQuery {
@@ -737,7 +805,7 @@ mod tests {
                 .unwrap()
                 .sources
                 .len(),
-            6
+            7
         );
         let q = FeedQuery {
             source: Some("Mac, audit".into()),
@@ -943,5 +1011,110 @@ mod tests {
             &[],
         );
         assert!(poll(&inp, &only_mac, &mut cur, now()).unwrap().is_empty());
+    }
+
+    fn k8s(o: serde_json::Value) -> serde_json::Value {
+        let mut base = serde_json::json!({"namespace": "default", "type": "Warning", "reason": "BackOff",
+            "message": "Back-off restarting failed container", "object": "Pod/web-1", "count": 3,
+            "first": "2026-11-24T11:00:00Z", "last": "2026-11-24T11:30:00Z", "component": "kubelet"});
+        for (k, v) in o.as_object().unwrap() {
+            base[k] = v.clone();
+        }
+        base
+    }
+
+    #[test]
+    fn a_kubernetes_event_becomes_a_line_with_the_cluster_and_the_object() {
+        let e = from_k8s_event("lab", &k8s(serde_json::json!({}))).unwrap();
+        assert_eq!(
+            (e.source.as_str(), e.event.as_str(), e.level.as_str()),
+            ("k8s", "k8s.BackOff", "warn")
+        );
+        assert_eq!(e.target.as_deref(), Some("lab"));
+        assert_eq!(e.ts, Utc.with_ymd_and_hms(2026, 11, 24, 11, 30, 0).unwrap());
+        assert!(
+            e.summary.starts_with("lab: BackOff on Pod/web-1: Back-off")
+                && e.summary.ends_with("(x3)")
+        );
+        assert_eq!(e.fields["namespace"], "default");
+        let n = from_k8s_event(
+            "lab",
+            &k8s(serde_json::json!({"type": "Normal", "count": 1, "last": null})),
+        )
+        .unwrap();
+        assert_eq!(n.level, "info");
+        assert_eq!(
+            n.ts,
+            Utc.with_ymd_and_hms(2026, 11, 24, 11, 0, 0).unwrap(),
+            "falls back to the first time"
+        );
+        assert!(!n.summary.contains("(x"));
+        assert!(
+            from_k8s_event("lab", &serde_json::json!({"reason": "X"})).is_none(),
+            "no time, no line"
+        );
+    }
+
+    #[test]
+    fn k8s_lines_are_merged_by_time_filtered_by_cluster_and_never_read_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        put(
+            dir.path(),
+            "events.jsonl",
+            "2026-11-24T11:15:00Z",
+            "vm.start",
+            &[],
+        );
+        let lab = from_k8s_event("lab", &k8s(serde_json::json!({}))).unwrap();
+        let dev = from_k8s_event(
+            "dev",
+            &k8s(serde_json::json!({"last": "2026-11-24T11:45:00Z"})),
+        )
+        .unwrap();
+        let q = |source: &str, cluster: Option<&str>| {
+            Feed::parse(
+                &FeedQuery {
+                    source: Some(source.into()),
+                    cluster: cluster.map(Into::into),
+                    ..Default::default()
+                },
+                now(),
+            )
+            .unwrap()
+        };
+        let all = collect_with(
+            &inputs(dir.path()),
+            &q("all", None),
+            now(),
+            vec![lab.clone(), dev.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.source.as_str()).collect::<Vec<_>>(),
+            ["vm", "k8s", "k8s"]
+        );
+        let only = collect_with(
+            &inputs(dir.path()),
+            &q("k8s", Some("dev")),
+            now(),
+            vec![lab.clone(), dev],
+        )
+        .unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].target.as_deref(), Some("dev"));
+        // without the extra lines (a plain collect, a local read) the k8s source is simply empty
+        assert!(
+            collect(&inputs(dir.path()), &q("k8s", None), now())
+                .unwrap()
+                .is_empty()
+        );
+        // a feed that does not ask for k8s drops them
+        assert!(
+            collect_with(&inputs(dir.path()), &q("vm", None), now(), vec![lab])
+                .unwrap()
+                .iter()
+                .all(|e| e.source == "vm")
+        );
+        assert!(source_list().iter().any(|s| s["name"] == "k8s"));
     }
 }

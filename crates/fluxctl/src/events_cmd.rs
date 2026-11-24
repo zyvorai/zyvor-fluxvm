@@ -21,8 +21,9 @@ use uuid::Uuid;
 
 #[derive(clap::Args, Debug, Clone, Default)]
 #[command(
-    after_help = "Sources: vm, mac, kube, docker, backup, audit (comma list; default: all).\n\
-Examples:\n  fluxctl events --since 1h\n  fluxctl events --follow --source mac,kube\n  fluxctl events --level error --json"
+    after_help = "Sources: vm, mac, kube, docker, backup, k8s, audit (comma list; default: all).\n\
+`k8s` is the live event list of a running Kubernetes cluster (needs the daemon; --cluster NAME picks one). `--follow` does not include it.\n\
+Examples:\n  fluxctl events --since 1h\n  fluxctl events --follow --source mac,kube\n  fluxctl events --source k8s --cluster dev --level warn\n  fluxctl events --level error --json"
 )]
 pub struct EventsArgs {
     /// Only events for this VM (id, name, or id prefix).
@@ -37,12 +38,15 @@ pub struct EventsArgs {
     /// Only events up to this (same forms as --since).
     #[arg(long, value_name = "WHEN")]
     pub until: Option<String>,
-    /// Which sources to merge: any of vm, mac, kube, docker, backup, audit (comma separated). Default: all of them.
+    /// Which sources to merge: any of vm, mac, kube, docker, backup, k8s, audit (comma separated). Default: all of them.
     #[arg(long, value_name = "LIST")]
     pub source: Option<String>,
     /// Only this level and worse: info, warn or error.
     #[arg(long, value_name = "LEVEL")]
     pub level: Option<String>,
+    /// Only the Kubernetes events of this cluster (the k8s source).
+    #[arg(long, value_name = "NAME")]
+    pub cluster: Option<String>,
     /// Newest N events (default 100).
     #[arg(long, default_value_t = 100)]
     pub limit: usize,
@@ -64,6 +68,7 @@ impl EventsArgs {
             vm: self.vm,
             level: self.level.clone(),
             limit: Some(self.limit),
+            cluster: self.cluster.clone().filter(|c| !c.is_empty()),
         }
     }
 
@@ -79,6 +84,7 @@ impl EventsArgs {
             ("until", &q.until),
             ("event", &q.event),
             ("level", &q.level),
+            ("cluster", &q.cluster),
         ] {
             if let Some(v) = v.as_deref().filter(|v| !v.is_empty()) {
                 p.push(format!("{k}={}", remote::encode_query(v)));
@@ -107,6 +113,7 @@ pub fn empty_words(a: &EventsArgs) -> String {
         ("--since", &a.since),
         ("--level", &a.level),
         ("--event", &a.event),
+        ("--cluster", &a.cluster),
     ] {
         if v.as_deref().is_some_and(|v| !v.is_empty()) {
             narrowed.push(name);
@@ -163,6 +170,31 @@ pub fn format_line(ev: &Value) -> String {
     format!("{ts}  {source:<7} {level:<5}  {summary}")
 }
 
+/// What to say when `--follow` is asked together with the k8s source.
+const FOLLOW_NO_K8S: &str = "note: --follow does not include k8s events (they are read from the Kubernetes API, not logged). Run again without --follow to see them.";
+
+/// What to say when the daemon is not in the way: only a daemon can reach a cluster's API.
+const LOCAL_NO_K8S: &str = "note: Kubernetes events are read through the daemon, so they are left out of this local read. Point at one with `fluxctl --server URL events --source k8s`, or start it with `fluxctl daemon`. more: fluxctl explain K8S_EVENTS_UNREACHABLE";
+
+/// Does this ask for the k8s source (named, or all of them)?
+fn wants_k8s(a: &EventsArgs) -> bool {
+    a.source.as_deref().is_none_or(|s| {
+        s.trim().is_empty() || s.split(',').any(|x| matches!(x.trim(), "k8s" | "all"))
+    })
+}
+
+/// The daemon's one-line notes (a cluster that could not be read), on stderr so `--json` output stays clean.
+fn print_notes(notes: &Value) {
+    for n in notes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        eprintln!("note: {n}");
+    }
+}
+
 fn print_one(json: bool, ev: &Value) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(ev)?);
@@ -208,6 +240,10 @@ pub async fn run(a: EventsArgs, at: Where<'_>, format: crate::output::OutputForm
                 )
                 .await?;
             let items = v["items"].as_array().cloned().unwrap_or_default();
+            print_notes(&v["notes"]);
+            if a.follow && wants_k8s(&a) {
+                eprintln!("{}", FOLLOW_NO_K8S);
+            }
             print_backlog(&a, json, &items)?;
             if a.follow {
                 r.follow_sse(
@@ -235,6 +271,9 @@ pub async fn run(a: EventsArgs, at: Where<'_>, format: crate::output::OutputForm
         Where::Local(state_dir) => {
             let feed =
                 Feed::parse(&a.feed_query(), Utc::now()).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if wants_k8s(&a) {
+                eprintln!("{}", LOCAL_NO_K8S);
+            }
             let inp = Inputs::local(state_dir);
             let mut cursor = a.follow.then(|| Cursor::at_end(&inp, Utc::now()));
             let items: Vec<Value> = event_feed::collect(&inp, &feed, Utc::now())?
@@ -265,6 +304,32 @@ pub async fn run(a: EventsArgs, at: Where<'_>, format: crate::output::OutputForm
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The words the daemon uses when a cluster cannot be read (the daemon crate is not a dependency here, so the shape is
+    /// restated; `fluxvm-api` has its own test on the exact text).
+    fn fluxvm_unreachable_note() -> String {
+        "Kubernetes events of `lab` are left out: the cluster could not be reached (the server VM lab is stopped). Check it with `fluxctl kube status --name lab`, then run this again. more: fluxctl explain K8S_EVENTS_UNREACHABLE".into()
+    }
+
+    #[test]
+    fn k8s_is_wanted_by_name_or_by_default_and_the_cluster_is_sent() {
+        let a = EventsArgs::default();
+        assert!(wants_k8s(&a));
+        let only = |s: &str| EventsArgs {
+            source: Some(s.into()),
+            ..Default::default()
+        };
+        assert!(wants_k8s(&only("vm,k8s")) && wants_k8s(&only("all")));
+        assert!(!wants_k8s(&only("vm,mac")));
+        let a = EventsArgs {
+            source: Some("k8s".into()),
+            cluster: Some("dev".into()),
+            limit: 10,
+            ..Default::default()
+        };
+        assert_eq!(a.query_string(true), "source=k8s&cluster=dev&limit=10");
+        assert!(a.query_string(false).contains("cluster=dev"));
+    }
 
     #[test]
     fn the_daemon_query_names_the_source_and_only_what_is_set() {
@@ -400,6 +465,8 @@ mod tests {
                 "The event logs could not be read (denied). Check".to_string(),
                 "EVENTS_UNREADABLE",
             ),
+            (LOCAL_NO_K8S.to_string(), "K8S_EVENTS_UNREACHABLE"),
+            (fluxvm_unreachable_note(), "K8S_EVENTS_UNREACHABLE"),
         ];
         let mut seen = std::collections::BTreeSet::new();
         for (m, code) in &msgs {
@@ -413,7 +480,7 @@ mod tests {
         }
         for c in crate::mac_errors::CODES
             .iter()
-            .filter(|c| c.code.starts_with("EVENTS_"))
+            .filter(|c| c.code.starts_with("EVENTS_") || c.code == "K8S_EVENTS_UNREACHABLE")
         {
             assert!(seen.contains(c.code), "{} is never produced", c.code);
         }

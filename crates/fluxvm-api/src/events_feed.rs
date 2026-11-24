@@ -122,6 +122,33 @@ pub(crate) async fn list(
     let feed = feed_for(&q, &scope).map_err(bad)?;
     let names = containers(&all);
     let dir = m.cfg.state_dir.clone();
+    // Live Kubernetes events, only when the source is wanted; a cluster that cannot be read becomes a note, never an error.
+    let asked_k8s = q
+        .source
+        .as_deref()
+        .is_some_and(|s| s.split(',').any(|x| x.trim().eq_ignore_ascii_case("k8s")));
+    let k8s = if feed.sources.contains("k8s") {
+        if let Some(c) = feed.cluster.as_deref()
+            && !crate::kube::name_ok(c)
+        {
+            return Err(bad(event_feed::FeedError {
+                code: "EVENTS_BAD_SOURCE",
+                message: format!(
+                    "`{c}` is not a cluster name. Use the name you gave `fluxctl kube up --name`."
+                ),
+            }));
+        }
+        crate::events_k8s::gather(
+            m,
+            feed.cluster.as_deref(),
+            asked_k8s || feed.cluster.is_some(),
+        )
+        .await
+    } else {
+        Default::default()
+    };
+    let notes = k8s.notes;
+    let extra = k8s.events;
     let items = tokio::task::spawn_blocking(move || {
         let lookup = |id: Uuid| names.get(&id).cloned();
         let inp = Inputs {
@@ -130,7 +157,8 @@ pub(crate) async fn list(
             schedules: fluxvm_core::mac_schedule::default_path(),
             backups: fluxvm_core::mac_backup::default_root(),
         };
-        event_feed::collect(&inp, &feed, chrono::Utc::now()).map(|v| (v, feed.sources.clone()))
+        event_feed::collect_with(&inp, &feed, chrono::Utc::now(), extra)
+            .map(|v| (v, feed.sources.clone()))
     })
     .await
     .map_err(|e| anyhow::anyhow!("event read task failed: {e}"))??;
@@ -139,6 +167,7 @@ pub(crate) async fn list(
     Ok(Json(json!({
         "items": items,
         "sources": sources,
+        "notes": notes,
         "available": event_feed::source_list(),
     })))
 }
@@ -205,13 +234,13 @@ mod tests {
             vms: None,
             admin: true,
         };
-        assert_eq!(feed_for(&q("all"), &admin).unwrap().sources.len(), 6);
+        assert_eq!(feed_for(&q("all"), &admin).unwrap().sources.len(), 7);
         let reader = Scope {
             vms: None,
             admin: false,
         };
         let f = feed_for(&q("all"), &reader).unwrap();
-        assert!(!f.sources.contains("audit") && f.sources.len() == 5);
+        assert!(!f.sources.contains("audit") && f.sources.len() == 6);
         let e = feed_for(&q("audit"), &reader).unwrap_err();
         assert_eq!(e.code, "EVENTS_NOT_ALLOWED");
         assert!(e.message.contains("admin token"));
@@ -227,6 +256,17 @@ mod tests {
         assert_eq!(
             feed_for(&q("mac"), &tenant).unwrap_err().code,
             "EVENTS_NOT_ALLOWED"
+        );
+        // a tenant never reads cluster events: they are host-wide
+        assert_eq!(
+            feed_for(&q("k8s"), &tenant).unwrap_err().code,
+            "EVENTS_NOT_ALLOWED"
+        );
+        assert!(
+            feed_for(&q("k8s"), &reader)
+                .unwrap()
+                .sources
+                .contains("k8s")
         );
         assert_eq!(
             feed_for(&q("nope"), &admin).unwrap_err().code,

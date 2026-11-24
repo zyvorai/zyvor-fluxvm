@@ -20,6 +20,8 @@ export interface FeedEvent {
 export interface FeedReply {
   items: FeedEvent[];
   sources?: string[];
+  /** One line per cluster that could not be read, each saying what to do next. */
+  notes?: string[];
 }
 
 export const SOURCES: { value: string; label: string; about: string }[] = [
@@ -28,6 +30,7 @@ export const SOURCES: { value: string; label: string; about: string }[] = [
   { value: 'kube', label: 'Kubernetes', about: 'Clusters and nodes' },
   { value: 'docker', label: 'Containers', about: 'Container events' },
   { value: 'backup', label: 'Backups', about: 'Backup and schedule runs' },
+  { value: 'k8s', label: 'Cluster events', about: 'Live events from the Kubernetes API of running clusters' },
   { value: 'audit', label: 'Audit', about: 'Who changed what (admin)' },
 ];
 
@@ -52,9 +55,11 @@ export interface EventFilters {
   level: string;
   /** Event-name prefix, e.g. `mac.run`. */
   event: string;
+  /** Only the Kubernetes events of this cluster (used by the k8s source). */
+  cluster?: string;
 }
 
-export const EMPTY_FILTERS: EventFilters = { sources: [], since: '', level: '', event: '' };
+export const EMPTY_FILTERS: EventFilters = { sources: [], since: '', level: '', event: '', cluster: '' };
 
 /** The request for the feed: only the filters that are set. `source` is always sent, as it asks for the merged feed. */
 export function eventsPath(f: EventFilters, limit = 200, sinceOverride?: string): string {
@@ -64,8 +69,14 @@ export function eventsPath(f: EventFilters, limit = 200, sinceOverride?: string)
   if (since) p.set('since', since);
   if (f.level) p.set('level', f.level);
   if (f.event.trim()) p.set('event', f.event.trim());
+  if (f.cluster?.trim() && wantsK8s(f)) p.set('cluster', f.cluster.trim());
   p.set('limit', String(limit));
   return `/v1/events?${p.toString()}`;
+}
+
+/** Does this selection include the Kubernetes API events (named, or everything)? */
+export function wantsK8s(f: EventFilters): boolean {
+  return f.sources.length === 0 || f.sources.includes('k8s');
 }
 
 const shellWord = (s: string): string => (/^[\w.:/,-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
@@ -77,6 +88,7 @@ export function eventsCommand(f: EventFilters, follow = false): string {
   if (f.since) parts.push(`--since ${f.since}`);
   if (f.level) parts.push(`--level ${f.level}`);
   if (f.event.trim()) parts.push(`--event ${shellWord(f.event.trim())}`);
+  if (f.cluster?.trim() && wantsK8s(f)) parts.push(`--cluster ${shellWord(f.cluster.trim())}`);
   if (follow) parts.push('--follow');
   return parts.join(' ');
 }
@@ -112,10 +124,15 @@ export function errorWords(message: string): { title: string; body: string } {
 
 /** What to say when the list is empty. */
 export function emptyWords(f: EventFilters): string {
-  const filtered = f.sources.length > 0 || f.since !== '' || f.level !== '' || f.event.trim() !== '';
+  const filtered = f.sources.length > 0 || f.since !== '' || f.level !== '' || f.event.trim() !== '' || !!f.cluster?.trim();
   return filtered
     ? 'Nothing matches these filters. Widen the time range or switch more sources on.'
     : 'No events yet. They appear as machines start and stop, as backups run and as changes are made; switch Live on to wait for the next one.';
+}
+
+/** The notes of a reply, one per cluster that was left out, each with its next step (never an error: the rest of the feed is shown). */
+export function feedNotes(r: Pick<FeedReply, 'notes'>): string[] {
+  return (r.notes ?? []).filter((n) => n.trim() !== '');
 }
 
 /** The newest timestamp in a list, to ask only for what came after it. */

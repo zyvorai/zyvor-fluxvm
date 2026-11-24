@@ -62,6 +62,7 @@ mod cli_api;
 mod cluster_health;
 mod docker_view;
 mod events_feed;
+mod events_k8s;
 mod guest_ops;
 mod k3s_backups;
 mod kube;
