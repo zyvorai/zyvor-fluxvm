@@ -30,7 +30,7 @@ export type MacInstance = {
   labels: Record<string, string>;
 };
 
-export type MacProject = { name: string; running: number; total: number; services: { service: string | null; instance: string; status: string }[] };
+export type MacProject = { name: string; running: number; total: number; services: { service: string | null; instance: string; status: string; health?: MacHealth | null }[] };
 
 export type MacImage = { reference: string; digest: string; source: string; added_unix: number; size_bytes: number | null; present: boolean };
 
@@ -161,7 +161,23 @@ export const composeCommands = (project: string): { label: string; cmd: string }
   { label: 'Watch', cmd: `fluxctl mac compose -p ${project} watch` },
   { label: 'Scale', cmd: `fluxctl mac compose -p ${project} up --scale SERVICE=2 --dry-run` },
   { label: 'Fleet plan', cmd: `fluxctl mac compose up -p ${project} --dry-run --fleet hosts.yaml` },
+  { label: 'Start order', cmd: `fluxctl mac compose -p ${project} up --dry-run` },
 ];
+
+/**
+ * One plain sentence about how far a project's start-up gates are: services that `depends_on` a `service_healthy` one wait for its
+ * health, so say which services are healthy, still starting, or unhealthy and what to do. Empty when no service has a health probe.
+ */
+export const gateNote = (p: MacProject): string => {
+  const probed = p.services.filter((s) => s.health);
+  if (!probed.length) return '';
+  const name = (s: { service: string | null; instance: string }) => s.service ?? s.instance;
+  const bad = probed.filter((s) => s.health?.status === 'unhealthy').map(name);
+  if (bad.length) return `${bad.join(', ')} ${bad.length === 1 ? 'is' : 'are'} unhealthy, so anything that waits for ${bad.length === 1 ? 'it' : 'them'} (depends_on with condition: service_healthy) is not started. See why with fluxctl mac health, then fluxctl mac compose down and up again.`;
+  const wait = probed.filter((s) => s.health?.status === 'starting').map(name);
+  if (wait.length) return `Waiting for ${wait.join(', ')} to turn healthy; services that depend on ${wait.length === 1 ? 'it' : 'them'} start after that.`;
+  return `All ${probed.length} health-checked service${probed.length === 1 ? ' is' : 's are'} healthy.`;
+};
 export const SUPERVISE_INSTALL_COMMAND = 'fluxctl mac supervise --install';
 export const SUPERVISE_STATUS_COMMAND = 'fluxctl mac supervise --status';
 

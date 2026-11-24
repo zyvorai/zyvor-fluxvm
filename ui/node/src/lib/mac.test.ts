@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand, supervisorNote, unrestarted, healthAdvice, healthText, healthTone } from './mac';
+import { type MacInstance, actionCommand, actionDone, actionLabel, actionsFor, attachCommand, execCommand, explainError, filterInstances, memoryText, portsText, sizeText, statusTone, summarize, composeCommands, gateNote, shareCommand, shareServeCommand, editFormFor, memoryField, parseLabelLines, parseMemory, planEdit, updateAnswerText, updateCommand, supervisorNote, unrestarted, healthAdvice, healthText, healthTone } from './mac';
 
 const i = (name: string, status: string, extra: Partial<MacInstance> = {}): MacInstance => ({
   id: name + '-id', name, image: 'xcode:16', status, ip: '192.168.64.5', cpus: 4, memory_mib: 8192, created: null, ports: [], restart_policy: 'no', project: null, service: null, error: null, labels: {}, ...extra,
@@ -64,11 +64,30 @@ describe('mac actions', () => {
 describe('composeCommands', () => {
   it('spells watch, scale and the fleet plan as fluxctl commands for the project', () => {
     const c = composeCommands('shop');
-    expect(c.map((x) => x.label)).toEqual(['Watch', 'Scale', 'Fleet plan']);
+    expect(c.map((x) => x.label)).toEqual(['Watch', 'Scale', 'Fleet plan', 'Start order']);
+    expect(c[3].cmd).toBe('fluxctl mac compose -p shop up --dry-run');
     expect(c[0].cmd).toBe('fluxctl mac compose -p shop watch');
     expect(c[1].cmd).toContain('--scale SERVICE=2');
     expect(c[2].cmd).toContain('--dry-run --fleet');
     expect(c.every((x) => x.cmd.startsWith('fluxctl mac compose'))).toBe(true);
+  });
+});
+
+describe('gateNote', () => {
+  const h = (status: 'starting' | 'healthy' | 'unhealthy') => ({ status, failing_streak: 0, last_check_unix: 1 });
+  const proj = (services: { service: string; health?: ReturnType<typeof h> | null }[]) => ({ name: 'shop', running: services.length, total: services.length, services: services.map((s) => ({ ...s, instance: `shop-${s.service}-1`, status: 'running' })) });
+  it('is empty without any health probe', () => {
+    expect(gateNote(proj([{ service: 'db' }, { service: 'web', health: null }]))).toBe('');
+  });
+  it('says what waits when a dependency is unhealthy', () => {
+    const n = gateNote(proj([{ service: 'db', health: h('unhealthy') }, { service: 'web' }]));
+    expect(n).toMatch(/db is unhealthy/);
+    expect(n).toMatch(/service_healthy/);
+    expect(n).toMatch(/compose down/);
+  });
+  it('says it is waiting while a dependency starts, and reports all healthy', () => {
+    expect(gateNote(proj([{ service: 'db', health: h('starting') }]))).toMatch(/Waiting for db/);
+    expect(gateNote(proj([{ service: 'db', health: h('healthy') }]))).toBe('All 1 health-checked service is healthy.');
   });
 });
 

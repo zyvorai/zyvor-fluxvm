@@ -1280,6 +1280,24 @@ pub const CODES: &[MacCode] = &[
         signatures: &["explain mac_compose_dep_failed"],
     },
     MacCode {
+        code: "MAC_COMPOSE_DEP_UNHEALTHY",
+        status: None,
+        summary: "A service that others wait for with `condition: service_healthy` did not become healthy, so the services that depend on it were not started.",
+        causes: &[
+            "its HEALTHCHECK kept failing, or did not pass within `--health-timeout` (default 10 minutes)",
+            "the dependency has no HEALTHCHECK at all, so there is nothing to wait for",
+            "the dependency stopped or crashed while it was being waited for",
+        ],
+        fixes: &[
+            "see why it fails: `fluxctl mac health NAME` and `fluxctl mac logs NAME`",
+            "give it more time: `fluxctl mac compose up --health-timeout 1800`",
+            "add `HEALTHCHECK CMD ...` to its Macfile, or `healthcheck:` to the service, or use `condition: service_started` instead",
+            "the services that did start stay up; `fluxctl mac compose down` removes them, then run `up` again",
+        ],
+        aliases: &["compose-dep-unhealthy", "compose-health-timeout"],
+        signatures: &["explain mac_compose_dep_unhealthy"],
+    },
+    MacCode {
         code: "MAC_COMPOSE_FLEET_VOLUMES",
         status: None,
         summary: "`volumes:`, `secrets:` or `configs:` cannot be used with `compose up --fleet`.",
