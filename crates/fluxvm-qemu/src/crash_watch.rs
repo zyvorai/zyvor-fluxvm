@@ -355,14 +355,17 @@ mod tests {
                 assert!(n > 0, "closed before dump command");
                 rest.push_str(&String::from_utf8_lossy(&tmp[..n]));
             }
-            rest
+            // Hand the stream back with the text: dropping it here would close the socket, the watcher
+            // would see EOF and return, and `select!` (which polls its branches in random order) could
+            // pick the watcher branch over this one when both are ready.
+            (rest, s)
         });
         let w = watch(&sock, OnCrash::CoredumpIfExisting, &ws, |_| {});
         // The server keeps the socket open after sending, so stop the watcher
         // once the dump command arrived.
         tokio::select! {
             _ = w => panic!("watcher returned early"),
-            r = server => assert!(r.unwrap().contains("/dumps/")),
+            r = server => assert!(r.unwrap().0.contains("/dumps/")),
         }
     }
 }

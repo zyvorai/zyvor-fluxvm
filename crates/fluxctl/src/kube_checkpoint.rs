@@ -224,6 +224,23 @@ pub(crate) fn try_label(now: chrono::DateTime<chrono::Utc>) -> String {
     format!("{TRY_PREFIX}{}", now.format("%Y%m%d-%H%M%S%3f"))
 }
 
+/// A `try-` label for `now` that no checkpoint of VM `id` has yet. Two runs in the same millisecond (a fast command on an idle
+/// machine) would otherwise get the same label and the second would fail with "already has a checkpoint".
+async fn free_try_label<A: VmApi>(
+    api: &A,
+    id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<String> {
+    let base = try_label(now);
+    let mut label = base.clone();
+    let mut n = 1;
+    while api.has_snapshot(id, &tag_of(&label)).await? {
+        n += 1;
+        label = format!("{base}-{n}");
+    }
+    Ok(label)
+}
+
 /// The `try-` labels among these, oldest first.
 fn try_labels(labels: &[String]) -> Vec<String> {
     let mut v: Vec<String> = labels
@@ -322,7 +339,8 @@ pub async fn try_run<A: VmApi>(
     if keep == 0 {
         bail!("--keep must be at least 1");
     }
-    let label = try_label(chrono::Utc::now());
+    let (id, _) = server(api, o).await?;
+    let label = free_try_label(api, id, chrono::Utc::now()).await?;
     eprintln!("{}", checkpoint(api, o, &label).await?);
     let status = run_command(o, program, args).await?;
     let (id, _) = server(api, o).await?;
@@ -835,6 +853,32 @@ mod tests {
         assert_eq!(listed["checkpoints"].as_array().unwrap().len(), 2);
         assert!(try_run(&api, &opts(), &[], 5).await.is_err());
         assert!(try_run(&api, &opts(), &["true".into()], 0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn two_tries_in_the_same_millisecond_get_two_checkpoints() {
+        use chrono::TimeZone;
+        let api = fake("running");
+        let id = Uuid::from_u128(1);
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 25, 10, 30, 5)
+            .unwrap();
+        let mut labels = Vec::new();
+        for _ in 0..3 {
+            let l = free_try_label(&api, id, now).await.unwrap();
+            checkpoint(&api, &opts(), &l).await.unwrap();
+            labels.push(l);
+        }
+        assert_eq!(
+            labels,
+            [
+                "try-20261025-103005000",
+                "try-20261025-103005000-2",
+                "try-20261025-103005000-3"
+            ]
+        );
+        assert!(labels.iter().all(|l| label_ok(l)));
+        assert_eq!(try_labels(&labels), labels);
     }
 
     #[test]
