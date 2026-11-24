@@ -37,7 +37,9 @@ READ_TOOLS = {"list_vms", "get_vm", "host_status", "vm_network", "vm_logs", "bac
               "host_apple_capabilities", "sandbox_changesets", "session_approvals", "session_artifacts", "session_events",
               "session_file_read", "session_files", "session_job_read", "session_jobs", "session_probe",
               "session_rewind_points", "session_screenshot", "session_wait_screen",
-              "kube_status", "kube_doctor", "kube_checkpoints", "kube_diff", "kube_timeline"}
+              "kube_status", "kube_doctor", "kube_checkpoints", "kube_diff", "kube_timeline",
+              "kube_apple_list", "kube_apple_logs", "kube_apple_snapshot_ls", "kube_apple_status",
+              "mac_build_dry_run", "mac_compose_ps", "mac_images", "mac_ps"}
 WRITE_TOOLS = {
     "vm_power", "vm_capture", "vm_fork", "image_import", "vm_backup", "backup_restore",
     "pool_claim", "sandbox_create", "sandbox_exec", "sandbox_write_file",
