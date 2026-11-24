@@ -23,12 +23,34 @@ pub(crate) fn enforce(
     override_policy: bool,
     actor: Option<&str>,
 ) -> Result<()> {
-    fluxvm_image::supply::enforce(
+    let who = actor.unwrap_or("local");
+    let result = fluxvm_image::supply::enforce(
         &cfg.state_dir,
         &Subject::from(image),
         override_policy,
-        actor.unwrap_or("local"),
+        who,
         now(),
-    )
-    .map(|_| ())
+    );
+    // Every decision the policy makes is kept in the audit log (`fluxctl audit ls --action image.policy`).
+    let entry = |outcome| {
+        crate::audit::Entry::new("image.policy")
+            .target(&image.reference)
+            .actor(who)
+            .source("api")
+            .outcome(outcome)
+    };
+    match &result {
+        Ok(Some(d)) if d.overridden => crate::audit::record(
+            entry(crate::audit::Outcome::Ok).detail("note", "policy overridden"),
+        ),
+        Ok(Some(_)) => {
+            crate::audit::record(entry(crate::audit::Outcome::Ok).detail("note", "allowed"))
+        }
+        Ok(None) => {}
+        Err(e) => crate::audit::record(
+            entry(crate::audit::Outcome::Denied)
+                .detail("error", e.to_string().lines().next().unwrap_or("")),
+        ),
+    }
+    result.map(|_| ())
 }

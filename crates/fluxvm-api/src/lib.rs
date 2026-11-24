@@ -54,6 +54,7 @@ mod agent_session_approvals;
 mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
+mod audit_api;
 mod cli_api;
 mod cluster_health;
 mod docker_view;
@@ -529,6 +530,19 @@ fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16, 
         mfa = mfa.label(),
         "audit"
     );
+    // The same call, kept: every change (not reads) goes into the append-only audit file, see `audit_api.rs`.
+    if let Some((action, target)) = fluxvm_scheduler::audit::describe_http(method.as_str(), path) {
+        let outcome = fluxvm_scheduler::audit::Outcome::from_status(status);
+        fluxvm_scheduler::audit::record(
+            fluxvm_scheduler::audit::Entry::new(&action)
+                .target(&target)
+                .actor(actor)
+                .source("api")
+                .outcome(outcome)
+                .detail("role", role)
+                .detail("status", &status.to_string()),
+        );
+    }
 }
 
 fn require_admin(role: Role) -> ApiResult<()> {
@@ -1067,6 +1081,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(mac_disk_api::routes())
         .merge(macos_pool_api::routes())
         .merge(mac_view::routes())
+        .merge(audit_api::routes())
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
         .merge(setup_doctor::routes())

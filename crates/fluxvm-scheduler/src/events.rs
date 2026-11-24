@@ -113,8 +113,30 @@ impl EventLog {
         }
     }
 
+    /// A log at an exact file (the audit log keeps its own, see ). No rotation: the caller manages segments.
+    pub fn at(path: PathBuf) -> Self {
+        Self {
+            path,
+            write_lock: Mutex::new(()),
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Append without the size check (the audit log rotates its own segments).
+    pub fn append_unrotated(&self, ev: &VmEvent) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut line = serde_json::to_vec(ev)?;
+        line.push(b'\n');
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("opening {}", self.path.display()))?;
+        f.write_all(&line)?;
+        Ok(())
     }
 
     pub fn append(&self, ev: &VmEvent) -> Result<()> {
