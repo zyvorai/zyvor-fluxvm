@@ -1661,6 +1661,29 @@ pub const CODES: &[MacCode] = &[
         signatures: &["is not a level. use info"],
     },
     MacCode {
+        code: "K8S_EVENTS_UNREACHABLE",
+        status: None,
+        summary: "The Kubernetes events of a cluster were left out of the event feed because the cluster could not be read.",
+        causes: &[
+            "the cluster's server VM is stopped or has no address yet",
+            "the API server did not answer in a few seconds, or the kubeconfig `fluxctl kube up` wrote is missing",
+            "the events were asked for without a daemon (a local read has no way to reach a cluster)",
+            "no cluster has that name on this host",
+        ],
+        fixes: &[
+            "see the cluster: `fluxctl kube status --name NAME`, and start it with `fluxctl kube up --name NAME`",
+            "ask the daemon instead of reading locally: `fluxctl --server URL events --source k8s`",
+            "leave Kubernetes out meanwhile: `fluxctl events --source vm,mac,kube,docker,backup`",
+            "a failed read is not retried for a minute; run the command again after fixing the cluster",
+        ],
+        aliases: &["k8s-events-unreachable", "events-k8s"],
+        signatures: &[
+            "cluster could not be reached",
+            "no k8s events",
+            "left out of this local read",
+        ],
+    },
+    MacCode {
         code: "EVENTS_NOT_ALLOWED",
         status: Some(400),
         summary: "The token in use may not read one of the event sources it asked for.",

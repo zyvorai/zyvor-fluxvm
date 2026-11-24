@@ -216,7 +216,7 @@ pub(crate) fn simplify_node(n: &Value) -> Value {
     })
 }
 
-fn visible(vms: &[VmRecord], tenant: Option<&str>) -> Vec<VmRecord> {
+pub(crate) fn visible(vms: &[VmRecord], tenant: Option<&str>) -> Vec<VmRecord> {
     vms.iter()
         .filter(|vm| tenant.is_none_or(|t| vm.request.tenant.as_deref() == Some(t)))
         .cloned()

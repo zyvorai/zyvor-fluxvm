@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
 import { describe, expect, it } from 'vitest';
-import { EMPTY_FILTERS, emptyWords, errorWords, eventsCommand, eventsPath, levelTone, mergeNew, newestTs, sourceLabel, type FeedEvent } from './events';
+import { EMPTY_FILTERS, SOURCES, emptyWords, errorWords, eventsCommand, eventsPath, feedNotes, levelTone, mergeNew, newestTs, sourceLabel, wantsK8s, type FeedEvent } from './events';
 
 const ev = (o: Partial<FeedEvent> = {}): FeedEvent => ({ ts: '2026-11-24T10:00:00Z', source: 'vm', event: 'vm.start', summary: 'VM web started', level: 'info', ...o });
 
@@ -18,6 +18,26 @@ describe('events query', () => {
   it('shows the same filters as a terminal command, quoted safely', () => {
     expect(eventsCommand(EMPTY_FILTERS)).toBe('fluxctl events');
     expect(eventsCommand({ sources: ['mac'], since: '7d', level: 'error', event: "it's" }, true)).toBe(`fluxctl events --source mac --since 7d --level error --event 'it'\\''s' --follow`);
+  });
+});
+
+describe('cluster events', () => {
+  it('has a k8s source toggle and labels it', () => {
+    expect(SOURCES.map((s) => s.value)).toContain('k8s');
+    expect(sourceLabel('k8s')).toBe('Cluster events');
+  });
+  it('sends the cluster only when the k8s source is in play', () => {
+    expect(eventsPath({ ...EMPTY_FILTERS, sources: ['k8s'], cluster: 'dev' })).toBe('/v1/events?source=k8s&cluster=dev&limit=200');
+    expect(eventsPath({ ...EMPTY_FILTERS, cluster: 'dev' })).toContain('cluster=dev');
+    expect(eventsPath({ ...EMPTY_FILTERS, sources: ['vm'], cluster: 'dev' })).not.toContain('cluster');
+    expect(wantsK8s({ ...EMPTY_FILTERS, sources: ['vm'] })).toBe(false);
+    expect(eventsCommand({ ...EMPTY_FILTERS, sources: ['k8s'], cluster: 'dev', level: 'warn' })).toBe('fluxctl events --source k8s --level warn --cluster dev');
+    expect(eventsCommand({ ...EMPTY_FILTERS, sources: ['vm'], cluster: 'dev' })).toBe('fluxctl events --source vm');
+  });
+  it('shows the notes of clusters that were left out, and none when there are none', () => {
+    expect(feedNotes({})).toEqual([]);
+    expect(feedNotes({ notes: ['Kubernetes events of `lab` are left out. more: fluxctl explain K8S_EVENTS_UNREACHABLE', ' '] })).toHaveLength(1);
+    expect(emptyWords({ ...EMPTY_FILTERS, cluster: 'dev' })).toMatch(/Widen/);
   });
 });
 

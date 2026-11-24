@@ -2396,6 +2396,7 @@ mod tests {
             "KUBE_OP_BUSY",
             "DOCKER_SOCKET_DOWN",
             "SCHEDULER_NOT_ANSWERING",
+            "K8S_EVENTS_UNREACHABLE",
         ] {
             seen.insert(extra.to_owned());
         }

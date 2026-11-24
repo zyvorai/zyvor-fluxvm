@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Card, EmptyState, Hero, Pill, Skeleton, api } from '@fluxvm/ui-core';
 import type { Notify } from '../App';
 import { CopyCmd } from './Images';
-import { EMPTY_FILTERS, LEVEL_CHOICES, SINCE_CHOICES, SOURCES, emptyWords, errorWords, eventsCommand, eventsPath, levelTone, mergeNew, newestTs, sourceLabel, type EventFilters, type FeedEvent, type FeedReply } from '../lib/events';
+import { EMPTY_FILTERS, LEVEL_CHOICES, SINCE_CHOICES, SOURCES, emptyWords, errorWords, eventsCommand, eventsPath, feedNotes, levelTone, mergeNew, newestTs, sourceLabel, wantsK8s, type EventFilters, type FeedEvent, type FeedReply } from '../lib/events';
 
 const POLL_MS = 3000;
 
@@ -14,6 +14,7 @@ export function EventsPage({ notify }: { notify: Notify }) {
   const [filters, setFilters] = useState<EventFilters>(EMPTY_FILTERS);
   const [items, setItems] = useState<FeedEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [live, setLive] = useState(false);
   const newest = useRef<string | undefined>(undefined);
@@ -26,6 +27,7 @@ export function EventsPage({ notify }: { notify: Notify }) {
       const list = [...r.items].reverse();
       setItems(list);
       newest.current = newestTs(list);
+      setNotes(feedNotes(r));
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -54,6 +56,7 @@ export function EventsPage({ notify }: { notify: Notify }) {
               return next;
             });
           }
+          setNotes(feedNotes(r));
           setError(null);
         })
         .catch((e) => {
@@ -83,9 +86,11 @@ export function EventsPage({ notify }: { notify: Notify }) {
             {LEVEL_CHOICES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
           </select>
           <input className="fx-input" style={{ width: 170 }} aria-label="Event name" placeholder="Event, e.g. mac.run" value={filters.event} onChange={(e) => setFilters((f) => ({ ...f, event: e.target.value }))} />
+          {wantsK8s(filters) ? <input className="fx-input" style={{ width: 150 }} aria-label="Cluster" placeholder="Cluster (all)" value={filters.cluster ?? ''} onChange={(e) => setFilters((f) => ({ ...f, cluster: e.target.value.trim().toLowerCase() }))} /> : null}
           <Button size="sm" variant="ghost" onClick={() => setFilters(EMPTY_FILTERS)}>Clear</Button>
         </div>
-        <p className="fx-muted">No source selected shows all of them.</p>
+        <p className="fx-muted">No source selected shows all of them. Cluster events are read live from running clusters (not while following).</p>
+        {notes.map((n) => <p key={n} className="fx-muted" role="status">{n}</p>)}
       </Card>
       <Card title={`${items.length} ${items.length === 1 ? 'event' : 'events'}`}>
         {words ? (
