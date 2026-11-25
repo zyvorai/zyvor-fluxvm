@@ -533,7 +533,7 @@ pub const METRICS_HELP: &str = "This cluster has no metrics-server (or it has no
 
 // ---- running -----------------------------------------------------------------------------------------------------------------
 
-fn ns_args<'a>(ns: Option<&'a str>) -> Result<Vec<&'a str>> {
+fn ns_args(ns: Option<&str>) -> Result<Vec<&str>> {
     match ns {
         Some(n) => {
             check_name("namespace", n)?;
@@ -1183,10 +1183,8 @@ mod tests {
     #[test]
     fn listing_secrets_shows_names_and_keys_only() {
         let v = word();
-        let text = format!(
-            "shop\tdb\tOpaque\tpassword,user,\t2026-01-01T00:00:00Z\nkube-system\tsh.helm.release.v1.x\thelm.sh/release.v1\trelease,\t2026-01-01T00:00:00Z\nshop\tplain\t<no value>\t\t-\n"
-        );
-        let f = FakeKubectl::default().text(0, &text, "");
+        let text = "shop\tdb\tOpaque\tpassword,user,\t2026-01-01T00:00:00Z\nkube-system\tsh.helm.release.v1.x\thelm.sh/release.v1\trelease,\t2026-01-01T00:00:00Z\nshop\tplain\t<no value>\t\t-\n";
+        let f = FakeKubectl::default().text(0, text, "");
         let mut out = vec![];
         secrets_ls(&cl(&f), None, false, 1_800_000_000, &mut out).unwrap();
         let said = String::from_utf8(out).unwrap();
@@ -1201,7 +1199,7 @@ mod tests {
             "{argv}"
         );
         assert!(!argv.contains("-o json"), "{argv}");
-        let rows = parse_list(&text, true);
+        let rows = parse_list(text, true);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].kind, "Opaque");
     }

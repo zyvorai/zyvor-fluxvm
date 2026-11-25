@@ -187,10 +187,10 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
         crate::metrics::inc_failed();
     }
     if status.phase == "Running" && prev_phase != "Running" {
-        if let Some(created) = obj.meta().creation_timestamp.as_ref() {
-            if let Ok(d) = std::time::SystemTime::now().duration_since(created.0.into()) {
-                crate::metrics::observe_create_to_running(d);
-            }
+        if let Some(created) = obj.meta().creation_timestamp.as_ref()
+            && let Ok(d) = std::time::SystemTime::now().duration_since(created.0.into())
+        {
+            crate::metrics::observe_create_to_running(d);
         }
         if let Some(sched_at) = obj
             .meta()

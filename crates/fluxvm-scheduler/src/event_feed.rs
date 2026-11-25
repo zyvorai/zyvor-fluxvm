@@ -558,7 +558,7 @@ pub fn runs(inp: &Inputs<'_>, now: DateTime<Utc>) -> Vec<FeedEvent> {
 
 pub fn merge(mut all: Vec<FeedEvent>, feed: &Feed) -> Vec<FeedEvent> {
     all.retain(|e| feed.keep(e));
-    all.sort_by(|a, b| a.ts.cmp(&b.ts));
+    all.sort_by_key(|a| a.ts);
     if all.len() > feed.limit {
         all.drain(..all.len() - feed.limit);
     }
@@ -705,7 +705,7 @@ pub fn poll(
             .map(|r| from_audit(&r)),
     );
     cur.polls += 1;
-    if cur.polls % 10 == 0 {
+    if cur.polls.is_multiple_of(10) {
         for r in runs(inp, now) {
             if cur.seen_runs.insert(run_key(&r)) {
                 fresh.push(r);
@@ -713,7 +713,7 @@ pub fn poll(
         }
     }
     fresh.retain(|e| feed.keep(e));
-    fresh.sort_by(|a, b| a.ts.cmp(&b.ts));
+    fresh.sort_by_key(|a| a.ts);
     Ok(fresh)
 }
 

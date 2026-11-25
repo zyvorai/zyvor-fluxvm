@@ -181,11 +181,7 @@ fn purl(
     version: &str,
     arch: Option<&str>,
 ) -> String {
-    let ty = match ecosystem {
-        "pypi" => "pypi",
-        "npm" => "npm",
-        other => other,
-    };
+    let ty = ecosystem;
     let mut s = format!("pkg:{ty}/");
     if let Some(ns) = namespace {
         s.push_str(&enc(ns));

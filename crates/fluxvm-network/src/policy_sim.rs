@@ -753,7 +753,7 @@ mod tests {
     #[test]
     fn allow_list_ignores_default_allow() {
         let p = pol(|p| p.allow_ports = s(&["tcp/443"]));
-        assert_eq!(p.default_allow, true);
+        assert!(p.default_allow);
         assert_eq!(run(&p, "tcp://1.1.1.1:80").verdict, Verdict::Drop);
         assert_eq!(run(&p, "tcp://1.1.1.1:443").verdict, Verdict::Allow);
     }

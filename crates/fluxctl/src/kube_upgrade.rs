@@ -10,7 +10,7 @@
 //! manual steps, because nothing in the cluster lifecycle removes a node's VM and record yet.
 
 use crate::gateway::Target;
-use crate::gateway::kube::{Cluster, KubeRun, SystemKubectl};
+use crate::gateway::kube::{Cluster, SystemKubectl};
 use crate::kube_app_cmd::{coded, kc, kerr, selection};
 use crate::kube_apple::AppleCommand;
 use anyhow::{Result, anyhow, bail};

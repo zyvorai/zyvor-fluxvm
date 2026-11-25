@@ -104,7 +104,7 @@ pub fn verdicts(x: &Facts) -> Vec<Finding> {
                 "",
             ));
         }
-        if x.servers_joined % 2 == 0 {
+        if x.servers_joined.is_multiple_of(2) {
             v.push(f(
                 "server-count",
                 Level::Warn,

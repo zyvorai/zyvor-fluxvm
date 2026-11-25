@@ -8,8 +8,6 @@
 //! VM weight/slice/latency policy, and then opts only those TIDs into SCHED_EXT.
 //! No host-wide scheduler takeover is performed.
 
-#[cfg(target_os = "linux")]
-use anyhow::anyhow;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

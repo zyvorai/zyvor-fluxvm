@@ -22,8 +22,6 @@ use fluxvm_network::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

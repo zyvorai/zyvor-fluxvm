@@ -9,7 +9,7 @@
 //! "would free" figure is an upper bound: the disk may gain less. That is printed next to the number, not hidden.
 
 use crate::mac_image_ops::{self as ops, Df, file_alloc};
-use crate::mac_inspect::{human_bytes, status};
+use crate::mac_inspect::human_bytes;
 use crate::mac_store::Store;
 use crate::mac_volume::{Volume, tree_alloc, users};
 use anyhow::Result;

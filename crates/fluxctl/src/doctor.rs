@@ -654,14 +654,14 @@ fn client_refs() -> Vec<PathRef> {
     }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         for (label, plist) in fluxvm_plists(&home) {
-            if let Ok(text) = std::fs::read_to_string(&plist) {
-                if let Some(bin) = plist_program(&text) {
-                    refs.push(PathRef {
-                        what: format!("LaunchAgent {label}"),
-                        path: PathBuf::from(&bin),
-                        exists: Path::new(&bin).exists(),
-                    });
-                }
+            if let Ok(text) = std::fs::read_to_string(&plist)
+                && let Some(bin) = plist_program(&text)
+            {
+                refs.push(PathRef {
+                    what: format!("LaunchAgent {label}"),
+                    path: PathBuf::from(&bin),
+                    exists: Path::new(&bin).exists(),
+                });
             }
         }
     }
@@ -1040,7 +1040,7 @@ mod tests {
     fn exit_code_is_nonzero_only_for_failures() {
         let warn = Check::warn("a", "d", "f");
         let fail = Check::fail("b", "d", "f");
-        assert_eq!(exit_code(&[warn.clone()]), 0);
+        assert_eq!(exit_code(std::slice::from_ref(&warn)), 0);
         assert_eq!(exit_code(&[warn, fail]), 1);
     }
 

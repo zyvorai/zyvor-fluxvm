@@ -165,10 +165,7 @@ impl FlowQuery {
                 return false;
             }
         }
-        if self.verdict.as_ref().is_some_and(|x| x != v.verdict) {
-            return false;
-        }
-        true
+        !self.verdict.as_ref().is_some_and(|x| x != v.verdict)
     }
 }
 

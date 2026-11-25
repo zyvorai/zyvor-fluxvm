@@ -1,13 +1,9 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-#[cfg(target_os = "linux")]
-use anyhow::anyhow;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(target_os = "linux")]
-use std::collections::BTreeMap;
 use std::{
     env, fs,
     fs::File,

@@ -872,8 +872,8 @@ pub fn list(sel: &Selection, c: &Cluster, out: &mut dyn Write) -> Result<i32> {
     }
     writeln!(
         out,
-        "{:<24} {:<16} {:<28} {:<26} {}",
-        "SERVICE", "NAMESPACE", "HOST", "ROUTE", "GATEWAY"
+        "{:<24} {:<16} {:<28} {:<26} GATEWAY",
+        "SERVICE", "NAMESPACE", "HOST", "ROUTE"
     )?;
     for ((ns, svc), r) in &rows {
         let dash = |s: &str| {

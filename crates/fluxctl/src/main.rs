@@ -10,7 +10,7 @@ use fluxvm_api::docker_engine;
 use fluxvm_core::{
     config::Config,
     model::{
-        BackendKind, ClaimOverrides, CreateVmRequest, DirectMode, DirectSpec, MigrationMode,
+        BackendKind, ClaimOverrides, DirectMode, DirectSpec, MigrationMode,
         MigrationReceiverRequest, MigrationStartRequest, ResourcePatch,
     },
 };

@@ -98,7 +98,7 @@ pub fn start_sampler(manager: &Arc<crate::VmManager>) {
                 let mut l = ledger.lock().unwrap_or_else(|e| e.into_inner());
                 l.observe(Utc::now(), &obs);
                 n += 1;
-                (n % SAVE_EVERY == 0).then(|| l.clone())
+                n.is_multiple_of(SAVE_EVERY).then(|| l.clone())
             };
             if let Some(l) = snapshot {
                 let d = dir.clone();

@@ -197,7 +197,7 @@ pub fn execute(
         "running: {}",
         crate::gateway::kube::shell_join(&argv)
     ));
-    let stdin = (t.kind == Kind::K3s).then(|| t.body.as_bytes());
+    let stdin = (t.kind == Kind::K3s).then_some(t.body.as_bytes());
     let out = runner
         .run(&argv, stdin, Duration::from_secs(900))
         .map_err(|e| needs(t, format!("could not run {}: {e}", argv[0])))?;

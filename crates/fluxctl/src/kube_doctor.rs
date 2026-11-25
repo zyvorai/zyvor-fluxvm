@@ -465,10 +465,10 @@ pub fn render(checks: &[Check]) -> String {
 pub fn plan(checks: &[Check]) -> Vec<Remedy> {
     let mut out: Vec<Remedy> = vec![];
     for c in checks.iter().filter(|c| c.level != Level::Ok) {
-        if let Some(r) = c.remedy {
-            if !out.contains(&r) {
-                out.push(r);
-            }
+        if let Some(r) = c.remedy
+            && !out.contains(&r)
+        {
+            out.push(r);
         }
     }
     out

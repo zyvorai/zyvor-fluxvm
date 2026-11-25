@@ -296,7 +296,7 @@ async fn switch<A: VmApi>(api: &A, o: &KubeOptions) -> Result<()> {
     });
     if let Some(from) = &step.save {
         let l = label(from);
-        if existing.iter().any(|e| *e == l) {
+        if existing.contains(&l) {
             kube_checkpoint::remove(api, o, &l).await?;
         }
         eprintln!("fluxctl kube git: saving the cluster for {from}");

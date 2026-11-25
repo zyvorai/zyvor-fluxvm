@@ -760,7 +760,7 @@ mod tests {
         );
         assert_eq!(std::fs::read(out.join("disk.raw")).unwrap(), b"cache-dir");
         // Removing the cache entry leaves the built image intact.
-        assert!(remove(&store, &[c.clone()]).unwrap() > 0);
+        assert!(remove(&store, std::slice::from_ref(&c)).unwrap() > 0);
         assert!(store.resolve(&c).is_err());
         assert!(store.resolve("out:1").is_ok());
         // Plain images are never listed as cache.

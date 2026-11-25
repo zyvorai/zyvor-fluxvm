@@ -443,6 +443,7 @@ mod attribution_tests {
 
 #[cfg(test)]
 mod started_at_tests {
+    #[cfg(target_os = "macos")]
     use super::process_started_at;
 
     #[cfg(target_os = "macos")]

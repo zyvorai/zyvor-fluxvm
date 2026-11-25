@@ -427,12 +427,12 @@ pub fn gather(store: &Path, daemon: Option<DaemonFacts>) -> Facts {
     }
     f.os_version = cmd_out("/usr/bin/sw_vers", &["-productVersion"]).unwrap_or_default();
     f.store_writable = Some(probe_store(store));
-    if let Some(d) = existing(store).and_then(|d| d.to_str().map(str::to_owned)) {
-        if let Some((gb, mount)) = cmd_out("/bin/df", &["-Pk", &d]).and_then(|t| parse_df(&t)) {
-            f.store_free_gb = Some(gb);
-            f.store_fs = cmd_out("/usr/sbin/diskutil", &["info", &mount])
-                .and_then(|t| parse_diskutil_fs(&t));
-        }
+    if let Some(d) = existing(store).and_then(|d| d.to_str().map(str::to_owned))
+        && let Some((gb, mount)) = cmd_out("/bin/df", &["-Pk", &d]).and_then(|t| parse_df(&t))
+    {
+        f.store_free_gb = Some(gb);
+        f.store_fs =
+            cmd_out("/usr/sbin/diskutil", &["info", &mount]).and_then(|t| parse_diskutil_fs(&t));
     }
     f.store_dev = dev_of(store);
     let state = std::env::var_os("FLUXVM_STATE_DIR")

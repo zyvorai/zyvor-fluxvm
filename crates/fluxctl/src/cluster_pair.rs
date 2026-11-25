@@ -528,7 +528,7 @@ fn host_name() -> String {
 
 fn operator_token(a: &ServerArgs) -> Result<String> {
     if let Some(f) = &a.token_file {
-        return Ok(read_private(f)?.with_context(|| format!("{} does not exist", f.display()))?);
+        return read_private(f)?.with_context(|| format!("{} does not exist", f.display()));
     }
     if let Ok(t) = std::env::var("FLUXVM_AGENT_TOKEN")
         && !t.is_empty()
