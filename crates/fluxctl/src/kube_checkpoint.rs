@@ -444,7 +444,7 @@ async fn bisect_run<A: VmApi>(
     program: &str,
     args: &[String],
 ) -> Result<String> {
-    let mut test = async |i: usize| -> Result<bool> {
+    let test = async |i: usize| -> Result<bool> {
         eprintln!("testing {}", autos[i]);
         restore(api, o, &autos[i]).await?;
         Ok(run_command(o, program, args).await?.success())

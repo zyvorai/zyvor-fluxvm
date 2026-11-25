@@ -1080,7 +1080,7 @@ mod tests {
         let p3 = log
             .query(&Query {
                 limit: Some(2),
-                offset: p1.next_offset.and_then(|o| Some(o + 2)),
+                offset: p1.next_offset.map(|o| o + 2),
                 ..Default::default()
             })
             .unwrap();

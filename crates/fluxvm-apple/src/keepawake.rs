@@ -43,11 +43,12 @@ impl KeepAwake {
         let held = self.held();
         if want && !held {
             self.child = spawn();
-        } else if !want && held {
-            if let Some(mut c) = self.child.take() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
+        } else if !want
+            && held
+            && let Some(mut c) = self.child.take()
+        {
+            let _ = c.kill();
+            let _ = c.wait();
         }
     }
 }

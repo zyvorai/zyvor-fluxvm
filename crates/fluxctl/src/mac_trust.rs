@@ -461,15 +461,18 @@ mod tests {
         let rec = t.sign_digest(D).unwrap();
         let trusted = t.parsed().unwrap();
         assert_eq!(
-            evaluate(D, &[rec.clone()], &trusted),
+            evaluate(D, std::slice::from_ref(&rec), &trusted),
             Verdict::Trusted {
                 signer: "self".into()
             }
         );
         // The same signature does not vouch for another digest.
-        assert_eq!(evaluate(D2, &[rec.clone()], &trusted), Verdict::Invalid);
+        assert_eq!(
+            evaluate(D2, std::slice::from_ref(&rec), &trusted),
+            Verdict::Invalid
+        );
         // Nobody trusted: valid but untrusted, naming the key.
-        match evaluate(D, &[rec.clone()], &[]) {
+        match evaluate(D, std::slice::from_ref(&rec), &[]) {
             Verdict::UntrustedSigner { fingerprints } => {
                 assert_eq!(fingerprints, vec![fingerprint(&rec.signer)])
             }
@@ -526,7 +529,7 @@ mod tests {
         t.generate().unwrap();
         let rec = t.sign_digest(D).unwrap();
         assert!(t.load_signatures(D).unwrap().is_empty());
-        t.save_signatures(D, &[rec.clone()]).unwrap();
+        t.save_signatures(D, std::slice::from_ref(&rec)).unwrap();
         assert_eq!(t.load_signatures(D).unwrap(), vec![rec]);
         assert!(t.load_signatures("sha256:../x").is_err());
     }

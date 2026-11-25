@@ -49,10 +49,7 @@ impl Target {
         if !valid_host(host) {
             bail!("bad host in {s:?}: use a name or IPv4 address, optionally user@host:port");
         }
-        let first = if host
-            .bytes()
-            .all(|c| (b'0'..=b'9').contains(&c) || c == b'.')
-        {
+        let first = if host.bytes().all(|c: u8| c.is_ascii_digit() || c == b'.') {
             host
         } else {
             host.split('.').next().unwrap_or(host)
@@ -290,7 +287,8 @@ impl Transport for DryTransport {
 pub fn explain_ssh_failure(t: &Target, stderr: &str) -> String {
     let h = t.label();
     let s = stderr.to_ascii_lowercase();
-    let hint = if s.contains("remote host identification has changed") {
+
+    if s.contains("remote host identification has changed") {
         format!(
             "the host key of {h} changed (a reinstalled Mac, or something in the middle): verify it, then `ssh-keygen -R {}` and connect once by hand",
             t.host
@@ -315,8 +313,7 @@ pub fn explain_ssh_failure(t: &Target, stderr: &str) -> String {
         )
     } else {
         "ssh failed".to_owned()
-    };
-    hint
+    }
 }
 
 #[cfg(test)]

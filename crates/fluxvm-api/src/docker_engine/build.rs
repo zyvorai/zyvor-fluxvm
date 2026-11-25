@@ -382,16 +382,17 @@ mod tests {
         let id = format!("sha256:{}", "ab".repeat(32));
         assert!(v.iter().any(|l| l["aux"]["ID"] == id.as_str()));
         // The builder saw the unpacked, .dockerignore-filtered context and every flag.
-        let seen = fake.seen.lock().unwrap();
-        let (req, files, file) = &seen[0];
-        assert_eq!(files, &[".dockerignore", "Dockerfile", "src/a.txt"]);
-        assert_eq!(file, "Dockerfile");
-        assert_eq!(req.tags, ["app:1", "app:latest"]);
-        assert_eq!(req.build_args["VER"], "3");
-        assert_eq!(req.target.as_deref(), Some("rel"));
-        assert_eq!(req.platform.as_deref(), Some("darwin/arm64"));
-        assert!(req.no_cache);
-        drop(seen);
+        {
+            let seen = fake.seen.lock().unwrap();
+            let (req, files, file) = &seen[0];
+            assert_eq!(files, &[".dockerignore", "Dockerfile", "src/a.txt"]);
+            assert_eq!(file, "Dockerfile");
+            assert_eq!(req.tags, ["app:1", "app:latest"]);
+            assert_eq!(req.build_args["VER"], "3");
+            assert_eq!(req.target.as_deref(), Some("rel"));
+            assert_eq!(req.platform.as_deref(), Some("darwin/arm64"));
+            assert!(req.no_cache);
+        }
         // History: succeeded, with names of build args only.
         let h = engine.history.list();
         assert_eq!(h[0].state, "succeeded");

@@ -399,10 +399,7 @@ mod tests {
         };
         assert_eq!(run(&a, &env, &cfg).await.unwrap(), 0);
         let bytes = std::fs::read(&out).unwrap();
-        assert_eq!(
-            fluxvm_core::support_bundle::verify_archive(&bytes).unwrap() >= 4,
-            true
-        );
+        assert!(fluxvm_core::support_bundle::verify_archive(&bytes).unwrap() >= 4);
         let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
         let mut manifest = String::new();
         for e in ar.entries().unwrap() {

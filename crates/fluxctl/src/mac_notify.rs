@@ -374,10 +374,9 @@ mod tests {
     fn webhook_urls_are_checked_before_use() {
         assert!(checked_targets(Some("not a url".into()), false).is_err());
         assert!(
-            checked_targets(Some("https://h.example/x".into()), true)
+            !checked_targets(Some("https://h.example/x".into()), true)
                 .unwrap()
                 .desktop
-                == false
         );
     }
 }

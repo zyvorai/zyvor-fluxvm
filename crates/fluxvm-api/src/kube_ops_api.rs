@@ -28,7 +28,6 @@ use fluxvm_core::k3s_backups as kb;
 use fluxvm_scheduler::VmManager;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path as FsPath, PathBuf};
 use std::process::{Command, Stdio};

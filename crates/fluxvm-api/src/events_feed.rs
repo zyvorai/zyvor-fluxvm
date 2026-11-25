@@ -69,21 +69,19 @@ fn feed_for(q: &FeedQuery, scope: &Scope) -> Result<Feed, event_feed::FeedError>
         (None, "audit") => scope.admin,
         (None, _) => true,
     };
-    if !asked_all {
-        if let Some(s) = feed.sources.iter().find(|s| !allowed(s)) {
-            return Err(event_feed::FeedError {
-                code: "EVENTS_NOT_ALLOWED",
-                message: if scope.vms.is_some() {
-                    format!(
-                        "This token can only read events of its own VMs and containers, not `{s}`. Ask for --source vm or --source docker, or use an admin token."
-                    )
-                } else {
-                    format!(
-                        "`{s}` shows who changed what, so it needs an admin token. Use an admin token, or leave `{s}` out of --source."
-                    )
-                },
-            });
-        }
+    if !asked_all && let Some(s) = feed.sources.iter().find(|s| !allowed(s)) {
+        return Err(event_feed::FeedError {
+            code: "EVENTS_NOT_ALLOWED",
+            message: if scope.vms.is_some() {
+                format!(
+                    "This token can only read events of its own VMs and containers, not `{s}`. Ask for --source vm or --source docker, or use an admin token."
+                )
+            } else {
+                format!(
+                    "`{s}` shows who changed what, so it needs an admin token. Use an admin token, or leave `{s}` out of --source."
+                )
+            },
+        });
     }
     feed.sources.retain(|s| allowed(s));
     Ok(feed)

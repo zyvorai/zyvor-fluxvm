@@ -956,12 +956,12 @@ fn create_container(
             return Err(e);
         }
     };
-    if let Some(policy) = device_policy.as_ref() {
-        if let Err(e) = attach_device_cgroup_policy(&cgroup_path, policy) {
-            cleanup_mounts(&mounts);
-            let _ = std::fs::remove_dir(&cgroup_path);
-            return Err(e);
-        }
+    if let Some(policy) = device_policy.as_ref()
+        && let Err(e) = attach_device_cgroup_policy(&cgroup_path, policy)
+    {
+        cleanup_mounts(&mounts);
+        let _ = std::fs::remove_dir(&cgroup_path);
+        return Err(e);
     }
     // Sentinel Set 8S: attach in-guest per-container network policy before
     // spawning the process, so it's enforced from this container's very
@@ -3529,14 +3529,14 @@ fn parse_container_cidr(rule: &ContainerNetworkRule) -> Result<(u8, u8, [u8; 16]
     let mut addr = [0u8; 16];
     match ip {
         IpAddr::V4(v) => {
-            if (prefix > 32) {
+            if prefix > 32 {
                 bail!("IPv4 prefix >32")
             };
             addr[..4].copy_from_slice(&v.octets());
             Ok((4, prefix, addr))
         }
         IpAddr::V6(v) => {
-            if (prefix > 128) {
+            if prefix > 128 {
                 bail!("IPv6 prefix >128")
             };
             addr = v.octets();
@@ -3589,31 +3589,31 @@ fn configure_container_policy(
                 reserved: 0,
             });
         }
-        if let Some(p) = policy {
-            if p.schema_version >= 2 {
-                for (slot, r) in p.rules.iter().take(FLUXVM_MAX_CRULES).enumerate() {
-                    let direction = match r.direction.as_str() {
-                        "egress" => 1,
-                        "ingress" => 2,
-                        _ => bail!("invalid guest policy direction"),
-                    };
-                    let (family, prefix_len, address) = parse_container_cidr(r)?;
-                    rules.insert(
-                        &CruleKey {
-                            cgroup_id,
-                            slot: slot as u32,
-                            reserved: 0,
-                        },
-                        &CruleValue {
-                            direction,
-                            family,
-                            prefix_len,
-                            reserved: 0,
-                            address,
-                        },
-                        0,
-                    )?;
-                }
+        if let Some(p) = policy
+            && p.schema_version >= 2
+        {
+            for (slot, r) in p.rules.iter().take(FLUXVM_MAX_CRULES).enumerate() {
+                let direction = match r.direction.as_str() {
+                    "egress" => 1,
+                    "ingress" => 2,
+                    _ => bail!("invalid guest policy direction"),
+                };
+                let (family, prefix_len, address) = parse_container_cidr(r)?;
+                rules.insert(
+                    &CruleKey {
+                        cgroup_id,
+                        slot: slot as u32,
+                        reserved: 0,
+                    },
+                    &CruleValue {
+                        direction,
+                        family,
+                        prefix_len,
+                        reserved: 0,
+                        address,
+                    },
+                    0,
+                )?;
             }
         }
     }
@@ -3682,46 +3682,46 @@ fn forget_container_policy(cgroup_id: u64) {
     let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
     let Some(state) = guard.as_mut() else { return };
 
-    if let Some(map) = state.bpf.map_mut("fluxvm_crules") {
-        if let Ok(mut rules) = aya::maps::HashMap::<_, CruleKey, CruleValue>::try_from(map) {
-            for slot in 0..FLUXVM_MAX_CRULES {
-                let _ = rules.remove(&CruleKey {
-                    cgroup_id,
-                    slot: slot as u32,
-                    reserved: 0,
-                });
-            }
+    if let Some(map) = state.bpf.map_mut("fluxvm_crules")
+        && let Ok(mut rules) = aya::maps::HashMap::<_, CruleKey, CruleValue>::try_from(map)
+    {
+        for slot in 0..FLUXVM_MAX_CRULES {
+            let _ = rules.remove(&CruleKey {
+                cgroup_id,
+                slot: slot as u32,
+                reserved: 0,
+            });
         }
     }
-    if let Some(map) = state.bpf.map_mut("fluxvm_cpol") {
-        if let Ok(mut cpol) = aya::maps::HashMap::<_, u64, u64>::try_from(map) {
-            let _ = cpol.remove(&cgroup_id);
+    if let Some(map) = state.bpf.map_mut("fluxvm_cpol")
+        && let Ok(mut cpol) = aya::maps::HashMap::<_, u64, u64>::try_from(map)
+    {
+        let _ = cpol.remove(&cgroup_id);
+    }
+    if let Some(map) = state.bpf.map_mut("fluxvm_cid4")
+        && let Ok(mut cid4) = aya::maps::HashMap::<_, Cid4Key, u32>::try_from(map)
+    {
+        let stale: Vec<Cid4Key> = cid4
+            .iter()
+            .filter_map(Result::ok)
+            .map(|(k, _)| k)
+            .filter(|k| k.cgroup_id == cgroup_id)
+            .collect();
+        for key in stale {
+            let _ = cid4.remove(&key);
         }
     }
-    if let Some(map) = state.bpf.map_mut("fluxvm_cid4") {
-        if let Ok(mut cid4) = aya::maps::HashMap::<_, Cid4Key, u32>::try_from(map) {
-            let stale: Vec<Cid4Key> = cid4
-                .iter()
-                .filter_map(Result::ok)
-                .map(|(k, _)| k)
-                .filter(|k| k.cgroup_id == cgroup_id)
-                .collect();
-            for key in stale {
-                let _ = cid4.remove(&key);
-            }
-        }
-    }
-    if let Some(map) = state.bpf.map_mut("fluxvm_cid6") {
-        if let Ok(mut cid6) = aya::maps::HashMap::<_, Cid6Key, u32>::try_from(map) {
-            let stale: Vec<Cid6Key> = cid6
-                .iter()
-                .filter_map(Result::ok)
-                .map(|(k, _)| k)
-                .filter(|k| k.cgroup_id == cgroup_id)
-                .collect();
-            for key in stale {
-                let _ = cid6.remove(&key);
-            }
+    if let Some(map) = state.bpf.map_mut("fluxvm_cid6")
+        && let Ok(mut cid6) = aya::maps::HashMap::<_, Cid6Key, u32>::try_from(map)
+    {
+        let stale: Vec<Cid6Key> = cid6
+            .iter()
+            .filter_map(Result::ok)
+            .map(|(k, _)| k)
+            .filter(|k| k.cgroup_id == cgroup_id)
+            .collect();
+        for key in stale {
+            let _ = cid6.remove(&key);
         }
     }
 }
@@ -3826,10 +3826,10 @@ fn container_identity_for(id: &str) -> u32 {
 /// log a clear reason instead of a container silently running unconfined.
 fn attach_guest_lsm() -> Result<()> {
     let mut guard = guest_lsm_cell().lock().expect("guest LSM poisoned");
-    if let Some(state) = guard.as_ref() {
-        if state.attached {
-            return Ok(());
-        }
+    if let Some(state) = guard.as_ref()
+        && state.attached
+    {
+        return Ok(());
     }
     if guard.is_none() {
         let bpf = Ebpf::load(GUEST_LSM_BPF_OBJ).context("loading fluxvm_guest_lsm.bpf.o")?;
@@ -3940,21 +3940,20 @@ fn configure_container_lsm_policy(
 fn forget_container_lsm_policy(cgroup_id: u64) {
     let mut guard = guest_lsm_cell().lock().expect("guest LSM poisoned");
     let Some(state) = guard.as_mut() else { return };
-    if let Some(map) = state.bpf.map_mut("fluxvm_lsmpol") {
-        if let Ok(mut pol) = aya::maps::HashMap::<_, u64, LsmPolicyValue>::try_from(map) {
-            let _ = pol.remove(&cgroup_id);
-        }
+    if let Some(map) = state.bpf.map_mut("fluxvm_lsmpol")
+        && let Ok(mut pol) = aya::maps::HashMap::<_, u64, LsmPolicyValue>::try_from(map)
+    {
+        let _ = pol.remove(&cgroup_id);
     }
-    if let Some(map) = state.bpf.map_mut("fluxvm_lsmwrite") {
-        if let Ok(mut write) = aya::maps::HashMap::<_, LsmPrefixKey, LsmPrefixValue>::try_from(map)
-        {
-            for slot in 0..FLUXVM_LSM_MAX_PREFIXES {
-                let _ = write.remove(&LsmPrefixKey {
-                    cgroup_id,
-                    slot,
-                    reserved: 0,
-                });
-            }
+    if let Some(map) = state.bpf.map_mut("fluxvm_lsmwrite")
+        && let Ok(mut write) = aya::maps::HashMap::<_, LsmPrefixKey, LsmPrefixValue>::try_from(map)
+    {
+        for slot in 0..FLUXVM_LSM_MAX_PREFIXES {
+            let _ = write.remove(&LsmPrefixKey {
+                cgroup_id,
+                slot,
+                reserved: 0,
+            });
         }
     }
 }
@@ -4028,10 +4027,10 @@ fn current_memory_limit_for_swap(path: &std::path::Path) -> i64 {
 /// `memory.swap.max` is swap-only.
 fn oci_swap_to_cgroup2(memory_swap: i64, memory: i64) -> Result<Option<String>> {
     match (memory, memory_swap) {
-        (-1, 0) => return Ok(Some("max".into())),
-        (_, -1) => return Ok(Some("max".into())),
-        (_, 0) => return Ok(None),
-        (-1, swap) if swap > 0 => return Ok(Some(swap.to_string())),
+        (-1, 0) => Ok(Some("max".into())),
+        (_, -1) => Ok(Some("max".into())),
+        (_, 0) => Ok(None),
+        (-1, swap) if swap > 0 => Ok(Some(swap.to_string())),
         (0, _) => bail!("unable to set OCI memory.swap without a memory limit"),
         (memory, _) if memory < -1 => bail!("invalid OCI memory.limit value {memory}"),
         (_, swap) if swap < -1 => bail!("invalid OCI memory.swap value {swap}"),
@@ -4099,12 +4098,12 @@ fn apply_resource_limits(path: &std::path::Path, resources: &ResourceLimits) -> 
             .unwrap_or(current_period);
         std::fs::write(path.join("cpu.max"), format!("{quota} {period}"))?;
     }
-    if let Some(shares) = resources.cpu_shares {
-        if shares > 0 {
-            let clamped = shares.clamp(2, 262_144);
-            let weight = 1 + ((clamped - 2) * 9_999 / 262_142);
-            std::fs::write(path.join("cpu.weight"), weight.to_string())?;
-        }
+    if let Some(shares) = resources.cpu_shares
+        && shares > 0
+    {
+        let clamped = shares.clamp(2, 262_144);
+        let weight = 1 + ((clamped - 2) * 9_999 / 262_142);
+        std::fs::write(path.join("cpu.weight"), weight.to_string())?;
     }
     if let Some(limit) = resources.memory_limit_bytes {
         let value = match limit {
@@ -4625,6 +4624,8 @@ fn parse_process_rlimits(process: &Value) -> Result<Vec<ProcessRlimit>> {
         .collect()
 }
 
+// The casts are needed where libc declares these as `c_int` (musl); glibc already uses `u32`.
+#[allow(clippy::unnecessary_cast)]
 fn rlimit_resource(kind: &str) -> Option<u32> {
     Some(match kind {
         "RLIMIT_AS" => libc::RLIMIT_AS as u32,
@@ -5245,7 +5246,10 @@ fn spawn_gated(
             // termination-style signals to it (as runc's init does) instead of dying and
             // orphaning the workload.
             for sig in FORWARDED_SIGNALS {
-                libc::signal(sig, forward_signal_to_inner as libc::sighandler_t);
+                libc::signal(
+                    sig,
+                    forward_signal_to_inner as *const () as libc::sighandler_t,
+                );
             }
             let inner_pid = libc::fork();
             if inner_pid < 0 {
@@ -5314,18 +5318,18 @@ fn spawn_gated(
                 die126("gate_read");
             }
             libc::close(gate[0]);
-            if let Some(profile) = spec.apparmor_profile.as_deref() {
-                if let Err(e) = apply_apparmor_on_exec(profile) {
-                    let msg = format!("apparmor:{e:#}");
-                    let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
-                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
-                    unsafe { libc::_exit(126) }
-                }
+            if let Some(profile) = spec.apparmor_profile.as_deref()
+                && let Err(e) = apply_apparmor_on_exec(profile)
+            {
+                let msg = format!("apparmor:{e:#}");
+                let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
+                let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+                unsafe { libc::_exit(126) }
             }
-            if let Some(label) = spec.selinux_label.as_deref() {
-                if apply_selinux_on_exec(label).is_err() {
-                    die126("selinux");
-                }
+            if let Some(label) = spec.selinux_label.as_deref()
+                && apply_selinux_on_exec(label).is_err()
+            {
+                die126("selinux");
             }
             // Pin libseccomp while the guest root is still visible. RuntimeDefault
             // blocks mount/pivot_root, so the filter must load *after* pivot —

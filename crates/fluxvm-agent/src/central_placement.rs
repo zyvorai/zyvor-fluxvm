@@ -233,8 +233,7 @@ impl Gate {
         let spread_ok = |n: &NodeInfo| match &rules.spread {
             // A node without the label is outside every domain: it cannot satisfy a spread.
             Some(s) => n.labels.get(&s.key).is_some_and(|v| {
-                per_domain.get(v.as_str()).copied().unwrap_or(0) + 1
-                    <= min_domain + s.max_skew as usize
+                per_domain.get(v.as_str()).copied().unwrap_or(0) < min_domain + s.max_skew as usize
             }),
             None => true,
         };

@@ -278,8 +278,8 @@ async fn bootstrap_node<H: Host>(
             bail!("{}", redact(&e.to_string(), t));
         }
     }
-    if let Some(t) = agent_token {
-        if let Err(e) = h
+    if let Some(t) = agent_token
+        && let Err(e) = h
             .ssh(
                 st,
                 node,
@@ -287,9 +287,8 @@ async fn bootstrap_node<H: Host>(
                 Some(t.as_bytes()),
             )
             .await
-        {
-            bail!("{}", redact(&e.to_string(), t));
-        }
+    {
+        bail!("{}", redact(&e.to_string(), t));
     }
     sh(h, st, node, &script::install_unit_script(unit)).await?;
     Ok(())
@@ -320,7 +319,10 @@ pub async fn create<H: Host>(h: &H, store: &Store, req: &CreateReq) -> Result<Cr
             bail!("--tls-san {s:?} must be a DNS name or address");
         }
     }
-    if req.servers == 0 || req.servers > MAX_SERVERS || (req.servers > 1 && req.servers % 2 == 0) {
+    if req.servers == 0
+        || req.servers > MAX_SERVERS
+        || (req.servers > 1 && req.servers.is_multiple_of(2))
+    {
         bail!(
             "--servers must be 1 or an odd number up to {MAX_SERVERS} (etcd needs a majority; an even count tolerates no more failures than one fewer)"
         );

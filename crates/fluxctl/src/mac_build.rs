@@ -877,7 +877,7 @@ pub fn check_build_args(file: &Macfile, args: &BTreeMap<String, String>) -> Vec<
         })
         .collect();
     let mut out = Vec::new();
-    for (k, _) in args {
+    for k in args.keys() {
         if !declared.contains(&k.as_str()) {
             let near = declared
                 .iter()

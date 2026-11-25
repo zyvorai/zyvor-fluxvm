@@ -909,7 +909,7 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
         ClusterCommand::Init(a) => {
             #[cfg(target_os = "linux")]
             {
-                return run_installer(installer_args_init(&a));
+                run_installer(installer_args_init(&a))
             }
             #[cfg(target_os = "macos")]
             {
@@ -928,7 +928,7 @@ pub async fn run(cmd: ClusterCommand) -> Result<()> {
         ClusterCommand::Join(a) => {
             #[cfg(target_os = "linux")]
             {
-                return run_installer(installer_args_join(&a));
+                run_installer(installer_args_join(&a))
             }
             #[cfg(target_os = "macos")]
             {

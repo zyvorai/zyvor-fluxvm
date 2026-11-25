@@ -23,7 +23,7 @@ use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-pub use fluxvm_apple::{AUTO_CHECKPOINT_KEEP, is_auto_checkpoint};
+pub use fluxvm_apple::is_auto_checkpoint;
 
 #[derive(Subcommand, Debug)]
 pub enum MacCkpt {
