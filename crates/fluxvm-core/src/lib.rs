@@ -20,6 +20,7 @@ pub mod k3s_backups;
 pub mod keychain;
 pub mod kube_app;
 pub mod kube_view;
+pub mod launch_agents;
 pub mod lifecycle;
 pub mod login_session;
 pub mod mac_backup;

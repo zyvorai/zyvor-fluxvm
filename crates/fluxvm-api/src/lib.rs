@@ -57,6 +57,7 @@ mod agent_session_approvals;
 mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
+mod agents_api;
 mod audit_api;
 mod cli_api;
 mod cluster_health;
@@ -1107,6 +1108,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(k3s_backups::routes())
         .merge(kube_ops_api::routes())
         .merge(self_test_api::routes())
+        .merge(agents_api::routes())
         .merge(setup_doctor::routes())
         .merge(release_check::routes())
         .merge(cli_api::routes())

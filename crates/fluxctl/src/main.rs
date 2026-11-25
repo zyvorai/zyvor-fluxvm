@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod agent_session;
+mod agents_cmd;
 mod audit_cmd;
 mod backup_verify_cmd;
 mod cli_errors;
@@ -2073,6 +2074,12 @@ enum Command {
     /// macOS LaunchAgent is loaded. Prints PASS/WARN/FAIL for each with a plain-English "what to do"; exit code 1 when anything
     /// fails. `--fix` applies the safe repairs of `fluxctl fix` and checks again. Studio: Home, Self-test.
     SelfTest(self_test_cmd::SelfTestArgs),
+    /// Every FluxVM LaunchAgent on this Mac in one list with a plain-English health (`list`, the default), `restart NAME` and
+    /// `repair` (loads the ones that are installed but not loaded). Studio: Home, Background services.
+    Agents {
+        #[command(subcommand)]
+        command: Option<agents_cmd::AgentsCommand>,
+    },
     /// Collect what a maintainer needs (versions, cluster health, recent logs, instances, config, disk/RAM/network) into one
     /// .tar.gz with every secret removed, and print its path. Works with the daemon down; says what it skipped and why.
     /// Studio: Home, Download support bundle.
@@ -6539,6 +6546,12 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         let code = tokio::task::block_in_place(|| gateway::run(command));
         std::process::exit(code);
     }
+    if let Command::Agents { .. } = &cli.command {
+        let Command::Agents { command } = cli.command else {
+            unreachable!()
+        };
+        std::process::exit(agents_cmd::run(command)?);
+    }
     if let Command::HelperAgent { .. } = &cli.command {
         let Command::HelperAgent { command } = cli.command else {
             unreachable!()
@@ -7067,6 +7080,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Service { .. }
         | Command::NodeAgent { .. }
         | Command::HelperAgent { .. }
+        | Command::Agents { .. }
         | Command::Recipe { .. }
         | Command::Gateway { .. }
         | Command::MacFleet { .. }

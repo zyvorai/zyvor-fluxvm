@@ -14,6 +14,7 @@ import { BUNDLE_COMMAND, BUNDLE_NOTE, bundleSummary, downloadSupportBundle, prev
 import { stepTone, stepWord, upAdvice, upCommand, type UpPlan } from '../lib/up';
 import { checkTone, checkWord, needsAttention, notChecked, type SetupReport } from '../lib/doctor';
 import { UPGRADE_COMMAND, upgradeDetails, upgradeTone, upgradeWord, type UpgradeStatus } from '../lib/upgrade';
+import { AGENTS_COMMAND, AGENTS_REPAIR_COMMAND, agentTone, agentWord, logsCommand, repairSummary, repairable, restartCommand, runningText, type AgentLog, type AgentsReport, type RepairResult } from '../lib/agents';
 import { SELF_TEST_COMMAND, SELF_TEST_FIX_COMMAND, explainCommand, selfTestTone, selfTestWord, todo, type SelfTestReport } from '../lib/selfTest';
 import { copyFor, lightWord, needs, tone, type ClusterHealth, type HealthItem, type MachineHealth } from '../lib/health';
 
@@ -126,6 +127,48 @@ function CheckMySetup({ notify }: { notify: Notify }) {
           {r.offer_support_bundle ? <p><Button size="sm" variant="ghost" onClick={bundle} busy={busy === 'bundle2'}><Download size={14} /> Download support bundle</Button> <span className="fx-muted">Something is red; send this file to whoever helps you. {needsAttention(r).length} line(s) need attention.</span></p> : null}
         </>
       ) : null}
+    </Card>
+  );
+}
+
+/** "Background services": this Mac's FluxVM LaunchAgents (`fluxctl agents`). Repair loads the ones that are installed but not loaded. */
+function AgentsCard({ notify }: { notify: Notify }) {
+  const { busy, run } = useAct(notify);
+  const p = usePoll(() => api.get<AgentsReport>('/v1/agents'), 15000);
+  const r = p.data;
+  const [shown, setShown] = useState<AgentLog | null>(null);
+  // Nothing to show on a Mac without FluxVM services (or on Linux): no card instead of an empty one.
+  if (!r || r.agents.length === 0) return null;
+  const fix = () => void run('agents-repair', async () => {
+    const out = await api.post<RepairResult[]>('/v1/agents/repair', {});
+    notify(repairSummary(out), out.some((x) => !x.ok) ? 'bad' : undefined);
+    p.refresh();
+  });
+  const restart = (label: string) => void run('agent-' + label, async () => {
+    await api.post(`/v1/agents/${encodeURIComponent(label)}/restart`, {});
+    notify('Restarted ' + label);
+    p.refresh();
+  });
+  const showLog = (label: string) => void run('log-' + label, async () => {
+    setShown(await api.get<AgentLog>(`/v1/agents/${encodeURIComponent(label)}/log?lines=40`));
+  });
+  return (
+    <Card title="Background services" action={<><CopyCmd notify={notify} cmd={AGENTS_COMMAND} /> {repairable(r).length ? <Button size="sm" onClick={fix} busy={busy === 'agents-repair'}>Load {repairable(r).length}</Button> : null}</>}>
+      <p>{r.headline}</p>
+      <ul className="fx-feed">
+        {r.agents.map((a) => (
+          <li key={a.label}>
+            <Pill tone={agentTone(a.health)}>{agentWord(a.health)}</Pill>
+            <span>
+              {a.name}: {runningText(a)}
+              {a.what_to_do ? <div className="fx-muted">What to do: {a.what_to_do}</div> : null}
+              <div className="fx-muted"><code className="fx-mono">{restartCommand(a)}</code> <Button size="sm" onClick={() => restart(a.label)} busy={busy === 'agent-' + a.label}>Restart</Button> <Button size="sm" onClick={() => showLog(a.label)} busy={busy === 'log-' + a.label}>Log</Button> <code className="fx-mono">{logsCommand(a)}</code></div>
+              {shown?.label === a.label ? <pre className="fx-mono">{shown.text}</pre> : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {repairable(r).length ? <p className="fx-muted">Or run <code className="fx-mono">{AGENTS_REPAIR_COMMAND}</code> in a terminal. It never edits a service file and never uses sudo.</p> : null}
     </Card>
   );
 }
@@ -267,6 +310,7 @@ export function HomePage({ notify }: { notify: Notify }) {
       <KubeOpsCard notify={notify} />
       <div className="fx-section"><CheckMySetup notify={notify} /></div>
       <div className="fx-section"><SelfTestCard notify={notify} /></div>
+      <div className="fx-section"><AgentsCard notify={notify} /></div>
       <div className="fx-section"><UpdatesCard notify={notify} /></div>
       <div className="fx-section"><SupportBundle notify={notify} /></div>
       <p className="fx-muted fx-section">This page shows the node you are connected to. For every Mac of a fleet, run <code className="fx-mono">fluxctl cluster status -f inventory.yaml</code>.</p>
