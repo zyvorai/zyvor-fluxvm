@@ -109,6 +109,9 @@ DELETE /v1/vm-templates/{name}
 POST   /v1/vm-templates/{name}/instantiate   # {"name": "vm-1", "labels"?: {...}}
 GET    /v1/events                        # ?vm=&event=<prefix>&since=<rfc3339>&limit=
 GET    /v1/events/stream                 # Server-Sent Events, same filters
+GET    /v1/alerts                        # what needs attention now: ?since=24h&include_snoozed=1 (no tenant tokens)
+POST   /v1/alerts/snooze                 # {"key", "hours"?} default 24, at most 720 (admin)
+POST   /v1/alerts/unsnooze               # {"key"} (admin)
 GET    /v1/quotas/me
 POST   /v1/images/build
 POST   /v1/images/import                 # {"source": "/path/vm.ova", "name": "...", "repair": true, "remove_vmware_tools": false}; admin; 201; see import-vmware.md

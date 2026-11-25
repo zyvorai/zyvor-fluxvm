@@ -58,6 +58,7 @@ mod agent_session_auth;
 mod agent_session_transfer;
 mod agent_sessions;
 mod agents_api;
+mod alerts_api;
 mod audit_api;
 mod cli_api;
 mod cluster_health;
@@ -1104,6 +1105,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .merge(mac_schedule_api::routes())
         .merge(mac_view::routes())
         .merge(audit_api::routes())
+        .merge(alerts_api::routes())
         .merge(cluster_health::routes())
         .merge(k3s_backups::routes())
         .merge(kube_ops_api::routes())

@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 mod agent_session;
 mod agents_cmd;
+mod alerts_cmd;
 mod audit_cmd;
 mod backup_verify_cmd;
 mod cli_errors;
@@ -2175,6 +2176,10 @@ enum Command {
     /// runs, and the audit log, merged. `--follow` keeps watching. REST: `GET /v1/events` (add `?source=`),
     /// `GET /v1/events/stream` (SSE).
     Events(events_cmd::EventsArgs),
+    /// What needs attention now: warnings and errors of the last day, failed backups and schedule runs, unhealthy Mac
+    /// instances and cluster health problems, each with the next step. Exit code 1 when any is an error. `snooze KEY`
+    /// hides one for 24 hours. REST: `GET /v1/alerts`, `POST /v1/alerts/snooze`.
+    Alerts(alerts_cmd::AlertsArgs),
     /// Per-token quota limits and usage. With `--token` (or `FLUXVM_TOKEN`)
     /// asks the running daemon (`GET /v1/quotas/me`); otherwise computes
     /// locally for `--name` (a configured token name).
@@ -5621,6 +5626,12 @@ async fn run_remote(
         Command::Events(args) => {
             events_cmd::run(args, events_cmd::Where::Remote(r), format).await?
         }
+        Command::Alerts(args) => {
+            let code = alerts_cmd::run(args, alerts_cmd::Where::Server(r)).await;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Command::Serial { id } => run_remote_serial(r, id).await?,
         Command::PortConnect { id, name } => {
             run_remote_stream(
@@ -6731,6 +6742,22 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         )
         .await;
     }
+    if let Command::Alerts(args) = &cli.command {
+        // The daemon on this machine knows about Mac instances and machine health; without one, the logs are read.
+        // `--state-dir` alone names a folder, which a daemon at the default address may not be serving.
+        let listen = cfg
+            .listen
+            .replace("0.0.0.0", "127.0.0.1")
+            .replace("[::]", "[::1]");
+        let r = remote::Remote::new(&listen, cli.server_token.clone());
+        let daemon = (cli.state_dir.is_none() || cli.listen.is_some()).then_some(&r);
+        let at = alerts_cmd::Where::ThisMachine(daemon, &cfg.state_dir);
+        let code = alerts_cmd::run(args.clone(), at).await;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     if let Command::Quota {
         token: Some(token), ..
     } = &cli.command
@@ -7089,6 +7116,7 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         | Command::Mcp { .. }
         | Command::Audit { .. }
         | Command::Events(_)
+        | Command::Alerts(_)
         | Command::Context { .. }
         | Command::Usage(_)
         | Command::Find(_)
@@ -11531,6 +11559,14 @@ mod backlog_tier1_cli_tests {
         assert!(matches!(
             cli(&["events", "--follow", "--event", "vm."]).command,
             Command::Events(ref e) if e.follow
+        ));
+        assert!(matches!(
+            cli(&["alerts", "snooze", "vm.oom:web", "--hours", "2"]).command,
+            Command::Alerts(ref a) if a.command.is_some()
+        ));
+        assert!(matches!(
+            cli(&["alerts", "--since", "7d", "--json"]).command,
+            Command::Alerts(ref a) if a.json && a.since == "7d"
         ));
         assert!(matches!(cli(&["quota"]).command, Command::Quota { .. }));
         assert!(matches!(

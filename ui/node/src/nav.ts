@@ -10,6 +10,7 @@ export const NAV: NavGroup[] = [
     items: [
       { to: '/', label: 'Home', desc: 'Is everything OK, in plain words' },
       { to: '/overview', label: 'Overview', desc: 'Machine counts and live events' },
+      { to: '/alerts', label: 'Alerts', desc: 'What needs attention now' },
     ],
   },
   {

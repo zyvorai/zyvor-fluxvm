@@ -663,6 +663,31 @@ fn ops() -> Vec<Op> {
             ]),
         op(
             "get",
+            "/v1/alerts",
+            "What needs attention now: warnings and errors of the last day, failed backups and schedule runs, unhealthy Mac instances and health problems, each with the next step (admin or read-only, not tenant tokens)",
+            EVENTS,
+        )
+        .returns("AlertReport")
+        .query(&[
+            ("since", "How far back events count: RFC 3339, or 30m, 24h (default), 7d"),
+            ("include_snoozed", "1 to list snoozed alerts too"),
+        ]),
+        op(
+            "post",
+            "/v1/alerts/snooze",
+            "Hide one alert: {key, hours?} (default 24, at most 720; admin)",
+            EVENTS,
+        )
+        .body("AlertSnooze"),
+        op(
+            "post",
+            "/v1/alerts/unsnooze",
+            "Bring a snoozed alert back: {key} (admin)",
+            EVENTS,
+        )
+        .body("AlertKey"),
+        op(
+            "get",
             "/v1/audit",
             "Audit log: what was changed, by whom, when and how it ended (newest first, paginated; admin)",
             EVENTS,
@@ -788,6 +813,12 @@ fn schemas() -> Value {
         "CapabilityReport": {"type": "object", "properties": {"os_version": {"type": "string", "nullable": true}, "probed": {"type": "boolean"}, "items": {"type": "array", "items": {"type": "object", "properties": {"feature": {"type": "string"}, "supported": {"type": "boolean"}, "note": {"type": "string"}, "min_macos": {"type": "integer"}, "available_here": {"type": "boolean", "nullable": true}, "reason": {"type": "string", "nullable": true}}}}}},
         "CreateBranchRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}}},
         "VmBranch": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}, "name": {"type": "string"}, "source_vm": {"type": "string", "format": "uuid"}, "source_name": {"type": "string"}, "parent_branch": {"type": "string", "format": "uuid", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}, "vcpus": {"type": "integer"}, "memory_mib": {"type": "integer"}, "state_bytes": {"type": "integer"}}},
+        "AlertReport": obj("since, items (key, level, source, summary, next_step, explain, target, first_seen, last_seen, count, snoozed_until), errors, warnings, snoozed, notes"),
+        "AlertSnooze": {"type": "object", "required": ["key"], "properties": {
+            "key": {"type": "string", "maxLength": 300},
+            "hours": {"type": "integer", "minimum": 1, "maximum": 720, "default": 24}
+        }},
+        "AlertKey": {"type": "object", "required": ["key"], "properties": {"key": {"type": "string", "maxLength": 300}}},
         "VzDisplayResize": {"type": "object", "required": ["width", "height"], "properties": {
             "width": {"type": "integer", "minimum": 800, "maximum": 5120},
             "height": {"type": "integer", "minimum": 600, "maximum": 2880},
