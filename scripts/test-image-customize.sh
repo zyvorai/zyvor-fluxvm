@@ -194,6 +194,18 @@ else
     pass "no leaked real /etc/resolv.conf in the output image"
 fi
 
+section "staged /dev entries didn't leak into the output image"
+LEAKED=""
+for d in null zero full random urandom; do
+    # Only what appeared during this run counts: a base image may ship its own nodes, which are older.
+    [ "${MOUNT_DIR}/dev/${d}" -nt "${TMP}/spec.json" ] && LEAKED="${LEAKED} ${d}"
+done
+if [ -z "$LEAKED" ]; then
+    pass "no staged device nodes (or stray files) left in /dev"
+else
+    fail "left behind in /dev:${LEAKED}"
+fi
+
 umount "$MOUNT_DIR"
 qemu-nbd -d "$NBD_DEV"
 NBD_DEV=""
