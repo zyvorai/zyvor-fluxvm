@@ -256,19 +256,29 @@ mod windows_validate_tests {
     }
 
     #[test]
-    fn staged_dev_script_makes_every_device_and_only_replaces_non_devices() {
-        let s = stage_dev_script();
-        for d in CHROOT_DEVICES {
-            assert!(s.contains(&format!("'{d}'")), "{d} missing: {s}");
-        }
-        assert!(s.contains("[ -c /dev/$1 ] && continue"), "{s}");
-        assert!(s.contains("mknod -m 666 /dev/$1 c $2 $3 || exit 1"), "{s}");
-        // `sh -n` parses the script without running it.
-        let ok = std::process::Command::new("sh")
-            .args(["-n", "-c", &s])
-            .status()
-            .unwrap();
-        assert!(ok.success(), "{s}");
+    fn staged_dev_null_is_a_world_writable_file_not_a_device_node() {
+        assert!(!STAGE_DEV_NULL.contains("mknod"), "{STAGE_DEV_NULL}");
+        // Run the script against a scratch directory instead of the real /dev.
+        let dir = tempfile::tempdir().unwrap();
+        let script = STAGE_DEV_NULL.replace("/dev", dir.path().join("dev").to_str().unwrap());
+        let run = || {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let null = dir.path().join("dev/null");
+        assert_eq!(run().trim(), "created");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = || fs::metadata(&null).unwrap().permissions().mode() & 0o777;
+        assert!(null.is_file());
+        assert_eq!(mode(), 0o666);
+        // An existing file is opened up but not reported as ours, so it is not removed.
+        fs::set_permissions(&null, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(run().trim(), "");
+        assert_eq!(mode(), 0o666);
     }
 
     #[test]
@@ -287,8 +297,8 @@ mod windows_validate_tests {
 ///
 /// **Known limitation**: `guestkit::Guestfs::command` chroots without
 /// bind-mounting `/proc`, `/sys`, or `/dev` from the host first (unlike a
-/// full booted guest); only the basic character devices are staged, see
-/// [`with_staged_dev`]. Simple packages install fine; a package whose
+/// full booted guest); only a stand-in `/dev/null` is staged, see
+/// [`with_staged_dev_null`]. Simple packages install fine; a package whose
 /// postinst script depends on `/proc` (common for kernel/systemd-adjacent
 /// packages) can fail here. No workaround today beyond passing an equivalent
 /// `commands` entry that bind-mounts what a specific package needs before
@@ -350,7 +360,7 @@ fn customize_image_blocking(image: &Path, req: &BuildImageRequest) -> Result<()>
     }
 
     if !req.packages.is_empty() || !req.commands.is_empty() {
-        with_staged_dev(&mut g, |g| {
+        with_staged_dev_null(&mut g, |g| {
             if !req.packages.is_empty() {
                 install_packages_with_dns(g, &req.packages)?;
             }
@@ -376,41 +386,28 @@ fn customize_image_blocking(image: &Path, req: &BuildImageRequest) -> Result<()>
     Ok(())
 }
 
-/// The character devices a package manager or a `commands` entry expects, as `name major minor`.
-const CHROOT_DEVICES: [&str; 5] = [
-    "null 1 3",
-    "zero 1 5",
-    "full 1 7",
-    "random 1 8",
-    "urandom 1 9",
-];
+/// Makes `/dev/null` a plain file every user can write, and prints `created` if there was none. A device node cannot be
+/// used here: guestkit mounts guest filesystems `nodev`, so opening one is "Permission denied".
+const STAGE_DEV_NULL: &str = "mkdir -p /dev || exit 1; \
+     if [ ! -e /dev/null ]; then : > /dev/null && chmod 666 /dev/null && echo created; \
+     elif [ -f /dev/null ]; then chmod 666 /dev/null; fi";
 
-/// Shell script that creates each of [`CHROOT_DEVICES`] that is not already a character device, world read-write, and
-/// prints the names it created. A regular file of the same name is replaced.
-fn stage_dev_script() -> String {
-    let devices = CHROOT_DEVICES.map(|d| format!("'{d}'")).join(" ");
-    format!(
-        "mkdir -p /dev || exit 1; for d in {devices}; do set -- $d; [ -c /dev/$1 ] && continue; \
-         rm -f /dev/$1 && mknod -m 666 /dev/$1 c $2 $3 || exit 1; echo $1; done"
-    )
-}
-
-/// Runs `f` with the basic character devices present in the guest's `/dev`, and removes the ones it created afterwards
-/// so they do not end up in the output image. guestkit's chroot has no `/dev` from the host and a cloud image ships an
-/// empty one. `apt` verifies repository signatures as the unprivileged `_apt` user, which cannot create `/dev/null`
-/// there, so `apt-get update` failed on Ubuntu with "cannot create /dev/null: Permission denied".
-fn with_staged_dev(
+/// Runs `f` with a stand-in `/dev/null` in the guest, and removes it afterwards if it was created here, so it does not
+/// end up in the output image. guestkit's chroot has no `/dev` from the host and a cloud image ships an empty one. The
+/// first redirect by root creates a root-only `/dev/null`, or `apt`'s unprivileged `_apt` user cannot create it at all,
+/// so `apt-get update` failed on Ubuntu with "cannot create /dev/null: Permission denied".
+fn with_staged_dev_null(
     g: &mut guestkit::Guestfs,
     f: impl FnOnce(&mut guestkit::Guestfs) -> Result<()>,
 ) -> Result<()> {
-    let created = g
-        .sh_raw(&stage_dev_script())
-        .context("creating /dev/null and the other basic devices in the image")?;
+    let staged = g
+        .sh_raw(STAGE_DEV_NULL)
+        .context("creating /dev/null in the image")?;
 
     let result = f(g);
 
-    for name in created.split_whitespace() {
-        let _ = g.command(&["rm", "-f", &format!("/dev/{name}")]);
+    if staged.trim() == "created" {
+        let _ = g.command(&["rm", "-f", "/dev/null"]);
     }
     result
 }
