@@ -662,6 +662,10 @@ pub fn describe_http(method: &str, path: &str) -> Option<(String, String)> {
     let resource = singular(segs.next()?);
     let target = segs.next().unwrap_or("").to_string();
     let tail: Vec<&str> = segs.collect();
+    // `/v1/alerts/snooze|unsnooze`: the word after the resource is the verb, and the alert key is in the body.
+    if resource == "alert" && !target.is_empty() {
+        return Some((format!("alert.{target}"), String::new()));
+    }
     let action = match (tail.is_empty(), verb) {
         (true, v) => format!("{resource}.{v}"),
         (false, "delete") => format!("{resource}.{}-delete", tail.join("-")),
@@ -1210,6 +1214,14 @@ mod tests {
             "delete"
         );
         assert_eq!(describe_cli(&args("fluxctl audit ls")), None);
+    }
+
+    #[test]
+    fn snoozing_an_alert_is_named_for_what_it_does() {
+        assert_eq!(
+            describe_http("POST", "/v1/alerts/snooze"),
+            Some(("alert.snooze".into(), String::new()))
+        );
     }
 
     #[test]

@@ -22,6 +22,17 @@ const CASES = [
     await ok(page.getByText('Upgrade dev from v1.33.1 to v1.34.0'), 'upgrade plan preview');
     await ok(page.getByRole('button', { name: 'Back up and upgrade' }), 'typed-confirmation upgrade button');
   } },
+  { name: 'Alerts', path: '/alerts', see: ['Backup bk-7 did not finish.', 'Mac instance mac-runner-1 is unhealthy.', 'fluxctl explain MAC_BACKUP_IO'], run: async (page, ok) => {
+    await ok(page.getByText('1 error and 1 warning need attention').first(), 'headline counts');
+    await ok(page.getByTestId('alerts-badge'), 'bell badge');
+    await page.getByTestId('alerts-bell').click();
+    await ok(page.getByRole('dialog', { name: 'Alerts' }), 'bell dropdown');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Snooze 24h' }).first().click();
+    await ok(page.getByText('1 warning needs attention').first(), 'snoozing an alert lowers the count');
+    await page.getByRole('button', { name: 'Snoozed: hidden' }).click();
+    await ok(page.getByRole('button', { name: 'Bring back' }), 'snoozed alerts can be shown again');
+  } },
   { name: 'Events', path: '/events', see: ['web-01 started', 'build-mac run failed'] },
   { name: 'Audit', path: '/audit', see: ['vm.create', 'mac.rm'] },
   { name: 'Usage', path: '/usage', see: ['web-01'] },
