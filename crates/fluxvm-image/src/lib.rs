@@ -256,6 +256,22 @@ mod windows_validate_tests {
     }
 
     #[test]
+    fn staged_dev_script_makes_every_device_and_only_replaces_non_devices() {
+        let s = stage_dev_script();
+        for d in CHROOT_DEVICES {
+            assert!(s.contains(&format!("'{d}'")), "{d} missing: {s}");
+        }
+        assert!(s.contains("[ -c /dev/$1 ] && continue"), "{s}");
+        assert!(s.contains("mknod -m 666 /dev/$1 c $2 $3 || exit 1"), "{s}");
+        // `sh -n` parses the script without running it.
+        let ok = std::process::Command::new("sh")
+            .args(["-n", "-c", &s])
+            .status()
+            .unwrap();
+        assert!(ok.success(), "{s}");
+    }
+
+    #[test]
     fn accepts_windows_only() {
         assert!(validate_windows_vs_linux(&base_req()).is_ok());
     }
@@ -271,7 +287,8 @@ mod windows_validate_tests {
 ///
 /// **Known limitation**: `guestkit::Guestfs::command` chroots without
 /// bind-mounting `/proc`, `/sys`, or `/dev` from the host first (unlike a
-/// full booted guest). Simple packages install fine; a package whose
+/// full booted guest); only the basic character devices are staged, see
+/// [`with_staged_dev`]. Simple packages install fine; a package whose
 /// postinst script depends on `/proc` (common for kernel/systemd-adjacent
 /// packages) can fail here. No workaround today beyond passing an equivalent
 /// `commands` entry that bind-mounts what a specific package needs before
@@ -332,13 +349,17 @@ fn customize_image_blocking(image: &Path, req: &BuildImageRequest) -> Result<()>
             .context("writing /etc/hostname")?;
     }
 
-    if !req.packages.is_empty() {
-        install_packages_with_dns(&mut g, &req.packages)?;
-    }
-
-    for cmd in &req.commands {
-        g.sh_raw(cmd)
-            .with_context(|| format!("running command: {cmd}"))?;
+    if !req.packages.is_empty() || !req.commands.is_empty() {
+        with_staged_dev(&mut g, |g| {
+            if !req.packages.is_empty() {
+                install_packages_with_dns(g, &req.packages)?;
+            }
+            for cmd in &req.commands {
+                g.sh_raw(cmd)
+                    .with_context(|| format!("running command: {cmd}"))?;
+            }
+            Ok(())
+        })?;
     }
 
     for service in &req.enable_services {
@@ -353,6 +374,45 @@ fn customize_image_blocking(image: &Path, req: &BuildImageRequest) -> Result<()>
     let _ = g.umount_all();
     g.shutdown().context("shutting down guestfs")?;
     Ok(())
+}
+
+/// The character devices a package manager or a `commands` entry expects, as `name major minor`.
+const CHROOT_DEVICES: [&str; 5] = [
+    "null 1 3",
+    "zero 1 5",
+    "full 1 7",
+    "random 1 8",
+    "urandom 1 9",
+];
+
+/// Shell script that creates each of [`CHROOT_DEVICES`] that is not already a character device, world read-write, and
+/// prints the names it created. A regular file of the same name is replaced.
+fn stage_dev_script() -> String {
+    let devices = CHROOT_DEVICES.map(|d| format!("'{d}'")).join(" ");
+    format!(
+        "mkdir -p /dev || exit 1; for d in {devices}; do set -- $d; [ -c /dev/$1 ] && continue; \
+         rm -f /dev/$1 && mknod -m 666 /dev/$1 c $2 $3 || exit 1; echo $1; done"
+    )
+}
+
+/// Runs `f` with the basic character devices present in the guest's `/dev`, and removes the ones it created afterwards
+/// so they do not end up in the output image. guestkit's chroot has no `/dev` from the host and a cloud image ships an
+/// empty one. `apt` verifies repository signatures as the unprivileged `_apt` user, which cannot create `/dev/null`
+/// there, so `apt-get update` failed on Ubuntu with "cannot create /dev/null: Permission denied".
+fn with_staged_dev(
+    g: &mut guestkit::Guestfs,
+    f: impl FnOnce(&mut guestkit::Guestfs) -> Result<()>,
+) -> Result<()> {
+    let created = g
+        .sh_raw(&stage_dev_script())
+        .context("creating /dev/null and the other basic devices in the image")?;
+
+    let result = f(g);
+
+    for name in created.split_whitespace() {
+        let _ = g.command(&["rm", "-f", &format!("/dev/{name}")]);
+    }
+    result
 }
 
 /// Installs `packages`, temporarily staging the host's `/etc/resolv.conf`
