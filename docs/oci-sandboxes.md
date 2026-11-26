@@ -1,9 +1,10 @@
-# Container sandboxes on a Mac (OCI images on `vz`)
+# Container sandboxes (OCI images — no Docker required)
 
-A sandbox can be a container image instead of a Debian VM. Each container gets its own lightweight Linux VM on
-Virtualization.framework: a small kernel boots straight into `fluxvm-oci-init`, which mounts the image as the root filesystem and
-runs its entrypoint. There is no Docker, no shared Linux VM and no SSH. The sandbox is still an ordinary FluxVM sandbox, with a TTL,
-quotas, an egress policy, exec and file transfer, and the REST, MCP and `fluxctl` APIs.
+A sandbox can be a container image instead of a full Debian VM. Each container gets its own lightweight Linux VM: a small kernel boots straight into `fluxvm-oci-init`, which mounts the image as the root filesystem and runs its entrypoint.
+
+**There is no Docker, no shared Linux VM, and no SSH.** The sandbox is still an ordinary FluxVM sandbox, with a TTL, quotas, an egress policy, exec and file transfer, and the REST, MCP and `fluxctl` APIs.
+
+This is the preferred way to run containers. The full Docker engine (`fluxctl docker up`) is only a compatibility mode for the remaining gaps (image builds, arbitrary bind mounts, Compose daemon). See [DOCKER-FREE.md](DOCKER-FREE.md).
 
 ```bash
 fluxctl sandbox run alpine:3.22 --rm -- sh -c 'echo hello from $(hostname); exit 3'
