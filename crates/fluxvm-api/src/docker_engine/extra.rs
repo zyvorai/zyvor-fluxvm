@@ -389,14 +389,74 @@ fn parse_when(raw: &Option<String>, what: &str) -> DockerResult<Option<DateTime<
 
 #[derive(Deserialize)]
 pub(super) struct EventsQuery {
+    filters: Option<String>,
     since: Option<String>,
     until: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FilterValues {
+    List(Vec<String>),
+    Set(BTreeMap<String, bool>),
+}
+
+#[derive(Default)]
+struct DockerEventFilters(BTreeMap<String, Vec<String>>);
+
+impl DockerEventFilters {
+    fn parse(raw: Option<&str>) -> DockerResult<Self> {
+        let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let groups: BTreeMap<String, FilterValues> = serde_json::from_str(raw)
+            .map_err(|e| DockerError::bad(format!("invalid Docker event filters: {e}")))?;
+        let mut filters = BTreeMap::new();
+        for (key, values) in groups {
+            if !matches!(key.as_str(), "type" | "scope" | "event" | "container") {
+                return Err(DockerError::bad(format!(
+                    "unsupported event filter {key:?}; supported filters are type, scope, event and container"
+                )));
+            }
+            let values = match values {
+                FilterValues::List(v) => v,
+                FilterValues::Set(v) => v
+                    .into_iter()
+                    .filter(|(_, enabled)| *enabled)
+                    .map(|(k, _)| k)
+                    .collect(),
+            };
+            if !values.is_empty() {
+                filters.insert(key, values);
+            }
+        }
+        Ok(Self(filters))
+    }
+
+    fn matches(&self, event: &Value) -> bool {
+        self.0.iter().all(|(key, values)| {
+            values.iter().any(|v| match key.as_str() {
+                "container" => {
+                    event["Actor"]["Attributes"]["name"].as_str() == Some(v.as_str())
+                        || (!v.is_empty()
+                            && event["id"]
+                                .as_str()
+                                .is_some_and(|id| id.starts_with(v.as_str())))
+                }
+                "type" => event["Type"].as_str() == Some(v.as_str()),
+                "scope" => event["scope"].as_str() == Some(v.as_str()),
+                "event" => event["Action"].as_str() == Some(v.as_str()),
+                _ => false,
+            })
+        })
+    }
 }
 
 pub(super) async fn events_route(
     State(st): State<DockerState>,
     Query(q): Query<EventsQuery>,
 ) -> DockerResult<Response> {
+    let filters = DockerEventFilters::parse(q.filters.as_deref())?;
     let since = parse_when(&q.since, "since")?;
     let until = parse_when(&q.until, "until")?;
     let log = events::global().ok_or_else(|| {
@@ -405,7 +465,13 @@ pub(super) async fn events_route(
             "This daemon is not recording events, so there is nothing to stream. Restart the FluxVM daemon and try again.",
         )
     })?;
-    Ok(events_response(st.manager.clone(), log, since, until))
+    Ok(events_response(
+        st.manager.clone(),
+        log,
+        since,
+        until,
+        filters,
+    ))
 }
 
 fn events_response(
@@ -413,6 +479,7 @@ fn events_response(
     log: &'static EventLog,
     since: Option<DateTime<Utc>>,
     until: Option<DateTime<Utc>>,
+    filters: DockerEventFilters,
 ) -> Response {
     let stream = async_stream::stream! {
         let filter = EventFilter {
@@ -434,6 +501,7 @@ fn events_response(
                         continue;
                     }
                     for d in docker_events(&ev, name, image) {
+                        if !filters.matches(&d) { continue; }
                         let mut line = serde_json::to_vec(&d).unwrap_or_default();
                         line.push(b'\n');
                         yield Ok::<_, std::io::Error>(bytes::Bytes::from(line));
@@ -915,7 +983,11 @@ mod tests {
         }
         let since = Some(ts - chrono::Duration::seconds(5));
         let until = Some(Utc::now() + chrono::Duration::milliseconds(300));
-        let resp = events_response(m, log, since, until);
+        let filters = DockerEventFilters::parse(Some(
+            r#"{"event":{"start":true,"die":true},"container":["web"],"type":["container"]}"#,
+        ))
+        .unwrap();
+        let resp = events_response(m, log, since, until, filters);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let lines: Vec<Value> = String::from_utf8_lossy(&body)
             .lines()
@@ -925,8 +997,28 @@ mod tests {
             .iter()
             .map(|l| l["Action"].as_str().unwrap())
             .collect();
-        assert_eq!(actions, ["start", "pause"]);
+        assert_eq!(actions, ["start"]);
         assert_eq!(lines[0]["Actor"]["Attributes"]["image"], "alpine:3.22");
+    }
+
+    #[tokio::test]
+    async fn docker_ps_latest_includes_stopped_containers() {
+        let (app, _) = app(&[("first", VmStatus::Running), ("last", VmStatus::Stopped)]).await;
+        for (query, names) in [
+            ("", vec!["/first"]),
+            ("?all=1", vec!["/last", "/first"]),
+            ("?limit=1", vec!["/last"]),
+        ] {
+            let (status, json) = call(&app, "GET", &format!("/containers/json{query}")).await;
+            assert_eq!(status, StatusCode::OK);
+            let names_returned: Vec<_> = json
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|vm| vm["Names"][0].as_str().unwrap())
+                .collect();
+            assert_eq!(names_returned, names);
+        }
     }
 
     #[tokio::test]
