@@ -17,6 +17,7 @@ use fluxvm_core::{
 use fluxvm_guest_protocol::AgentResponse;
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::{SandboxCreateRequest, VmManager};
+use std::ffi::OsString;
 use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
@@ -360,6 +361,17 @@ impl DockerEngineArgs {
 
 #[derive(Subcommand)]
 enum DockerCommand {
+    /// Invoke the installed Docker CLI, including plugins. Use -- before Docker arguments.
+    Cli {
+        /// Engine socket from 'fluxctl docker up --socket' (defaults to FluxVM's managed engine).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(last = true, value_name = "DOCKER_ARG")]
+        args: Vec<OsString>,
+    },
+    /// Forward an ordinary Docker command (run, compose, buildx, volume, etc.).
+    #[command(external_subcommand)]
+    Forward(Vec<OsString>),
     /// Create or start a Docker engine VM and publish its socket on this Mac. Idempotent. Unlike the built-in Docker
     /// subset (`docker_sock`), this runs a real `dockerd`: `docker build`, Compose, bind mounts and networks all work.
     Up(DockerEngineArgs),
@@ -1711,7 +1723,7 @@ enum Command {
         port: u32,
     },
     /// A real Docker engine in a FluxVM VM, with its socket on this Mac: `docker build`, Compose, bind mounts and
-    /// networks work. See `fluxctl docker up --help`.
+    /// networks work. Start it with `fluxctl docker up`, then use `fluxctl docker run`, `compose`, or any installed Docker CLI plugin.
     Docker {
         #[command(subcommand)]
         command: DockerCommand,
@@ -6332,6 +6344,17 @@ fn main() -> Result<()> {
         )
         .init();
     let (cli, output_explicit) = parse_cli();
+    // Docker owns the terminal, exit status and plugin arguments. Dispatch before
+    // FluxVM inspects argv for auditing or connects to a daemon.
+    if let Command::Docker { command } = &cli.command {
+        match command {
+            DockerCommand::Forward(args) => return docker_host::exec_cli(None, args),
+            DockerCommand::Cli { socket, args } => {
+                return docker_host::exec_cli(socket.as_deref(), args);
+            }
+            _ => {}
+        }
+    }
     if let Command::Completions { shell } = &cli.command {
         return print_completions(*shell);
     }
@@ -9158,6 +9181,10 @@ async fn print_hubble_observe(
 /// `fluxctl docker …` for any daemon connection (local state dir or `--server`).
 async fn docker_command<A: run::VmApi>(api: &A, command: DockerCommand) -> Result<()> {
     match command {
+        DockerCommand::Forward(args) => return docker_host::exec_cli(None, &args),
+        DockerCommand::Cli { socket, args } => {
+            return docker_host::exec_cli(socket.as_deref(), &args);
+        }
         DockerCommand::Up(a) => {
             let o = a.options();
             let socket = docker_host::up(api, &o).await?;

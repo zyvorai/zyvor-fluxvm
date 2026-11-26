@@ -69,6 +69,24 @@ pub fn builtin_socket() -> PathBuf {
     default_socket().with_file_name("docker.sock")
 }
 
+/// Replace fluxctl with the local client so pipes, TTYs, signals and exit codes
+/// behave exactly as when invoking Docker directly. Do not alter Docker config.
+pub fn exec_cli(socket: Option<&Path>, args: &[std::ffi::OsString]) -> Result<()> {
+    let socket = socket.map(Path::to_owned).unwrap_or_else(default_socket);
+    let mut host = std::ffi::OsString::from("unix://");
+    host.push(std::path::absolute(socket)?);
+    let error = Command::new("docker")
+        .env("DOCKER_HOST", host)
+        .env_remove("DOCKER_CONTEXT")
+        .env_remove("DOCKER_TLS")
+        .env_remove("DOCKER_TLS_VERIFY")
+        .args(args)
+        .exec();
+    Err(error).context(
+        "starting the local Docker CLI; install docker and any required CLI plugins on this host",
+    )
+}
+
 fn socket_of(o: &EngineOptions) -> PathBuf {
     o.socket.clone().unwrap_or_else(default_socket)
 }

@@ -342,20 +342,29 @@ async fn info(State(st): State<DockerState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct ListQuery {
     #[serde(default)]
-    all: bool,
+    all: Option<String>,
+    limit: Option<i64>,
 }
 
 async fn containers_list(
     State(st): State<DockerState>,
     Query(q): Query<ListQuery>,
 ) -> DockerResult<Json<Value>> {
-    let mut items = Vec::new();
-    for vm in oci_containers(&st.manager).await {
-        if !q.all && vm.status != VmStatus::Running && vm.status != VmStatus::Paused {
-            continue;
-        }
-        items.push(container_summary(&vm));
+    let all = match q.all.as_deref() {
+        None | Some("false" | "0" | "") => false,
+        Some("true" | "1") => true,
+        _ => return Err(DockerError::bad("all must be true, false, 1 or 0")),
+    };
+    let mut vms = oci_containers(&st.manager).await;
+    let limit = q.limit.filter(|n| *n > 0);
+    if !all && limit.is_none() {
+        vms.retain(|vm| matches!(vm.status, VmStatus::Running | VmStatus::Paused));
     }
+    vms.sort_unstable_by_key(|vm| std::cmp::Reverse((vm.created_at, vm.id)));
+    if let Some(n) = limit {
+        vms.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+    }
+    let items = vms.iter().map(container_summary).collect();
     Ok(Json(Value::Array(items)))
 }
 
