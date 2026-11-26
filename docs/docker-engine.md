@@ -28,7 +28,7 @@ Every path also works with a version prefix (`/v1.44/containers/json`; the engin
 | Endpoint | `docker` command | Notes |
 |---|---|---|
 | `GET /_ping`, `/version`, `/info` | `docker version`, `docker info` | |
-| `GET /containers/json` | `docker ps` | |
+| `GET /containers/json` | `docker ps` | newest first; `-a` includes stopped containers, `--latest` and `--last N` select recent containers across all states |
 | `POST /containers/create` | `docker create`, `docker run` | no bind mounts |
 | `GET /containers/{id}/json` | `docker inspect` | |
 | `POST /containers/{id}/start`, `stop`, `wait` | `docker start`, `stop`, `wait` | |
@@ -41,11 +41,11 @@ Every path also works with a version prefix (`/v1.44/containers/json`; the engin
 | `GET /containers/{id}/logs`, `POST /containers/{id}/attach` | `docker logs`, `attach` | console is one combined stream |
 | `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` | `docker exec` | no stdin |
 | `DELETE /containers/{id}` | `docker rm [-f]` | |
-| `GET /events` | `docker events` | container `create`, `start`, `die`, `stop`, `pause`, `unpause`, `restart`, `destroy` from the daemon's event log; `since`/`until` in Unix seconds; `filters` are ignored |
+| `GET /events` | `docker events` | container `create`, `start`, `die`, `stop`, `pause`, `unpause`, `restart`, `destroy` from the daemon's event log; `since`/`until` in Unix seconds; filter by `event`, `container` (name or ID prefix), `type` or `scope`. Repeated values within a filter are alternatives; different keys must all match |
 | `GET /images/json`, `POST /images/create`, `DELETE /images/{name}` | `docker images`, `pull`, `rmi` | |
 | `GET /networks`, `GET /networks/{id}` | `docker network ls`, `inspect` | one network, `fluxvm-nat` (every container is a microVM behind user-mode NAT; publish ports with `-p`). Create, connect and remove answer 501 |
 | `GET /volumes`, `GET /volumes/{name}` | `docker volume ls`, `inspect` | always empty: there are no named volumes (a container's disk lives and dies with it). Create answers 501 |
-| `POST /build` | `docker build` | always 501 with the two ways to build: `fluxctl mac build`, or `fluxctl docker up` for a real engine |
+| `POST /build` | `docker build` | macOS image builds via the Mac builder (details below); Linux Dockerfile builds require the managed engine |
 
 Not run against the real `docker` CLI against a live daemon by the tests: they call the handlers in process with fakes.
 
@@ -63,6 +63,29 @@ fluxctl docker down --purge                      # delete the VM and everything 
 ```
 
 `up` is idempotent: run it again to restart the VM or the socket forward. It prints the `export DOCKER_HOST=…` line.
+
+### Run Docker commands through fluxctl
+
+After `fluxctl docker up`, issue Docker commands directly. FluxVM invokes the Docker CLI installed on the host and selects the managed engine socket for that process. Your active Docker context stays unchanged.
+
+```sh
+fluxctl docker run --rm -it alpine sh
+fluxctl docker compose up --build --wait
+fluxctl docker buildx ls
+fluxctl docker volume ls
+fluxctl docker network inspect bridge
+fluxctl docker system df
+```
+
+Install client plugins such as Compose or Buildx **on the host** to use their commands. Docker decides which features the running daemon, builder, registry credentials and installed plugins support. Registry operations use the host client's Docker configuration. A plugin may use its own configured endpoint, such as a selected Buildx builder.
+
+FluxVM reserves `up`, `down`, `status`, `env`, `context`, `builds`, `agent`, `supervise` and `cli`. Use `cli --` to pass a reserved name or Docker global options, or supply the socket of a second managed VM:
+
+```sh
+fluxctl docker cli -- context ls
+fluxctl docker cli --socket /tmp/project-engine.sock -- info
+fluxctl docker cli -- --debug version
+```
 
 ### Docker context (`docker --context fluxvm`)
 
