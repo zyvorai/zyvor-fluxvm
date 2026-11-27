@@ -13,6 +13,11 @@ pub enum ApiRequest {
     Shutdown,
     SnapshotSave {
         path: PathBuf,
+        /// In-tree KVM with `FLUXVM_KVM_DIRTY_LOG=1`: metadata path of this
+        /// VM's previous snapshot, to write only the pages dirtied since it
+        /// (falls back to a full snapshot when that is not possible).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<PathBuf>,
     },
     SnapshotRestore {
         path: PathBuf,
@@ -133,4 +138,32 @@ pub enum ApiResponse {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parent` is optional on the wire: older clients keep working and a
+    /// full snapshot request serialises exactly as before.
+    #[test]
+    fn snapshot_save_parent_is_optional() {
+        let old: ApiRequest =
+            serde_json::from_str(r#"{"action":"snapshot_save","path":"/s/a"}"#).unwrap();
+        assert!(matches!(old, ApiRequest::SnapshotSave { parent: None, .. }));
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"action":"snapshot_save","path":"/s/a"}"#
+        );
+        let inc: ApiRequest =
+            serde_json::from_str(r#"{"action":"snapshot_save","path":"/s/b","parent":"/s/a"}"#)
+                .unwrap();
+        match inc {
+            ApiRequest::SnapshotSave { path, parent } => {
+                assert_eq!(path, PathBuf::from("/s/b"));
+                assert_eq!(parent, Some(PathBuf::from("/s/a")));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

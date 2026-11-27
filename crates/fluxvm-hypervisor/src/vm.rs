@@ -471,6 +471,8 @@ impl VirtualMachine {
         // from auto-onlining more than `cfg.cpus` of them at boot.
         let num_cpus = self.cfg.max_cpus.max(self.cfg.cpus).max(1);
         let kvm = Arc::new(KvmVm::create(&self.mem, num_cpus)?);
+        // Dirty-log baseline for incremental snapshots (FLUXVM_KVM_DIRTY_LOG=1).
+        let mut dirty_log_state = kvm_snap::DirtyLogState::default();
         // Firecracker: register_irq(serial.interrupt_evt(), COM1_GSI=4).
         if let Some(fd) = self.serial.interrupt_evt() {
             kvm.register_irqfd(fd, self.serial.irq)?;
@@ -656,8 +658,25 @@ impl VirtualMachine {
                                 .flatten()
                                 .filter_map(|d| d.state.lock().ok().map(|s| s.clone()))
                                 .collect();
-                        let r = kvm_snap::dump(&kvm, &this.mem, &cmd.vmstate, &cmd.mem, &virtio)
-                            .map_err(|e| e.to_string());
+                        // Kernel vhost-net writes RX buffers straight into
+                        // guest RAM: invisible to both dirty logs.
+                        let untracked = (this.vhost.is_some() || !this.vhost_pairs.is_empty())
+                            .then_some("vhost-net");
+                        let r = kvm_snap::dump_tracked(
+                            &kvm,
+                            &this.mem,
+                            &cmd.vmstate,
+                            &cmd.mem,
+                            &virtio,
+                            cmd.parent.as_ref(),
+                            kvm_snap::DeltaPolicy {
+                                enabled: kvm_snap::incremental_enabled(),
+                                untracked_writer: untracked,
+                            },
+                            &mut dirty_log_state,
+                        )
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
                         let _ = cmd.reply.send(r);
                     }
                 }

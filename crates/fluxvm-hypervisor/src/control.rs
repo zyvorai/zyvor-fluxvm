@@ -189,9 +189,9 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 message: "shutdown".into(),
             }
         }
-        ApiRequest::SnapshotSave { path } => {
+        ApiRequest::SnapshotSave { path, parent } => {
             let st = state.lock().await;
-            let result = snapshot::save(&st, &path).await;
+            let result = snapshot::save(&st, &path, parent.as_deref()).await;
             if st.lifecycle == VmLifecycle::Running {
                 if let Some(g) = &st.guest {
                     let _ = g.resume().await;
@@ -276,7 +276,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                     // avoid async recursion through dispatch).
                     let st = state.lock().await;
                     if st.guest.is_some() {
-                        let result = snapshot::save(&st, &path).await;
+                        let result = snapshot::save(&st, &path, None).await;
                         if st.lifecycle == VmLifecycle::Running {
                             if let Some(g) = &st.guest {
                                 let _ = g.resume().await;
@@ -597,7 +597,8 @@ mod tests {
     fn timeout_for_uses_the_longer_bound_for_snapshot_requests() {
         assert_eq!(
             timeout_for(&ApiRequest::SnapshotSave {
-                path: PathBuf::from("/tmp/x")
+                path: PathBuf::from("/tmp/x"),
+                parent: None,
             }),
             SNAPSHOT_REQUEST_TIMEOUT,
         );

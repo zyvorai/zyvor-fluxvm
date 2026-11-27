@@ -157,8 +157,24 @@ impl GuestHandle {
     }
 
     pub async fn snapshot_create(&self, vmstate: &Path, mem: &Path) -> Result<()> {
+        self.snapshot_create_with_parent(vmstate, mem, None).await
+    }
+
+    /// Like [`GuestHandle::snapshot_create`], optionally as an incremental
+    /// (dirty-log delta) snapshot over `parent`. In-tree KVM only; the KVM
+    /// engine writes a full snapshot when a delta is not possible, and
+    /// Firecracker always writes a full one.
+    pub async fn snapshot_create_with_parent(
+        &self,
+        vmstate: &Path,
+        mem: &Path,
+        parent: Option<kvm_snap::SnapParent>,
+    ) -> Result<()> {
         match &self.engine {
             GuestEngine::Firecracker { api_sock, .. } => {
+                if parent.is_some() {
+                    tracing::warn!("incremental snapshots need the in-tree KVM engine; writing a full snapshot");
+                }
                 snapshot_create(api_sock, vmstate, mem).await
             }
             GuestEngine::Kvm {
@@ -178,6 +194,7 @@ impl GuestHandle {
                     .send(SnapCmd {
                         vmstate: vmstate.to_path_buf(),
                         mem: mem.to_path_buf(),
+                        parent,
                         reply: reply_tx,
                     })
                     .context("vCPU thread gone; cannot snapshot")?;
@@ -308,9 +325,10 @@ pub async fn start_kvm_from_snapshot(
             vm_cfg.cpus
         );
     }
-    let actual_mem_len = fs::metadata(mem_path)
-        .with_context(|| format!("reading snapshot RAM {}", mem_path.display()))?
-        .len();
+    // A dirty-log delta records the RAM size it restores to.
+    let actual_mem_len = kvm_snap::memory_image_len(mem_path)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("reading snapshot RAM {}", mem_path.display()))?;
     if actual_mem_len != cpu.mem_len {
         bail!(
             "snapshot RAM size {} does not match vmstate size {}",
