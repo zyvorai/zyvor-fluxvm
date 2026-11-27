@@ -135,3 +135,8 @@ userfaultfd demand paging (handler), dirty-log incremental snapshots, and a warm
 backfilled by fork. They remain designs. `MAP_PRIVATE` is the only lazy restore
 that exists, and the dirty-log design is the riskiest because host-side device
 writes through `host_ptr()` are not tracked by KVM.
+
+## Dirty-log capture skeleton
+
+`crates/fluxvm-hypervisor/src/dirty_log_capture.rs` defines DirtyPage and DirtyLog. Full KVM_GET_DIRTY_LOG wiring is still TODO.
+
