@@ -4,6 +4,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/fluxvm-docker-api",
     "crates/fluxvm-core",
     "crates/fluxvm-cgroup",
     "crates/fluxvm-storage",
