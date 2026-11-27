@@ -29,20 +29,73 @@ Each container gets its own kernel, its own network namespace, and the FluxVM gu
 
 ## What already works today
 
-- Pull, cache, and run any OCI image (linux/arm64 or linux/amd64 under Rosetta)
-- Published ports, named volumes, restart policies, health checks
-- Private networks and stacks (see macos-stacks.md)
-- Partial Docker Engine API on `{run_dir}/docker.sock` so existing `DOCKER_HOST` scripts keep working for run/ps/logs/exec
+These are wired into `fluxctl`, the REST API and the daemon, and covered by the tests and live scripts listed in
+[oci-sandboxes.md](oci-sandboxes.md#verified):
+
+- Pull, cache, and run any OCI image (linux/arm64, or linux/amd64 under Rosetta on Apple silicon)
+- Published TCP and UDP ports, named volumes (up to four per sandbox, virtiofs), restart policies, health checks
+- Private networks and stacks: `fluxctl up` with a `fluxvm.toml`, and `fluxctl import-compose` to convert the parts of a
+  `docker-compose.yml` that map onto container services (see [macos-stacks.md](macos-stacks.md))
+- Partial Docker Engine API on `{run_dir}/docker.sock`, so existing `DOCKER_HOST` scripts keep working for `pull`, `images`, `run`,
+  `ps`, `rm`, `logs`, `exec`, `stop`, `restart`, `kill`, `pause`/`unpause`, `top`, `stats`, `rename` and `events`
 - Warm pool for sub-second cold starts of common sizes
 - Full REST, MCP, and `fluxctl` surface
 
-## Remaining gaps (being closed)
+## Remaining gaps
 
-These are the reasons `fluxctl docker up` still exists. Once closed, that path becomes unnecessary.
+These are the reasons `fluxctl docker up` still exists. Status is what the code on `main` does today, not what a design doc
+plans. "Scaffold" means a source file exists but is not compiled into `fluxctl` (it has no `mod` declaration in
+`crates/fluxctl/src/main.rs`), so the command or flag does not exist yet.
 
-1. **Image builds** — `fluxctl sandbox build` (builder microVM, layer cache, Dockerfile subset or BuildKit)
-2. **Bind mounts** — controlled host-path virtiofs mounts with allowlists (in addition to named volumes)
-3. **Full Compose / multi-service networking** — richer stack support and optional thin Docker API coverage for networks
+### 1. Image builds
+
+| Path | Today | What happens |
+|---|---|---|
+| `fluxctl sandbox build` | **Missing (scaffold)** | `crates/fluxctl/src/sandbox_build.rs` defines the flags and prints a TODO; it is not compiled, so `fluxctl sandbox build` is an unknown command. |
+| `docker build` on the FluxVM socket | **macOS images only** | `POST /build` (classic builder only) is forwarded to `fluxctl mac build`, which builds **macOS VM images** from a Macfile, not Linux OCI images. On a non-Mac host it is refused before the context is uploaded. BuildKit (`docker buildx`, `/grpc`, `/session`) and `--memory`, `--cpu-*`, `--network`, `--cache-from` are refused with a message naming the alternative. |
+| `build:` in an imported Compose file | **Refused** | `fluxctl import-compose` treats `build:` as an error: build and push the image first. |
+
+**Workaround:** build the image elsewhere (CI, `docker buildx` on any machine, `buildah`) and push it to a registry FluxVM can pull
+from, or run a real engine with `fluxctl docker up` and `docker build` there.
+
+**Planned:** a builder microVM behind `fluxctl sandbox build` that reuses the OCI unpack path, shares the context over virtiofs,
+keeps a layer cache, and registers the result in the local image store (`docs/sandbox-build.md`, branch `feat/sandbox-build`).
+
+### 2. Bind mounts (host paths)
+
+| Path | Today | What happens |
+|---|---|---|
+| `fluxctl sandbox run -v` / REST `volumes` | **Named volumes only** | Volumes are FluxVM-managed directories under `volumes_dir`; there is no way to name an arbitrary host path. |
+| `docker run -v /host:/guest` on the FluxVM socket | **Refused** | A non-empty `HostConfig.Binds` returns 400 "bind mounts are not supported by the FluxVM Docker shim; use named volumes via fluxctl". |
+| Compose bind mounts via `import-compose` | **Dropped with a warning** | `source:target` host paths have no equivalent; use a named volume. |
+| `fluxctl sandbox run --mount type=bind,...` | **Missing (scaffold)** | `crates/fluxctl/src/sandbox_mount.rs` has a parser and an allowlist check but is not compiled (it would not build as is: it calls `.context` without importing `anyhow::Context`). There is no `--mount` flag and no `allow_host_mounts` config key yet, despite what `docs/sandbox-bind-mounts.md` shows as the intended syntax. |
+
+**Workaround:** put the data in a named volume (copy it in through the guest agent's file transfer, or seed the volume directory on
+the host while no sandbox uses it), or use `fluxctl docker up --share ~/work`, which shares a host directory into the engine VM.
+
+**Planned:** controlled virtiofs host-path mounts, off by default, limited to an allowlist of canonicalised host prefixes,
+read-only unless asked otherwise (`docs/sandbox-bind-mounts.md`, branch `feat/sandbox-bind-mounts`).
+
+### 3. Docker networks and Compose as a daemon
+
+| Path | Today | What happens |
+|---|---|---|
+| `docker network create` on the FluxVM socket | **Refused** | Every container sits behind user-mode NAT; `GET /networks` lists only `fluxvm-nat`. |
+| `docker compose up` against the FluxVM socket | **Not supported** | Compose needs networks and named volumes, which the shim refuses. Use `fluxctl import-compose` + `fluxctl up` instead. |
+| Service discovery / health-ordered start for stacks | **Partly** | `fluxctl up` already orders by `depends_on` and resolves service names (all names with `network = "private"`). `crates/fluxctl/src/sandbox_stack.rs` (topological order, a placeholder `10.89.0.x` address plan) is a scaffold and not compiled. |
+
+**Workaround:** `fluxctl import-compose docker-compose.yml --out fluxvm.toml` and `fluxctl up`; or `fluxctl docker up` for a real
+engine.
+
+**Planned:** wire stack networking onto the private-network IPAM and add the thin Docker network API on top
+(`docs/sandbox-stacks.md`, branch `feat/sandbox-stacks-networking`).
+
+### 4. Smaller gaps in the Docker API shim
+
+- **Named volumes:** `docker volume create` is refused and `GET /volumes` is empty (a container's disk lives and dies with it);
+  named volumes exist only through `fluxctl` and the REST API.
+- **`docker cp`:** there are no `/containers/{id}/archive` endpoints; use the guest agent's file transfer through `fluxctl`/REST.
+- **BuildKit:** never served (see image builds).
 
 ## Compatibility mode
 

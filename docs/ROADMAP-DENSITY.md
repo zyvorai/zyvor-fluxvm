@@ -21,57 +21,118 @@ Status of Phase 3 work on the in-tree KVM engine.
   child, disk bytes per child. Use `FLUXVM_KVM_EAGER_RESTORE=1` on the daemon for
   the "before" numbers.
 
-## In progress: userfaultfd demand-paged restore (`FLUXVM_KVM_UFFD=1`)
+## Implemented (unverified on a KVM host): userfaultfd demand-paged restore (`FLUXVM_KVM_UFFD=1`)
 
-**Started.** `GuestMemory::setup_uffd_restore` and the preference in
-`load_memory_into` are wired. Opt-in with `FLUXVM_KVM_UFFD=1`. Falls back
-cleanly to `MAP_PRIVATE` when the feature or sysctl is unavailable.
+**Code complete, unit-tested; not yet run under a real guest.** `crates/fluxvm-hypervisor/src/uffd.rs`
+plus `GuestMemory::setup_uffd_restore`; preferred by `kvm_snap::load_memory_into` when
+`FLUXVM_KVM_UFFD=1`.
 
-Remaining work for a complete implementation:
+1. Before touching RAM: env checks (`FLUXVM_KVM_LOCK_MEM`, `FLUXVM_HUGEPAGES`,
+   `FLUXVM_KVM_EAGER_RESTORE` all refuse), size check, then
+   `userfaultfd(O_CLOEXEC|O_NONBLOCK)` (or `/dev/userfaultfd` +
+   `USERFAULTFD_IOC_NEW` when the syscall is refused) and the `UFFDIO_API`
+   handshake. Only page-fault events are requested (no fork/remap/remove), and
+   never `UFFD_USER_MODE_ONLY`: KVM faults guest RAM in from kernel mode.
+2. Guest RAM is replaced in place (`MAP_FIXED`, same host address, so the KVM
+   memslot and every `host_ptr()` copy stay valid) by an empty
+   `MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE` mapping and registered with
+   `UFFDIO_REGISTER_MODE_MISSING`; registration must offer `UFFDIO_COPY` and
+   `UFFDIO_WAKE`.
+3. A `fluxvm-uffd` thread polls the uffd and a stop eventfd. Each
+   `UFFD_EVENT_PAGEFAULT` is answered from `snap.mem` (`pread` at the
+   region offset into a page-aligned bounce buffer) for the faulting page plus
+   `FLUXVM_KVM_UFFD_PREFETCH_PAGES - 1` following pages (default 16, clamped to
+   1..=512 and to the region). An all-zero window uses `UFFDIO_ZEROPAGE` when
+   offered. `EAGAIN` is retried from where the kernel stopped; `EEXIST` (part of
+   the window already present) falls back to the faulting page alone and then
+   to `UFFDIO_WAKE`; `ENOENT` (teardown) wakes; `ESRCH` (process exiting) stops
+   the thread. A read error leaves the fault unserved and is counted rather
+   than handing the guest wrong bytes. Counters: `GuestMemory::uffd_pager()`.
+4. The pager lives on `GuestMemory` (shared by clones) and is shut down before
+   the mapping is unmapped.
+5. Fallback: any error before the remap leaves RAM untouched; any error after
+   it leaves an empty mapping that the `MAP_PRIVATE` path (or the eager copy)
+   then replaces completely. Either way restore continues and logs
+   `[kvm-engine] uffd restore unavailable (<reason>), falling back`.
+6. The hypervisor's seccomp allowlist now includes `userfaultfd` (it already had
+   `ioctl`, `poll`, `pread64`, `eventfd2`); without it the opt-in would SIGSYS.
 
-1. Full userfaultfd ioctl bindings (`UFFDIO_API`, `UFFDIO_REGISTER`, `UFFDIO_COPY`).
-2. Handler thread that answers faults from `snap.mem` (with optional prefetch).
-3. Keep the uffd fd alive for the VM lifetime.
-4. Live verification on a real KVM host.
+Needs `vm.unprivileged_userfaultfd=1`, `CAP_SYS_PTRACE`, or access to
+`/dev/userfaultfd`. Same caution as `MAP_PRIVATE`: do not rewrite `snap.mem`
+while a restored guest runs.
 
-Design (unchanged):
+Tests: ioctl numbers and struct sizes against `<linux/userfaultfd.h>`, the
+fault-window arithmetic, short-file zero fill, serving every page of a
+region from a file with racing faulting threads, a non-zero file offset plus an
+already-present page (the `EEXIST` path), prompt shutdown, and
+`setup_uffd_restore` either serving the snapshot or leaving RAM untouched.
+These use a user-mode-only uffd, so they run unprivileged even with
+`vm.unprivileged_userfaultfd=0`; they skip only when userfaultfd is missing
+entirely. `kvm_snap::tests::real_kvm::guest_runs_on_uffd_restored_ram` runs a
+real-mode guest on uffd-backed RAM; it is `#[ignore]`d (needs a working
+`/dev/kvm` and a kernel-fault uffd).
 
-1. Allocate guest RAM anonymous as today, `userfaultfd(O_CLOEXEC|O_NONBLOCK)`,
-   `UFFDIO_API`, `UFFDIO_REGISTER` the whole range in `MISSING` mode.
-2. A handler thread polls the uffd and answers each fault with `UFFDIO_COPY`
-   from `snap.mem` (pread into a page-aligned buffer), optionally prefetching a
-   window around the fault and a background fill for the remainder.
-3. The handler must start before any vCPU or device thread runs and outlive
-   the VM; KVM's own EPT-violation faults on unpopulated pages go through the
-   same path, so no KVM changes are needed.
-4. Needs unprivileged-uffd sysctl (`vm.unprivileged_userfaultfd`) or
-   `CAP_SYS_PTRACE`; fall back to the `MAP_PRIVATE` path when unavailable.
+Not done: a background fill of the remaining pages after the guest is up, and
+any measurement against `MAP_PRIVATE`. Balloon `MADV_DONTNEED` on uffd-backed RAM
+makes those pages fault in from the snapshot again rather than as zeros (the
+guest does not read a ballooned page, so this is harmless but wastes the copy).
 
-## TODO: KVM dirty-log incremental snapshots
+## Implemented (unverified on a KVM host): KVM dirty-log incremental snapshots (`FLUXVM_KVM_DIRTY_LOG=1`)
 
-Not implemented (needs a Linux/KVM host to validate; the pause interplay with
-`snapshot.rs` is the risky part). Design:
+**Code complete, unit-tested; the KVM side is not yet run under a real guest.**
 
-1. Full snapshot as today, then re-register RAM with `KVM_MEM_LOG_DIRTY_PAGES`
-   (`KVM_SET_USER_MEMORY_REGION` with the flag on the existing slot) and call
-   `KVM_GET_DIRTY_LOG` once to clear the bitmap right after the full dump, while
-   the VM is still paused.
-2. Incremental snapshot: pause (existing epoch/quiesce handshake), call
-   `KVM_GET_DIRTY_LOG` (one bit per 4 KiB page, `mem_len/4096/8` bytes), write
-   only those pages. Devices that write RAM outside vCPUs (virtio queues, tap and
-   blk workers) write through the same host mapping, so they are covered by
-   the dirty log only when KVM sees the write: host-side writes via
-   `host_ptr()` are NOT tracked. Every virtio completion path must also set the
-   bit in a software bitmap, or the delta must conservatively include all
-   guest pages touched by queue service since the last snapshot.
-3. Delta file layout: header (magic `FLUXKVMD`, parent snapshot id, page count),
-   then `(gfn: u64, 4096 bytes)` records, or a bitmap plus packed pages.
-4. `FLUXKVM1` vmstate version bump (current is 5, so 6) adding a
-   `parent` reference and `delta` flag. `load_cpu` already branches on
-   `version`, so older files keep loading; a v6 reader applies the base `snap.mem`
-   (privately mapped) and then patches the delta pages over it.
-5. Costs of the log (write-protection faults on first write per page) mean it
-   should only be enabled on VMs that opt in to incremental snapshots.
+- `KvmVm::set_dirty_logging(on)` re-registers memslot 0 with or without
+  `KVM_MEM_LOG_DIRTY_PAGES`; `KvmVm::get_dirty_log()` returns the
+  `KVM_GET_DIRTY_LOG` bitmap (one bit per 4 KiB page, cleared by the read).
+- Host-side writes KVM never sees are tracked in software:
+  `GuestMemory::write_at` (every virtio completion, block read, RNG fill) and
+  `advise_dontneed` (balloon) mark `GuestMemory::host_dirty()`, a lock-free
+  bitmap shared by all clones that is off (one relaxed load per write) until
+  the first full snapshot with logging on.
+- `kvm_snap::dump_tracked` (used by the live VM's `SnapCmd`):
+  - full snapshot: as before, then (with `FLUXVM_KVM_DIRTY_LOG=1`) turn the log
+    on, clear it, and record this snapshot's id as the baseline;
+  - `SnapCmd.parent = Some(..)`: a `FLUXKVMD` delta of the KVM bitmap OR the
+    software bitmap, collapsed into page ranges, then the vmstate.
+  - A delta is only written when the parent's v6 lineage id equals the
+    baseline (no other snapshot has consumed the log since), logging is on, and
+    no kernel vhost-net datapath is active (vhost writes RX buffers into guest
+    RAM behind both logs). Otherwise it logs why and writes a full snapshot,
+    which always restores. A failure after the log was read resets the
+    baseline, so the next snapshot is full.
+- Format: `FLUXKVM1` **v6** = v5 plus a 36-byte lineage block (snapshot id,
+  parent id, delta flag) between the MP states and the tagged sections; v1-v5
+  files keep loading. The delta file (`dirty_log.rs`): header (magic
+  `FLUXKVMD`, version, page size, RAM length, snapshot id, parent id, parent
+  memory path) and a range table `(first gfn, pages)`, then the packed pages.
+- Restore: `load_memory_into` detects `FLUXKVMD`, loads the parent chain (up to
+  64 deep; relative parent paths resolve next to the delta) through the usual
+  uffd / `MAP_PRIVATE` / eager path for the base, checks each parent's id where
+  it can (a parent delta's header, or a full parent's sibling `.vmstate`), and
+  copies each delta's pages over it. `memory_image_len` reports a delta's RAM
+  size for the restore preflights.
+- API: `{"action": "snapshot_save", "path": ..., "parent": "<earlier snapshot
+  metadata path>"}` (control socket), i.e. `snapshot::save(st, path,
+  Some(parent))`. Firecracker guests ignore it and write a full snapshot.
+
+Tests: bitmap-to-range conversion (runs, word boundaries, padding bits),
+bitmap merge and sizes, software bitmap enable/mark/take, delta write/read/apply
+round trip and every rejection (range past RAM, wrong RAM size, truncation,
+unordered ranges, not a delta), v6 lineage parse, restore of a base + two-delta
+chain and refusal of a mismatched parent. `#[ignore]`d real-KVM tests:
+`dirty_log_sees_guest_writes_only` (a real-mode guest increments one page; the
+log shows exactly that page) and `incremental_snapshot_round_trip` (full
+snapshot, guest + host writes, delta of exactly those pages, refusal cases,
+restore equals live RAM).
+
+Limits: deleting or rewriting a parent breaks its deltas (restore fails
+cleanly with the missing/mismatched parent). Writes through
+`GuestMemory::as_slice_mut()` or raw `host_ptr()` copies are not tracked (only
+restore and tests use them today); a new device that writes RAM that way must
+mark `host_dirty()` or block deltas like vhost-net does. A VM restored from a
+snapshot starts without a baseline, so its first snapshot is full. vhost-net
+guests never get deltas until vhost's own dirty log (`VHOST_SET_LOG_BASE`) is
+wired.
 
 ## TODO: warm pool backfilled by fork
 
@@ -129,6 +190,13 @@ latency or throughput number has been measured, and none is claimed.
 
 ### Still to do
 
+
+- userfaultfd demand paging and dirty-log incremental snapshots are now
+  implemented (sections above) but have only been unit-tested; both need a run
+  on a real KVM host (`cargo test -p fluxvm-hypervisor --lib real_kvm --
+  --ignored`, then `bench-fork.sh` with `FLUXVM_KVM_UFFD=1`).
+- A warm pool backfilled by fork is still a design.
+
 The three TODO sections above are unchanged and still unimplemented (except the
 userfaultfd entry point, which is now started):
 userfaultfd demand paging (handler), dirty-log incremental snapshots, and a warm pool
@@ -139,4 +207,5 @@ writes through `host_ptr()` are not tracked by KVM.
 ## Dirty-log capture skeleton
 
 `crates/fluxvm-hypervisor/src/dirty_log_capture.rs` defines DirtyPage and DirtyLog. Full KVM_GET_DIRTY_LOG wiring is still TODO.
+
 

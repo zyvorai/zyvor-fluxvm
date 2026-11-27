@@ -170,6 +170,9 @@ fn apply_seccomp_filter() -> Result<()> {
         libc::SYS_epoll_pwait,
         libc::SYS_accept4,
         libc::SYS_eventfd2,
+        // FLUXVM_KVM_UFFD=1 demand-paged restore (uffd.rs); without it the
+        // opt-in would SIGSYS the process instead of falling back.
+        libc::SYS_userfaultfd,
         libc::SYS_fallocate,
         // Snapshot save stages files in a temp directory and removes it with
         // std::fs::remove_dir_all (getdents64); statfs/fstatfs/copy_file_range

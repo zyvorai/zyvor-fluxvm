@@ -25,7 +25,9 @@ pub fn preflight_restore(spec: &SnapshotSpec) -> Result<()> {
         .memory_mib
         .checked_mul(1024 * 1024)
         .context("snapshot RAM size overflow")?;
-    if cpu.mem_len != expected || fs::metadata(&spec.memory_path)?.len() != expected {
+    let image_len =
+        kvm_snap::memory_image_len(&spec.memory_path).context("reading snapshot RAM")?;
+    if cpu.mem_len != expected || image_len != expected {
         bail!("snapshot RAM size does not match the saved VM configuration");
     }
     if cpu.all_vcpus.len() != usize::from(spec.boot.vcpus) {
@@ -46,7 +48,14 @@ pub fn preflight_restore(spec: &SnapshotSpec) -> Result<()> {
 }
 
 /// Save a full template: Firecracker memory+vmstate snapshot + FICLONE of rootfs.
-pub async fn save(st: &VmState, path: &Path) -> Result<()> {
+///
+/// `incremental_from` (the metadata path of an earlier snapshot of this same VM) asks
+/// the in-tree KVM engine for an incremental snapshot: its memory file is
+/// then a `FLUXKVMD` delta of the pages written since that one, which must
+/// stay in place for this snapshot to restore. The engine writes a full
+/// snapshot instead whenever a delta is not possible (see
+/// `kvm_snap::dump_tracked`).
+pub async fn save(st: &VmState, path: &Path, incremental_from: Option<&Path>) -> Result<()> {
     let boot = st.boot.as_ref().context("no boot config to snapshot")?;
     let guest = st.guest.as_ref().context("no live guest to snapshot")?;
     if let Some(parent) = path.parent() {
@@ -79,8 +88,23 @@ pub async fn save(st: &VmState, path: &Path) -> Result<()> {
             .pause()
             .await
             .context("quiescing guest for snapshot")?;
+        let parent_snap = match incremental_from {
+            Some(p) => {
+                let spec = load_spec(p).context("reading parent snapshot")?;
+                let vmstate = spec
+                    .vmstate_path
+                    .context("parent snapshot has no vmstate (not an in-tree KVM snapshot)")?;
+                // Absolute, so the delta finds its parent whatever the
+                // daemon's working directory is at restore time.
+                let mem = fs::canonicalize(&spec.memory_path).with_context(|| {
+                    format!("parent snapshot memory {}", spec.memory_path.display())
+                })?;
+                Some(kvm_snap::SnapParent { vmstate, mem })
+            }
+            None => None,
+        };
         guest
-            .snapshot_create(&staged_vmstate, &staged_mem)
+            .snapshot_create_with_parent(&staged_vmstate, &staged_mem, parent_snap)
             .await
             .context("guest snapshot/create")?;
 

@@ -123,6 +123,11 @@ pub struct KvmVm {
     pub vcpus: Vec<VcpuHandle>,
     pub run_size: usize,
     tsc_deadline_supported: bool,
+    /// Guest RAM memslot 0 as registered at create time (size, host
+    /// address), re-registered to toggle `KVM_MEM_LOG_DIRTY_PAGES`.
+    ram_size: u64,
+    ram_host: u64,
+    dirty_logging: std::sync::atomic::AtomicBool,
 }
 
 unsafe impl Send for KvmVm {}
@@ -282,6 +287,9 @@ impl KvmVm {
                 vcpus,
                 run_size: mmap_size as usize,
                 tsc_deadline_supported,
+                ram_size: mem.len() as u64,
+                ram_host: mem.host_ptr() as u64,
+                dirty_logging: std::sync::atomic::AtomicBool::new(false),
             };
             for id in 0..num_cpus as usize {
                 this.setup_cpuid(id)?;
@@ -1151,6 +1159,82 @@ impl KvmVm {
             return Err(FluxError::Hypervisor("KVM_SET_SREGS".into()));
         }
         Ok(())
+    }
+
+    /// Turn KVM dirty-page logging on or off for the guest RAM memslot by
+    /// re-registering slot 0 (same GPA, size and host address) with or
+    /// without `KVM_MEM_LOG_DIRTY_PAGES`. Enabling write-protects every
+    /// guest page, so the first write to each page after a snapshot costs a
+    /// fault; only VMs that take incremental snapshots should enable it.
+    /// Call with the vCPUs parked.
+    pub fn set_dirty_logging(&self, on: bool) -> Result<()> {
+        let mut region = KvmUserspaceMemoryRegion {
+            slot: 0,
+            flags: if on { ffi::KVM_MEM_LOG_DIRTY_PAGES } else { 0 },
+            guest_phys_addr: 0,
+            memory_size: self.ram_size,
+            userspace_addr: self.ram_host,
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vm_fd,
+                ffi::KVM_SET_USER_MEMORY_REGION,
+                &mut region as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!(
+                "KVM_SET_USER_MEMORY_REGION (dirty log {on}) errno {}",
+                unsafe { ffi::flux_errno() }
+            )));
+        }
+        self.dirty_logging
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Whether [`KvmVm::set_dirty_logging`] last turned logging on.
+    pub fn dirty_logging(&self) -> bool {
+        self.dirty_logging.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// `KVM_GET_DIRTY_LOG` for the guest RAM slot: one bit per 4 KiB page
+    /// written by the guest since the previous call (or since logging was
+    /// enabled), in u64 words. The kernel clears the log as it copies it
+    /// out (no `KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2`), so every call starts
+    /// a new interval.
+    pub fn get_dirty_log(&self) -> Result<Vec<u64>> {
+        if !self.dirty_logging() {
+            return Err(FluxError::Hypervisor(
+                "KVM_GET_DIRTY_LOG without KVM_MEM_LOG_DIRTY_PAGES".into(),
+            ));
+        }
+        let mut bitmap = vec![0u64; crate::dirty_log::bitmap_words(self.ram_size)];
+        #[repr(C)]
+        struct KvmDirtyLog {
+            slot: u32,
+            padding1: u32,
+            dirty_bitmap: u64,
+        }
+        let mut log = KvmDirtyLog {
+            slot: 0,
+            padding1: 0,
+            dirty_bitmap: bitmap.as_mut_ptr() as u64,
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vm_fd,
+                ffi::KVM_GET_DIRTY_LOG,
+                &mut log as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!(
+                "KVM_GET_DIRTY_LOG errno {}",
+                unsafe { ffi::flux_errno() }
+            )));
+        }
+        Ok(bitmap)
     }
 
     pub fn run_once(&self, idx: usize) -> Result<u32> {

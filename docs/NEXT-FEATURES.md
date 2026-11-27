@@ -205,9 +205,10 @@ not journaled, delete intent omits nbd and Ceph) are listed in
 
 ### Remaining
 
-- **userfaultfd** demand-paged restore (design in ROADMAP-DENSITY; only worth it
-  if `MAP_PRIVATE` falls short).
-- **Dirty-log incremental snapshots** (design in ROADMAP-DENSITY).
+- **userfaultfd** demand-paged restore: implemented behind `FLUXVM_KVM_UFFD=1`
+  (ROADMAP-DENSITY); still to run on a KVM host and measure against `MAP_PRIVATE`.
+- **Dirty-log incremental snapshots**: implemented behind `FLUXVM_KVM_DIRTY_LOG=1`
+  (ROADMAP-DENSITY); still to run on a KVM host.
 - **Fork-backed warm pools**: `backfill_pool` still boots members cold.
 - **SEV-SNP / confidential**: the `confidential-snp` profile stays gated; nothing
   in this batch touches it, and `sev-snp` remains claimable only after a verified

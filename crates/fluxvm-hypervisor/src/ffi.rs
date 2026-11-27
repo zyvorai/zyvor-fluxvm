@@ -107,6 +107,10 @@ pub const KVM_CAP_TSC_DEADLINE_TIMER: c_ulong = 72;
 pub const KVM_GET_VCPU_MMAP_SIZE: c_ulong = 0xae04;
 pub const KVM_CREATE_VCPU: c_ulong = 0xae41;
 pub const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_ae46;
+/// `kvm_userspace_memory_region.flags`: track guest writes for `KVM_GET_DIRTY_LOG`.
+pub const KVM_MEM_LOG_DIRTY_PAGES: u32 = 1;
+/// `_IOW(KVMIO, 0x42, struct kvm_dirty_log)`.
+pub const KVM_GET_DIRTY_LOG: c_ulong = 0x4010_ae42;
 /// `_IO(KVMIO, 0x47)` — Intel hosts need a 3-page TSS region with irqchip.
 pub const KVM_SET_TSS_ADDR: c_ulong = 0xae47;
 /// `_IOW(KVMIO, 0x48, __u64)` — required alongside `KVM_SET_TSS_ADDR` on

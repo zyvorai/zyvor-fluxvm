@@ -16,6 +16,7 @@ pub mod config;
 pub mod control;
 pub mod cpuid_topology;
 pub mod devices;
+pub mod dirty_log;
 pub mod error;
 pub mod ffi;
 pub mod gdbstub;
@@ -37,6 +38,8 @@ pub mod seccomp;
 pub mod snapshot;
 pub mod state;
 pub mod tap;
+#[cfg(target_os = "linux")]
+pub mod uffd;
 pub mod vcpu;
 pub mod vhost;
 pub mod virtio_fs;

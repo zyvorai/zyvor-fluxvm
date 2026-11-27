@@ -279,7 +279,18 @@ Results table: not yet measured.
 | PSS per child | not yet measured | not yet measured |
 | First command ms (fork), p50 / p95 | not yet measured | not yet measured |
 
+## Opt-in: userfaultfd restore and incremental snapshots
+
+- `FLUXVM_KVM_UFFD=1` restores RAM through a userfaultfd handler thread instead
+  of `MAP_PRIVATE` (pages copied from `snap.mem` on first touch, with prefetch);
+  any failure falls back to the path above.
+- `FLUXVM_KVM_DIRTY_LOG=1` keeps KVM dirty logging on after a full snapshot so
+  `snapshot_save` with `parent` can write a `FLUXKVMD` delta of only the dirty
+  pages; restore applies it over its parent.
+
+Both are unit-tested but not yet run under a real guest; details and limits in
+[ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+
 ## Not implemented
 
-userfaultfd demand paging, dirty-log incremental snapshots and fork-backed warm
-pools are designs only; see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+Fork-backed warm pools are a design only; see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).

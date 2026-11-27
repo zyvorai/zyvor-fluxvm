@@ -821,6 +821,7 @@ impl VmManager {
             .context("sandbox has no control socket")?;
         let req = fluxvm_hypervisor::ApiRequest::SnapshotSave {
             path: dest.to_path_buf(),
+            parent: None,
         };
         let resp = fluxvm_hypervisor::control::request(sock, &req).await?;
         match resp {

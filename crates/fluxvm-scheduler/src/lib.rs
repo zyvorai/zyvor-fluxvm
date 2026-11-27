@@ -4288,7 +4288,10 @@ impl VmManager {
                     .control_socket
                     .as_ref()
                     .context("FluxVm VM has no control socket")?;
-                let req = fluxvm_hypervisor::ApiRequest::SnapshotSave { path: meta };
+                let req = fluxvm_hypervisor::ApiRequest::SnapshotSave {
+                    path: meta,
+                    parent: None,
+                };
                 let resp = fluxvm_hypervisor::control::request(sock, &req).await?;
                 match resp {
                     fluxvm_hypervisor::ApiResponse::Ok { .. } => Ok(()),
