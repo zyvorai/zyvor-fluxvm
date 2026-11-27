@@ -2292,6 +2292,7 @@ dependencies = [
  "flate2",
  "fluxvm-apple",
  "fluxvm-core",
+ "fluxvm-docker-api",
  "fluxvm-guest-protocol",
  "fluxvm-image",
  "fluxvm-intelligence",

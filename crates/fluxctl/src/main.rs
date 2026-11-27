@@ -7629,6 +7629,8 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             let _netobs_pump = api::install_netobs(&cfg);
             #[cfg(unix)]
             docker_engine::spawn_if_configured(m.clone(), &cfg);
+            // Opt-in minimal Docker Engine API adapter (`FLUXVM_DOCKER_API`); off unless that variable is set.
+            api::docker_adapter::spawn_if_enabled(m.clone(), &cfg);
             // Held until the daemon exits.
             let _event_sinks = api::event_sinks::spawn(&cfg).map_err(|e| anyhow::anyhow!(e))?;
             let app = api::router(m);
