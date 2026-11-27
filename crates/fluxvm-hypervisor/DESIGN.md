@@ -207,6 +207,6 @@ Windows tables (MSI-X, DSDT, firmware entry, ACPI reset) are in tree. Do not cla
 
 - TCG / software MMU / binary translation
 - VGA / GPU emulation (use VFIO passthrough later if needed)
-- USB, sound, floppy, PS/2 beyond reset
+- USB, sound, floppy, PS/2 beyond reset (Linux USB passthrough is a QEMU concern; see [docs/USB-PASSTHROUGH.md](../../docs/USB-PASSTHROUGH.md))
 - Live nested QEMU device compatibility
 - A new guest Windows kernel

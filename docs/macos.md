@@ -773,8 +773,10 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   the `save` reply lists them in `usb_detached`.
 - **Physical USB passthrough (macOS 27):** the runner's control socket also takes `{"cmd":"usb-physical-list"}` and
   `{"cmd":"usb-physical-attach","registry_id":…}`. It goes through Apple's Accessory Access consent, so it needs the `FluxVMUSBAccess` app
-  signed with the `com.apple.developer.accessory-access.usb` entitlement (an Apple entitlement). There is no REST route or `fluxctl`
-  command. **Not verified, and not fixable by ad-hoc signing:** the broker app claims `com.apple.developer.accessory-access.usb`, a restricted entitlement that macOS only honours with an Apple-issued provisioning profile; on the test Mac the ad-hoc signed app was killed at launch (the same kernel check as for `com.apple.vm.networking`, see the hardware log) and no USB device was attached. A Developer ID build with the profile is required.
+  signed with the `com.apple.developer.accessory-access.usb` entitlement (an Apple entitlement). The same list and attach operations
+  are on `GET /v1/vms/{id}/vz/usb/physical`, `POST /v1/vms/{id}/vz/usb/physical`, and `fluxctl vz usb --physical [--attach ID]`;
+  `GET /v1/vms/{id}/vz/usb` lists what is already on the VM. There is still no REST route or `fluxctl` verb that detaches a
+  passthrough device (the runner's `usb-detach` does). **Not verified, and not fixable by ad-hoc signing:** the broker app claims `com.apple.developer.accessory-access.usb`, a restricted entitlement that macOS only honours with an Apple-issued provisioning profile; on the test Mac the ad-hoc signed app was killed at launch (the same kernel check as for `com.apple.vm.networking`, see the hardware log) and no USB device was attached. A Developer ID build with the profile is required. The design for a unified `fluxctl usb` and for Linux QEMU passthrough is [USB-PASSTHROUGH.md](USB-PASSTHROUGH.md).
 - **Share swap:** `{"cmd":"share-set","tag":"fluxvm-vol0","path":"/dir","read_only":false}` points a running guest's virtiofs share at
   another directory. The container sandbox warm pool ([oci-sandboxes.md](oci-sandboxes.md#warm-pool)) uses it with USB hot-attach
   to hand a pre-booted VM its rootfs and volumes.
