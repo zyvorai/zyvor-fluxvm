@@ -2517,6 +2517,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-docker-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tracing",
+]
+
+[[package]]
 name = "fluxvm-firecracker"
 version = "0.4.21"
 dependencies = [

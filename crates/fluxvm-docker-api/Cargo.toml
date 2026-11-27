@@ -1,9 +1,23 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
+
 [package]
 name = "fluxvm-docker-api"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "LicenseRef-Zyvor-Production-2.0"
+description = "Minimal Docker Engine API adapter (list/create/start/stop/logs) for Zyvor FluxVM"
 
 [dependencies]
+axum = "0.8"
+bytes = "1"
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["fs", "net", "sync"] }
+tower-layer = "0.3"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
