@@ -27,13 +27,36 @@ that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.
 
 **4 Linux backends + `vz` on Mac, one API** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**
 
-[**Quickstart**](#quickstart) · [**Mac cloud**](#your-own-mac-cloud) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+[**Quickstart**](#quickstart) · [**From Lima or Docker**](#coming-from-lima-or-docker) · [**Mac cloud**](#your-own-mac-cloud) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
 
 </div>
 
 [Client overview (PDF)](docs/FluxVM-Client-Overview.pdf)
 
 **On a Mac?** [FluxVM for Mac](https://zyvorai.github.io/zyvor-fluxvm/fluxvm-for-mac/) is a notarized menu-bar app with a 30-day trial. The FluxVM engine in this repository is source-available under the Zyvor Production Licence v2.0. A 30-day trial is available on request from sales@zyvor.dev (a paid evaluation Order at no charge); production and any other use needs a paid Order.
+
+---
+
+## Coming from Lima or Docker?
+
+On an Apple silicon Mac, `fluxctl` covers the everyday jobs of both: a Linux VM with your folders and ports, and a Docker engine.
+
+| I want to… | Run | More |
+|---|---|---|
+| get a throwaway Linux VM and a shell | `fluxctl run` | [Quick start](docs/macos.md#quick-start) |
+| share a folder and publish a port | `fluxctl run -v ~/src:/mnt/src -p 8080:80` | [Quick start](docs/macos.md#quick-start) |
+| keep a VM and come back to it | `fluxctl run --keep --name dev`, then `fluxctl ssh dev`, `fluxctl delete dev` | [Quick start](docs/macos.md#quick-start) |
+| describe several VMs in one file | `fluxvm.toml`, then `fluxctl up` and `fluxctl down` | [Stacks](docs/macos-stacks.md) |
+| use `docker build` and Compose | `fluxctl docker up --share ~/work`, then `eval "$(fluxctl docker env)"` | [Docker engine](docs/docker-engine.md) |
+| run each container in its own VM | `fluxctl sandbox run alpine:3.22 --rm -- echo hi` | [Container sandboxes](docs/oci-sandboxes.md) |
+| run Kubernetes | `fluxctl kube up` | [Kubernetes on a Mac](docs/kubernetes-on-mac.md) |
+| guard a VM against deletion, see disk use, clean up | `fluxctl protect dev`, `fluxctl df`, `fluxctl prune` (on `main`, newer than 0.4.21; needs the daemon) | [Housekeeping](docs/housekeeping.md) |
+
+Know before you switch:
+
+- **There are two Docker sockets.** `fluxctl docker up` runs a real `dockerd` in one VM, so `build`, Compose, bind mounts, volumes and networks work. FluxVM's own `docker.sock` puts each container in its own VM and has no Compose, bind mounts, named volumes or user-defined networks ([what it supports](docs/docker-engine.md#what-the-built-in-dockersock-supports)).
+- **Only folders you share exist in the guest.** For the Docker engine, shares are fixed when its VM is created.
+- **Check the verification notes.** Each linked guide says what has been run on real hardware and what has only unit tests.
 
 ---
 
