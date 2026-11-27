@@ -416,10 +416,24 @@ pub fn resolve_process(image: &ImageProcess, o: &ProcessOverrides) -> Result<Pro
 }
 
 /// The exit code from a console log, if the main process has exited.
+///
+/// The marker may follow output the process did not end with a newline (`printf hi`), so it is looked for anywhere in
+/// a line, as long as only the code follows it.
 pub fn exit_code_from_log(log: &str) -> Option<i32> {
     log.lines()
         .rev()
-        .find_map(|l| l.trim().strip_prefix(EXIT_MARKER)?.trim().parse().ok())
+        .find_map(|l| split_exit_marker(l).map(|(_, code)| code))
+}
+
+/// A console line that ends in the exit marker, as what precedes the marker and the exit code.
+pub fn split_exit_marker(line: &str) -> Option<(&str, i32)> {
+    let at = line.rfind(EXIT_MARKER)?;
+    let code = line[at + EXIT_MARKER.len()..]
+        .strip_prefix(' ')?
+        .trim()
+        .parse()
+        .ok()?;
+    Some((&line[..at], code))
 }
 
 /// Why init gave up before the process ran, if it did.
@@ -714,6 +728,10 @@ mod tests {
             Some(0)
         );
         assert_eq!(exit_code_from_log("still running"), None);
+        // Output without a final newline shares its line with the marker.
+        assert_eq!(exit_code_from_log("hiFLUXVM-EXIT 3\r\n"), Some(3));
+        assert_eq!(split_exit_marker("hiFLUXVM-EXIT 3"), Some(("hi", 3)));
+        assert_eq!(exit_code_from_log("FLUXVM-EXIT 3 was printed"), None);
         assert_eq!(
             unpack_result_from_log("x\nFLUXVM-UNPACK-OK\n"),
             Some(Ok(()))

@@ -45,7 +45,16 @@ pub(super) async fn containers_restart(
     Query(_q): Query<StopQuery>,
 ) -> DockerResult<StatusCode> {
     let vm = resolve_container(&st.manager, &id).await?;
-    st.manager.restart(vm.id).await.map_err(|e| {
+    let _guard = st.containers.lock(vm.id).await;
+    let restarted = async {
+        let vm = st.manager.get(vm.id).await?;
+        if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            st.manager.stop(vm.id).await?;
+        }
+        let vm = st.manager.get(vm.id).await?;
+        lifecycle::start_locked(&st, &vm).await
+    };
+    restarted.await.map_err(|e| {
         DockerError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
@@ -93,7 +102,9 @@ pub(super) async fn containers_kill(
 ) -> DockerResult<StatusCode> {
     let sig = parse_signal(q.signal.as_deref())?;
     let vm = resolve_container(&st.manager, &id).await?;
-    if !matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+    let _guard = st.containers.lock(vm.id).await;
+    let vm = st.manager.get(vm.id).await?;
+    if !lifecycle::is_up(process_state(&vm).await) {
         return Err(not_running(&vm));
     }
     match sig {
@@ -220,7 +231,8 @@ pub(super) async fn containers_top(
 
 #[derive(Deserialize)]
 pub(super) struct StatsQuery {
-    stream: Option<bool>,
+    /// Absent means streaming; the CLI sends `0` or `1`.
+    stream: Option<String>,
 }
 
 /// One Docker stats sample from the VM's lifetime-average CPU and its memory and disk counters. The CPU figure is a
@@ -274,7 +286,7 @@ pub(super) async fn containers_stats(
         .await
         .map_err(|e| stats_unavailable(&vm, &e))?;
     let sample = stats_json(&vm, &first, Utc::now());
-    if q.stream == Some(false) {
+    if q.stream.is_some() && !docker_flag(q.stream.as_deref()) {
         return Ok(Json(sample).into_response());
     }
     let manager = st.manager.clone();

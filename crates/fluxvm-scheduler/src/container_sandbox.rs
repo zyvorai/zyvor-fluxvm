@@ -601,6 +601,7 @@ impl VmManager {
         decision: Decision,
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
+        launch: bool,
     ) -> Result<VmRecord> {
         crate::oci_sandbox::validate(&req)?;
         let oci = req
@@ -745,48 +746,10 @@ impl VmManager {
             }
         };
 
-        if let Err(e) = start(&spec, manager).await {
+        if launch && let Err(e) = launch_and_wait(&spec, manager).await {
             let _ = std::fs::remove_dir_all(&workspace);
-            return Err(e.context("starting the container"));
+            return Err(e);
         }
-        // Up when the launcher has recorded the container's pid, or it has already exited (a short command).
-        let began = std::time::Instant::now();
-        loop {
-            let st = state_of(&workspace);
-            if st.pid.is_some() || st.exit_code.is_some() {
-                break;
-            }
-            if began.elapsed() > Duration::from_secs(20) {
-                let log = std::fs::read_to_string(&spec.log_path).unwrap_or_default();
-                teardown(&spec, manager).await;
-                let _ = std::fs::remove_dir_all(&workspace);
-                bail!(
-                    "the container did not start within 20s: {}",
-                    log.lines().last().unwrap_or("no output")
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let log = std::fs::read_to_string(&spec.log_path).unwrap_or_default();
-        if state_of(&workspace).pid.is_none()
-            || (state_of(&workspace).exit_code == Some(125)
-                && log.contains("fluxvm-container-run:"))
-        {
-            // The launcher itself failed (userns refused, limit not enforceable...): not the workload.
-            if let Some(line) = log
-                .lines()
-                .rev()
-                .find(|l| l.starts_with("fluxvm-container-run:"))
-            {
-                teardown(&spec, manager).await;
-                let _ = std::fs::remove_dir_all(&workspace);
-                bail!(
-                    "the container could not be set up: {}",
-                    line.trim_start_matches("fluxvm-container-run:").trim()
-                );
-            }
-        }
-
         let expires_at = create
             .ttl_seconds
             .map(|s| chrono::Utc::now() + chrono::Duration::seconds(s as i64));
@@ -807,6 +770,12 @@ impl VmManager {
             crate::oci_sandbox::OCI_IMAGE_LABEL.into(),
             oci.image.clone(),
         );
+        if !launch {
+            record.status = VmStatus::Stopped;
+            record
+                .labels
+                .insert(crate::oci_sandbox::CREATED_LABEL.into(), "true".into());
+        }
         if let Err(e) = self.store.insert(record.clone()).await {
             teardown(&spec, manager).await;
             let _ = std::fs::remove_dir_all(&workspace);
@@ -823,6 +792,89 @@ impl VmManager {
             ],
         );
         Ok(record)
+    }
+
+    /// Start a native container that was created without being started, or that has exited or been stopped. Its
+    /// console log is appended to, so earlier runs stay readable.
+    pub(crate) async fn container_start(
+        &self,
+        mut vm: VmRecord,
+        m: &ContainerMarker,
+    ) -> Result<VmRecord> {
+        if state_of(&m.spec.state_dir).running {
+            if vm.status != VmStatus::Running {
+                vm.status = VmStatus::Running;
+                self.store.update(vm.clone()).await?;
+            }
+            return Ok(vm);
+        }
+        // Clear the previous run: a failed or still loaded unit would refuse the same name, and its pid and exit
+        // files would be read as this run's.
+        teardown(&m.spec, m.manager).await;
+        for f in ["pid", "exit"] {
+            match std::fs::remove_file(m.spec.state_dir.join(f)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing the old {f} file")),
+            }
+        }
+        if let Err(e) = launch_and_wait(&m.spec, m.manager).await {
+            vm.status = VmStatus::Failed;
+            vm.error = Some(format!("{e:#}"));
+            self.store.update(vm).await?;
+            return Err(e);
+        }
+        vm.status = VmStatus::Running;
+        vm.error = None;
+        vm.labels.remove(crate::oci_sandbox::CREATED_LABEL);
+        self.store.update(vm.clone()).await?;
+        crate::audit_event("vm.start", &[("vm_id", &vm.id.to_string())]);
+        Ok(vm)
+    }
+
+    /// Stop a native container: its processes get SIGTERM and, after the launcher's grace period, SIGKILL; with
+    /// `force`, SIGKILL at once. Returns an error rather than reporting `Stopped` while the process is still there.
+    pub(crate) async fn container_stop(
+        &self,
+        mut vm: VmRecord,
+        m: &ContainerMarker,
+        force: bool,
+    ) -> Result<VmRecord> {
+        let dir = &m.spec.state_dir;
+        let before = state_of(dir);
+        let init = before
+            .pid
+            .filter(|pid| before.running && in_container_cgroup(*pid, &m.spec.name));
+        if force && let Some(pid) = init {
+            // PID 1 of the container's namespace: its death takes every other process in it along.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            wait_gone(pid, Duration::from_secs(5)).await;
+        }
+        teardown(&m.spec, m.manager).await;
+        if let Some(pid) = init
+            && !wait_gone(pid, Duration::from_secs(5)).await
+        {
+            bail!(
+                "container {} is still running (pid {pid}) after stopping unit {}",
+                vm.name,
+                m.spec.unit_name()
+            );
+        }
+        // The launcher records the exit code; if it was killed before it could, say the host killed the container.
+        let never_started = vm.labels.contains_key(crate::oci_sandbox::CREATED_LABEL);
+        if !never_started && state_of(dir).exit_code.is_none() {
+            std::fs::write(
+                dir.join("exit"),
+                crate::oci_sandbox::KILLED_EXIT_CODE.to_string(),
+            )
+            .context("recording the exit code")?;
+        }
+        vm.status = VmStatus::Stopped;
+        vm.pid = None;
+        vm.error = None;
+        self.store.update(vm.clone()).await?;
+        crate::audit_event("vm.stop", &[("vm_id", &vm.id.to_string())]);
+        Ok(vm)
     }
 
     pub(crate) async fn container_exec(
@@ -1085,6 +1137,79 @@ async fn start(spec: &ContainerSpec, manager: Manager) -> Result<()> {
     }
 }
 
+/// Whether host process `pid` is in the cgroup of the container named `name`, so a signal never reaches a process
+/// that merely reuses an old pid.
+fn in_container_cgroup(pid: i32, name: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|c| c.contains(name))
+}
+
+/// Wait until `pid` has exited (a zombie counts: it runs nothing).
+async fn wait_gone(pid: i32, limit: Duration) -> bool {
+    let began = std::time::Instant::now();
+    loop {
+        let gone = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z')),
+            Err(_) => true,
+        };
+        if gone || began.elapsed() >= limit {
+            return gone;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Start the container and wait until the launcher has recorded its pid, or it has already exited (a short command).
+/// A failure of the launcher itself (not of the workload) is an error, and the unit is torn down.
+async fn launch_and_wait(spec: &ContainerSpec, manager: Manager) -> Result<()> {
+    // The console is appended to across runs: only what this run writes explains this run's failure.
+    let before = std::fs::metadata(&spec.log_path).map_or(0, |m| m.len());
+    let new_output = || {
+        let all = std::fs::read(&spec.log_path).unwrap_or_default();
+        let from = usize::try_from(before).unwrap_or(usize::MAX).min(all.len());
+        String::from_utf8_lossy(&all[from..]).into_owned()
+    };
+    start(spec, manager)
+        .await
+        .context("starting the container")?;
+    let began = std::time::Instant::now();
+    loop {
+        let st = state_of(&spec.state_dir);
+        if st.pid.is_some() || st.exit_code.is_some() {
+            break;
+        }
+        if began.elapsed() > Duration::from_secs(20) {
+            let log = new_output();
+            teardown(spec, manager).await;
+            bail!(
+                "the container did not start within 20s: {}",
+                log.lines().last().unwrap_or("no output")
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let log = new_output();
+    if state_of(&spec.state_dir).pid.is_none()
+        || (state_of(&spec.state_dir).exit_code == Some(125)
+            && log.contains("fluxvm-container-run:"))
+    {
+        // The launcher itself failed (userns refused, limit not enforceable...): not the workload.
+        if let Some(line) = log
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("fluxvm-container-run:"))
+        {
+            teardown(spec, manager).await;
+            bail!(
+                "the container could not be set up: {}",
+                line.trim_start_matches("fluxvm-container-run:").trim()
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn teardown(spec: &ContainerSpec, manager: Manager) {
     match manager {
         Manager::SystemdSystem | Manager::SystemdUser => {
@@ -1114,6 +1239,8 @@ async fn teardown(spec: &ContainerSpec, manager: Manager) {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 unsafe { libc::kill(pid, libc::SIGKILL) };
+                // A later teardown must not signal whatever reuses this pid.
+                let _ = std::fs::remove_file(spec.state_dir.join("helper.pid"));
             }
             if let Some(cg) = &spec.cgroup_dir {
                 // Kill whatever is left in the cgroup, then remove it.
@@ -1344,6 +1471,101 @@ mod tests {
         std::fs::write(d.path().join("exit"), "3").unwrap();
         let s = state_of(d.path());
         assert!(!s.running && s.exit_code == Some(3));
+    }
+
+    /// `stop` and `kill` used to only change the record, because a native container has no `pid` on it. A shell script
+    /// stands in for the launcher (no namespaces), started without a service manager.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stop_ends_the_process_and_start_runs_it_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let m = VmManager::new(Config {
+            state_dir: d.path().join("state"),
+            run_dir: d.path().join("run"),
+            ..Default::default()
+        })
+        .unwrap();
+        let workspace = d.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let launcher = d.path().join("launcher");
+        std::fs::write(
+            &launcher,
+            "#!/bin/sh\necho $$ > \"$(dirname \"$3\")/pid\"\nexec sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = ContainerSpec {
+            name: "fx-test".into(),
+            state_dir: workspace.clone(),
+            log_path: workspace.join("console.log"),
+            launcher,
+            ..Default::default()
+        };
+        let marker = ContainerMarker {
+            spec,
+            decision: Decision {
+                runtime: Runtime::Container,
+                reason: "test".into(),
+                isolation: "none".into(),
+                warning: None,
+            },
+            manager: Manager::Direct,
+            rootless: true,
+            image: "alpine".into(),
+            manifest_digest: "sha256:0".into(),
+        };
+        std::fs::write(
+            workspace.join(MARKER_FILE),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        let create = crate::procbox_sandbox::minimal_request(
+            Some("held".into()),
+            &crate::procbox_sandbox::ProcboxSpec {
+                net_ports: vec![],
+                max_memory_mib: 64,
+                max_processes: 0,
+                timeout_seconds: 0,
+                cpu_seconds: None,
+                uid: None,
+            },
+        );
+        let mut record =
+            crate::procbox_sandbox::make_record(Uuid::new_v4(), &workspace, create, None);
+        record.status = VmStatus::Stopped;
+        record
+            .labels
+            .insert(crate::oci_sandbox::CREATED_LABEL.into(), "true".into());
+        let id = record.id;
+        m.store.insert(record).await.unwrap();
+
+        for round in ["first start", "start again"] {
+            let vm = m.start(id).await.expect(round);
+            assert_eq!(vm.status, VmStatus::Running, "{round}");
+            assert!(
+                !vm.labels.contains_key(crate::oci_sandbox::CREATED_LABEL),
+                "{round}"
+            );
+            let st = state_of(&workspace);
+            assert!(st.running, "{round}: {st:?}");
+            let pid = st.pid.unwrap();
+            let vm = if round == "first start" {
+                m.stop(id).await.unwrap()
+            } else {
+                m.kill(id).await.unwrap()
+            };
+            assert_eq!(vm.status, VmStatus::Stopped, "{round}");
+            assert!(
+                wait_gone(pid, Duration::from_secs(5)).await,
+                "{round}: process {pid} is still running"
+            );
+            assert_eq!(
+                state_of(&workspace).exit_code,
+                Some(crate::oci_sandbox::KILLED_EXIT_CODE),
+                "{round}"
+            );
+        }
     }
 
     #[test]
