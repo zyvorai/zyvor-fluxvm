@@ -1180,9 +1180,12 @@ pub fn with_guest_reporting(mut ci: CloudInitSpec) -> CloudInitSpec {
         content: "[Unit]\nDescription=Report IP address to the FluxVM host\n[Service]\nExecStart=/usr/local/sbin/fluxvm-report-ip\nRestart=always\n[Install]\nWantedBy=multi-user.target\n".into(),
         permissions: Some("0644".into()),
     });
+    // `PerSourcePenalties` needs OpenSSH 9.8. An older sshd (Ubuntu 24.04, Debian 12) rejects the whole
+    // configuration and does not start, so drop that one line where sshd names it, then restart: a reload
+    // does nothing for a service that failed to start.
     ci.runcmd.insert(
         0,
-        "systemctl reload ssh || systemctl reload sshd || true".into(),
+        "if /usr/sbin/sshd -t 2>&1 | grep -q PerSourcePenalties; then sed -i '/^PerSourcePenalties/d' /etc/ssh/sshd_config.d/10-fluxvm.conf; fi; systemctl restart ssh || systemctl restart sshd || true".into(),
     );
     ci.runcmd.insert(
         1,
@@ -2059,6 +2062,20 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("systemctl enable --now fluxvm-report-ip.service"))
         );
+    }
+
+    /// An sshd older than 9.8 rejects `PerSourcePenalties` and does not start: the first command must
+    /// drop that line and restart, before anything waits for SSH.
+    #[test]
+    fn guest_reporting_repairs_ssh_on_older_openssh() {
+        let ci = with_guest_reporting(CloudInitSpec::default());
+        let first = &ci.runcmd[0];
+        assert!(
+            first.contains("sshd -t 2>&1 | grep -q PerSourcePenalties"),
+            "{first}"
+        );
+        assert!(first.contains("sed -i '/^PerSourcePenalties/d'"), "{first}");
+        assert!(first.contains("systemctl restart ssh"), "{first}");
     }
 
     #[test]
