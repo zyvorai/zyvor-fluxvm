@@ -47,6 +47,8 @@ Every path also works with a version prefix (`/v1.44/containers/json`; the engin
 | `GET /volumes`, `GET /volumes/{name}` | `docker volume ls`, `inspect` | always empty: there are no named volumes (a container's disk lives and dies with it). Create answers 501 |
 | `POST /build` | `docker build` | macOS image builds via the Mac builder (details below); Linux Dockerfile builds require the managed engine |
 
+The built-in socket does not implement `POST /images/load` (`docker load`); that call answers 501. To get an image from OrbStack or Docker Desktop into FluxVM sandboxes, push it to a registry and `fluxctl oci pull` ([IMPORT-IMAGES.md](IMPORT-IMAGES.md)). `docker load` works only against the real engine started by `fluxctl docker up`.
+
 Not run against the real `docker` CLI against a live daemon by the tests: they call the handlers in process with fakes.
 
 ## Use it

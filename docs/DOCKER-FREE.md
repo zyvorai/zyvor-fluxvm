@@ -97,6 +97,12 @@ engine.
 - **`docker cp`:** there are no `/containers/{id}/archive` endpoints; use the guest agent's file transfer through `fluxctl`/REST.
 - **BuildKit:** never served (see image builds).
 
+## Importing an image you already have in OrbStack or Docker Desktop
+
+FluxVM pulls from a registry (`fluxctl oci pull`, `fluxctl sandbox run`, or `docker pull` against the built-in `{run_dir}/docker.sock`). It does not load a `docker save` archive or an OCI layout directory into the native OCI cache, and the built-in socket does not implement `docker load`.
+
+How to export an image from Docker Desktop or OrbStack, push it to a registry FluxVM can reach (or load it into a `fluxctl kube` cluster), and verify the import: [IMPORT-IMAGES.md](IMPORT-IMAGES.md).
+
 ## Compatibility mode
 
 If you still need full `docker build`, Compose, or arbitrary bind mounts today:
