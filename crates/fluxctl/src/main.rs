@@ -189,6 +189,7 @@ mod mcp_install;
 mod netobs;
 mod node_agent;
 mod output;
+mod port_forward;
 mod protect_cmd;
 mod prune_cmd;
 mod recipes;
@@ -198,6 +199,7 @@ mod sandbox_run;
 mod self_test_cmd;
 mod setup_doctor_cmd;
 mod share_cmd;
+mod ssh_cwd;
 mod stable_exe;
 mod stack;
 mod stack_fleet;
@@ -1777,9 +1779,17 @@ enum Command {
         user: Option<String>,
         #[arg(long, short = 'p', default_value_t = 22)]
         port: u16,
+        /// Start in the current folder, at the path it has in the guest. The folder must be inside one of the VM's shared
+        /// folders. Put this before any command; what follows is then the command only, not ssh options.
+        #[arg(long)]
+        cwd: bool,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         ssh_args: Vec<String>,
     },
+    /// Forward 127.0.0.1:HOST on this machine to a port of a running VM, over SSH. The forward runs in the background
+    /// until `--stop`, or until its connection ends (the VM stops, this machine reboots); `--list` shows them. TCP only,
+    /// and the guest side is the guest's own 127.0.0.1. Example: `fluxctl port-forward web 8080:80 5432`.
+    PortForward(port_forward::PortForwardArgs),
     /// Show one VM's record (machinectl `status`/`show`). Same JSON as `get`.
     Show {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -6085,13 +6095,25 @@ async fn run_remote(
                 ),
             }
         }
+        Command::PortForward(a) => {
+            let id = a.vm_id()?;
+            let vm = r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?;
+            port_forward::open(&a, &vm, format)?;
+        }
         Command::Ssh {
             id,
             user,
             port,
-            ssh_args,
+            cwd,
+            mut ssh_args,
         } => {
+            if cwd {
+                ssh_cwd::require_local_server(r.base())?;
+            }
             let vm = r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?;
+            if cwd {
+                ssh_args = ssh_cwd::ssh_args(&vm, &std::env::current_dir()?, &ssh_args)?;
+            }
             let ip = vm["guest_ip"]
                 .as_str()
                 .map(str::to_owned)
@@ -6177,7 +6199,7 @@ async fn run_remote(
             std::process::exit(code);
         }
         _ => anyhow::bail!(
-            "this command is not available with --server; supported: run, docker, ssh, create, vm-template, list, get, \
+            "this command is not available with --server; supported: run, docker, ssh, port-forward, create, vm-template, list, get, \
              status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, branch, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
@@ -6609,6 +6631,12 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         return Ok(());
     }
     let format = cli.output;
+    // The forwards are records on this machine: no daemon (local or remote) is needed to see or stop them.
+    if let Command::PortForward(a) = &cli.command
+        && (a.list || a.stop)
+    {
+        return port_forward::list_or_stop(a, format);
+    }
     if let Command::Mcp {
         command: McpCommand::Serve { allow_write },
     } = &cli.command
@@ -8107,13 +8135,25 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
             .await?;
             std::process::exit(code);
         }
+        Command::PortForward(a) => {
+            let vm = serde_json::to_value(m.get(a.vm_id()?).await?)?;
+            port_forward::open(&a, &vm, format)?;
+        }
         Command::Ssh {
             id,
             user,
             port,
-            ssh_args,
+            cwd,
+            mut ssh_args,
         } => {
             let vm = m.get(id).await?;
+            if cwd {
+                ssh_args = ssh_cwd::ssh_args(
+                    &serde_json::to_value(&vm)?,
+                    &std::env::current_dir()?,
+                    &ssh_args,
+                )?;
+            }
             let ip = vm
                 .guest_ip
                 .clone()
@@ -11343,12 +11383,39 @@ mod machinectl_parity_cli_tests {
     }
 
     #[test]
+    fn port_forward_parses() {
+        let args = |a: &[&str]| match parse(a) {
+            Command::PortForward(p) => p,
+            _ => panic!("expected Command::PortForward"),
+        };
+        let a = args(&["port-forward", "web", "8080:80", "5432", "-l", "dev"]);
+        assert_eq!(a.vm.as_deref(), Some("web"));
+        assert_eq!(a.ports, ["8080:80", "5432"]);
+        assert_eq!(a.user.as_deref(), Some("dev"));
+        assert!(!a.list && !a.stop);
+        assert!(args(&["port-forward", "--list"]).vm.is_none());
+        let a = args(&["port-forward", "--stop", "web", "8080"]);
+        assert!(a.stop);
+        assert_eq!(a.ports, ["8080"]);
+        for bad in [
+            &["port-forward"][..],
+            &["port-forward", "--stop"],
+            &["port-forward", "--list", "--stop", "web"],
+            &["port-forward", "--list", "web", "80"],
+        ] {
+            let argv = std::iter::once("fluxctl").chain(bad.iter().copied());
+            assert!(Cli::try_parse_from(argv).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn ssh_poweroff_reboot_kill_show_bind_parse() {
         let id = Uuid::nil();
         let Command::Ssh {
             id: parsed,
             user,
             port,
+            cwd,
             ssh_args,
         } = parse(&[
             "ssh",
@@ -11366,6 +11433,22 @@ mod machinectl_parity_cli_tests {
         assert_eq!(user.as_deref(), Some("ubuntu"));
         assert_eq!(port, 2222);
         assert_eq!(ssh_args, vec!["uptime".to_string()]);
+        assert!(!cwd);
+
+        // `--cwd` is ours before the command, and the command's afterwards.
+        let Command::Ssh { cwd, ssh_args, .. } =
+            parse(&["ssh", &id.to_string(), "--cwd", "ls", "-la"])
+        else {
+            panic!("expected Command::Ssh");
+        };
+        assert!(cwd);
+        assert_eq!(ssh_args, ["ls", "-la"]);
+        let Command::Ssh { cwd, ssh_args, .. } = parse(&["ssh", &id.to_string(), "ls", "--cwd"])
+        else {
+            panic!("expected Command::Ssh");
+        };
+        assert!(!cwd);
+        assert_eq!(ssh_args, ["ls", "--cwd"]);
 
         // No -l: the user is decided later, from the VM's own cloud-init.
         assert!(matches!(
