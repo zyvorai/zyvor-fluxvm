@@ -57,3 +57,4 @@ docker compose up
 This runs a real dockerd inside one FluxVM VM. Prefer the native path for new work.
 
 See [oci-sandboxes.md](oci-sandboxes.md) for the full native contract and [docker-engine.md](docker-engine.md) for the compatibility engine.
+For a minimal Docker Engine API endpoint over native sandboxes (no dockerd, opt-in with `FLUXVM_DOCKER_API`), see [DOCKER-API.md](DOCKER-API.md).

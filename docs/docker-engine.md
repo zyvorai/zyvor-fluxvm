@@ -49,6 +49,8 @@ Every path also works with a version prefix (`/v1.44/containers/json`; the engin
 
 Not run against the real `docker` CLI against a live daemon by the tests: they call the handlers in process with fakes.
 
+For a minimal, opt-in endpoint (list, create, start, stop, logs) on a socket or loopback port you choose, including on Linux where `docker.sock` is off, see [DOCKER-API.md](DOCKER-API.md) (`FLUXVM_DOCKER_API`).
+
 ## Use it
 
 ```bash
