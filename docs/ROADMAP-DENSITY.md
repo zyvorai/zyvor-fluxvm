@@ -190,8 +190,22 @@ latency or throughput number has been measured, and none is claimed.
 
 ### Still to do
 
+
 - userfaultfd demand paging and dirty-log incremental snapshots are now
   implemented (sections above) but have only been unit-tested; both need a run
   on a real KVM host (`cargo test -p fluxvm-hypervisor --lib real_kvm --
   --ignored`, then `bench-fork.sh` with `FLUXVM_KVM_UFFD=1`).
 - A warm pool backfilled by fork is still a design.
+
+The three TODO sections above are unchanged and still unimplemented (except the
+userfaultfd entry point, which is now started):
+userfaultfd demand paging (handler), dirty-log incremental snapshots, and a warm pool
+backfilled by fork. They remain designs. `MAP_PRIVATE` is the only lazy restore
+that exists, and the dirty-log design is the riskiest because host-side device
+writes through `host_ptr()` are not tracked by KVM.
+
+## Dirty-log capture skeleton
+
+`crates/fluxvm-hypervisor/src/dirty_log_capture.rs` defines DirtyPage and DirtyLog. Full KVM_GET_DIRTY_LOG wiring is still TODO.
+
+
