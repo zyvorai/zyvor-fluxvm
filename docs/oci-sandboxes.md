@@ -270,6 +270,8 @@ fluxctl oci prune                 # POST   /v1/oci/prune   (admin): images no VM
 
 Sandboxes are labelled `fluxvm.oci=<manifest digest>` and `fluxvm.oci.image=<reference>`; `prune` keeps any image a VM still uses.
 
+To bring in an image that already lives in OrbStack or Docker Desktop (there is no `docker load` or `fluxctl oci import` into this cache), see [IMPORT-IMAGES.md](IMPORT-IMAGES.md).
+
 ## Configuration
 
 ```toml

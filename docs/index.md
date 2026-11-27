@@ -120,6 +120,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Native macOS backend (`vz`), Mac sandboxes and agent density | [docs/macos.md](macos.md) · [docs/macos-sandboxes.md](macos-sandboxes.md) · [docs/agent-density.md](agent-density.md) |
 | Guest-network observability (flows, DNS, capture) and FluxDisk overlays (`fluxvm-blockd`) | [docs/netobs.md](netobs.md) · [docs/flux-disk.md](flux-disk.md) |
 | Container (OCI) sandboxes on a Mac, one VM per container | [docs/oci-sandboxes.md](oci-sandboxes.md) |
+| Import a container image from OrbStack or Docker Desktop into FluxVM | [docs/IMPORT-IMAGES.md](IMPORT-IMAGES.md) |
 | Linux: run an image as FluxVM's own container or as a microVM, `--runtime auto\|container\|vm` | [docs/linux-runtime.md](linux-runtime.md) |
 | A real Docker engine on a Mac (`docker build`, Compose, bind mounts) | [docs/docker-engine.md](docker-engine.md) |
 | A Kubernetes (k3s) cluster on a Mac | [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
