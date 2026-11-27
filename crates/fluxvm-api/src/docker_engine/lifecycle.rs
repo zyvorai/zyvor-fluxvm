@@ -208,6 +208,9 @@ async fn remove_locked(st: &DockerState, id: Uuid) -> anyhow::Result<()> {
 pub(super) struct DeleteQuery {
     #[serde(default, deserialize_with = "docker_bool")]
     force: bool,
+    /// `docker rm -l`: remove a link between containers, not the container.
+    #[serde(default, deserialize_with = "docker_bool")]
+    link: bool,
 }
 
 pub(super) async fn containers_delete(
@@ -215,6 +218,13 @@ pub(super) async fn containers_delete(
     Path(id): Path<String>,
     Query(q): Query<DeleteQuery>,
 ) -> DockerResult<StatusCode> {
+    // Ignoring it would delete the container the link points from.
+    if q.link {
+        return Err(DockerError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "the built-in engine has no container links; nothing was removed",
+        ));
+    }
     let vm = resolve_container(&st.manager, &id).await?;
     let _guard = st.containers.lock(vm.id).await;
     // `--rm` may have removed it while this request waited for the lock.

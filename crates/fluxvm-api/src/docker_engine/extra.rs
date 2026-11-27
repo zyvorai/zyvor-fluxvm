@@ -10,7 +10,7 @@ use fluxvm_core::model::{VmMetrics, VmPatch};
 use fluxvm_scheduler::events::{self, EventFilter, EventLog, VmEvent};
 
 /// The one sentence every "not supported here" answer ends with.
-const FULL_ENGINE: &str = "For a full Docker engine (build, Compose, user-defined networks, volumes, every signal) run `fluxctl docker up`, then `eval \"$(fluxctl docker env)\"`.";
+pub(super) const FULL_ENGINE: &str = "For a full Docker engine (build, Compose, user-defined networks, volumes, every signal) run `fluxctl docker up`, then `eval \"$(fluxctl docker env)\"`.";
 
 /// The only network the built-in engine has: every container is a microVM behind user-mode NAT.
 const NAT_NAME: &str = "fluxvm-nat";
@@ -406,43 +406,21 @@ pub(super) struct EventsQuery {
     until: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum FilterValues {
-    List(Vec<String>),
-    Set(BTreeMap<String, bool>),
-}
-
 #[derive(Default)]
 struct DockerEventFilters(BTreeMap<String, Vec<String>>);
 
 impl DockerEventFilters {
     fn parse(raw: Option<&str>) -> DockerResult<Self> {
-        let Some(raw) = raw.filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let groups: BTreeMap<String, FilterValues> = serde_json::from_str(raw)
-            .map_err(|e| DockerError::bad(format!("invalid Docker event filters: {e}")))?;
-        let mut filters = BTreeMap::new();
-        for (key, values) in groups {
-            if !matches!(key.as_str(), "type" | "scope" | "event" | "container") {
-                return Err(DockerError::bad(format!(
-                    "unsupported event filter {key:?}; supported filters are type, scope, event and container"
-                )));
-            }
-            let values = match values {
-                FilterValues::List(v) => v,
-                FilterValues::Set(v) => v
-                    .into_iter()
-                    .filter(|(_, enabled)| *enabled)
-                    .map(|(k, _)| k)
-                    .collect(),
-            };
-            if !values.is_empty() {
-                filters.insert(key, values);
-            }
-        }
-        Ok(Self(filters))
+        let filters = filters::Filters::parse(
+            raw,
+            "event",
+            &["container", "event", "scope", "type"],
+            &[
+                "config", "daemon", "image", "label", "network", "node", "plugin", "secret",
+                "service", "volume",
+            ],
+        )?;
+        Ok(Self(filters.0))
     }
 
     fn matches(&self, event: &Value) -> bool {
@@ -561,8 +539,20 @@ async fn nat_network(m: &VmManager) -> Value {
     })
 }
 
-pub(super) async fn networks_list(State(st): State<DockerState>) -> Json<Value> {
-    Json(Value::Array(vec![nat_network(&st.manager).await]))
+#[derive(Deserialize)]
+pub(super) struct FilterQuery {
+    filters: Option<String>,
+}
+
+pub(super) async fn networks_list(
+    State(st): State<DockerState>,
+    Query(q): Query<FilterQuery>,
+) -> DockerResult<Json<Value>> {
+    let all = vec![nat_network(&st.manager).await];
+    Ok(Json(Value::Array(filters::filter_networks(
+        all,
+        q.filters.as_deref(),
+    )?)))
 }
 
 pub(super) async fn networks_inspect(
@@ -584,8 +574,9 @@ pub(super) async fn networks_create() -> DockerError {
     ))
 }
 
-pub(super) async fn volumes_list() -> Json<Value> {
-    Json(json!({ "Volumes": [], "Warnings": null }))
+pub(super) async fn volumes_list(Query(q): Query<FilterQuery>) -> DockerResult<Json<Value>> {
+    filters::check_volume_filters(q.filters.as_deref())?;
+    Ok(Json(json!({ "Volumes": [], "Warnings": null })))
 }
 
 pub(super) async fn volume_missing(Path(name): Path<String>) -> DockerError {

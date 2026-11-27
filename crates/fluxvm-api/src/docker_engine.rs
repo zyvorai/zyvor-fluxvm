@@ -6,6 +6,7 @@
 //! Maps containers to OCI sandboxes (a microVM each, or a native Linux container) and images to the FluxVM OCI cache.
 //! Supported CLI: `docker pull|images|run|ps|rm|logs|exec|stop`.
 //! Also: `restart|kill|pause|unpause|top|stats|rename|events|network ls|volume ls`.
+//! List `filters` are honoured or refused (`filters`), never ignored.
 //! `docker build` is forwarded to the FluxVM Mac builder (`docker_build`). Not supported (a Docker-shaped error says what to do): Compose, bind mounts, user-defined networks, named volumes.
 
 use axum::{
@@ -373,6 +374,10 @@ struct ListQuery {
     #[serde(default)]
     all: Option<String>,
     limit: Option<i64>,
+    filters: Option<String>,
+    /// API versions before 1.24 narrowed the list with these; they are filters now.
+    before: Option<String>,
+    since: Option<String>,
 }
 
 async fn containers_list(
@@ -384,19 +389,29 @@ async fn containers_list(
         Some("true" | "1") => true,
         _ => return Err(DockerError::bad("all must be true, false, 1 or 0")),
     };
+    if q.before.is_some() || q.since.is_some() {
+        return Err(DockerError::bad(
+            "the `before` and `since` parameters are not supported; use --filter before=ID or since=ID",
+        ));
+    }
+    let filter = filters::ContainerFilter::parse(&st.manager, q.filters.as_deref()).await?;
     let mut vms = containers_with_state(&st.manager).await;
     let limit = q.limit.filter(|n| *n > 0);
-    if !all && limit.is_none() {
+    if !all && limit.is_none() && !filter.includes_stopped() {
         vms.retain(|(_, state)| lifecycle::is_up(*state));
     }
     vms.sort_unstable_by_key(|(vm, _)| std::cmp::Reverse((vm.created_at, vm.id)));
-    if let Some(n) = limit {
-        vms.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+    let limit = limit.map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let mut items = Vec::new();
+    for (vm, state) in &vms {
+        if items.len() == limit {
+            break;
+        }
+        let labels = filters::labels_of(vm).await?;
+        if filter.matches(vm, *state, &labels) {
+            items.push(container_summary(vm, *state, &labels));
+        }
     }
-    let items = vms
-        .iter()
-        .map(|(vm, state)| container_summary(vm, *state))
-        .collect();
     Ok(Json(Value::Array(items)))
 }
 
@@ -558,7 +573,8 @@ fn map_create_request(
         hosts: Vec::new(),
         policy_override: false,
     };
-    let _ = body.labels; // OCI create path sets its own labels; user labels via PATCH later
+    // The record's own labels are set by the OCI create path; `containers_create` keeps the Docker ones beside it.
+    let _ = body.labels;
     let mut req: SandboxCreateRequest = serde_json::from_value(json!({}))
         .map_err(|e| DockerError::bad(format!("internal sandbox request defaults: {e}")))?;
     req.name = name;
@@ -625,6 +641,7 @@ async fn containers_create(
             Some("true".to_string()),
         );
     }
+    let docker_labels = body.labels.clone();
     let mut req = map_create_request(body, name)?;
     if let Some(oci) = req.oci.as_mut() {
         // A Docker container ends when its process does.
@@ -635,12 +652,16 @@ async fn containers_create(
         .manager
         .create_sandbox_unstarted(req, None, Some("docker-api"))
         .await?;
-    if !labels.is_empty()
-        && let Err(e) = st
-            .manager
-            .patch(vm.id, VmPatch { name: None, labels })
-            .await
-    {
+    let labelled = async {
+        filters::store_labels(&vm, &docker_labels).await?;
+        if !labels.is_empty() {
+            st.manager
+                .patch(vm.id, VmPatch { name: None, labels })
+                .await?;
+        }
+        anyhow::Ok(())
+    };
+    if let Err(e) = labelled.await {
         let _ = st.manager.delete(vm.id).await;
         return Err(e.into());
     }
@@ -659,7 +680,8 @@ async fn containers_inspect(
 ) -> DockerResult<Json<Value>> {
     let vm = resolve_container(&st.manager, &id).await?;
     let state = process_state(&vm).await;
-    Ok(Json(container_inspect(&vm, state)))
+    let labels = filters::labels_of(&vm).await?;
+    Ok(Json(container_inspect(&vm, state, &labels)))
 }
 
 #[derive(Deserialize)]
@@ -752,7 +774,22 @@ async fn exec_inspect(
     })))
 }
 
-async fn images_list(State(st): State<DockerState>) -> DockerResult<Json<Value>> {
+#[derive(Deserialize)]
+struct ImageListQuery {
+    filters: Option<String>,
+    /// The reference filter of API versions before 1.41.
+    filter: Option<String>,
+}
+
+async fn images_list(
+    State(st): State<DockerState>,
+    Query(q): Query<ImageListQuery>,
+) -> DockerResult<Json<Value>> {
+    if q.filter.is_some() {
+        return Err(DockerError::bad(
+            "the `filter` parameter is not supported; use --filter reference=NAME",
+        ));
+    }
     let entries = st.manager.oci_list()?;
     let mut items: Vec<Value> = entries.iter().map(image_summary).collect();
     // Images built through this socket (macOS images in FluxVM's store), so `docker images` shows what `docker build` made.
@@ -763,7 +800,10 @@ async fn images_list(State(st): State<DockerState>) -> DockerResult<Json<Value>>
             "Labels": {"fluxvm.image": "macos"}, "Containers": -1
         }));
     }
-    Ok(Json(Value::Array(items)))
+    Ok(Json(Value::Array(filters::filter_images(
+        items,
+        q.filters.as_deref(),
+    )?)))
 }
 
 #[derive(Deserialize)]
@@ -809,16 +849,64 @@ async fn images_create(
         .unwrap())
 }
 
+#[derive(Deserialize)]
+struct ImageDeleteQuery {
+    #[serde(default, deserialize_with = "docker_bool")]
+    force: bool,
+    platforms: Option<String>,
+}
+
 async fn images_delete(
     State(st): State<DockerState>,
     Path(name): Path<String>,
+    Query(q): Query<ImageDeleteQuery>,
 ) -> DockerResult<Json<Value>> {
+    if q.platforms.is_some() {
+        return Err(DockerError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "the built-in engine cannot remove single platforms of an image; remove it without --platform",
+        ));
+    }
     let name = urlencoding_decode(&name);
+    if !q.force {
+        check_unforced_removal(&st.manager, &name).await?;
+    }
     let removed = st.manager.oci_remove(&name)?;
     Ok(Json(json!([
         { "Untagged": removed.references.first().cloned().unwrap_or_default() },
         { "Deleted": removed.manifest_digest }
     ])))
+}
+
+/// Without `-f`, refuse what Docker refuses, and what here would remove more than was named: a removal drops the whole
+/// image with every name it has.
+async fn check_unforced_removal(m: &VmManager, name: &str) -> DockerResult<()> {
+    let image = fluxvm_scheduler::oci_images::find(&m.cfg, name)?;
+    let conflict = |why: String| {
+        Err(DockerError::new(
+            StatusCode::CONFLICT,
+            format!("conflict: unable to delete {name} (must be forced) - {why}"),
+        ))
+    };
+    let by_reference = image.references.iter().any(|r| r == name);
+    let others: Vec<&str> = image
+        .references
+        .iter()
+        .map(String::as_str)
+        .filter(|r| *r != name)
+        .collect();
+    if others.len() > usize::from(!by_reference) {
+        return conflict(format!(
+            "the image also has the names {}, which would be removed with it",
+            others.join(", ")
+        ));
+    }
+    if let Some(vm) = oci_containers(m).await.into_iter().find(|v| {
+        v.labels.get(fluxvm_scheduler::oci_images::OCI_LABEL) == Some(&image.manifest_digest)
+    }) {
+        return conflict(format!("container {} is using this image", vm.name));
+    }
+    Ok(())
 }
 
 fn urlencoding_decode(s: &str) -> String {
@@ -890,7 +978,11 @@ fn state_words(state: ProcessState) -> (&'static str, String) {
     }
 }
 
-fn container_summary(vm: &VmRecord, process: ProcessState) -> Value {
+fn container_summary(
+    vm: &VmRecord,
+    process: ProcessState,
+    labels: &BTreeMap<String, String>,
+) -> Value {
     let image = vm
         .labels
         .get(OCI_IMAGE_LABEL)
@@ -906,7 +998,7 @@ fn container_summary(vm: &VmRecord, process: ProcessState) -> Value {
         "Command": "",
         "Created": vm.created_at.timestamp(),
         "Ports": ports,
-        "Labels": vm.labels,
+        "Labels": labels,
         "State": state,
         "Status": status,
         "HostConfig": { "NetworkMode": "default" },
@@ -915,7 +1007,11 @@ fn container_summary(vm: &VmRecord, process: ProcessState) -> Value {
     })
 }
 
-fn container_inspect(vm: &VmRecord, process: ProcessState) -> Value {
+fn container_inspect(
+    vm: &VmRecord,
+    process: ProcessState,
+    labels: &BTreeMap<String, String>,
+) -> Value {
     let image = vm
         .labels
         .get(OCI_IMAGE_LABEL)
@@ -985,7 +1081,7 @@ fn container_inspect(vm: &VmRecord, process: ProcessState) -> Value {
             "Volumes": null,
             "WorkingDir": "",
             "Entrypoint": null,
-            "Labels": vm.labels,
+            "Labels": labels,
         },
         "NetworkSettings": {
             "Bridge": "",
@@ -1189,6 +1285,7 @@ fn exec_user(user: &str) -> DockerResult<ExecRunAs> {
 
 mod build;
 mod extra;
+mod filters;
 mod lifecycle;
 
 /// A container record for tests outside this module (e.g. `docker_adapter`).
