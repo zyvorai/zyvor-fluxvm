@@ -156,6 +156,10 @@ pub fn after_help() -> String {
                 ("console", "Guest login (aliases: login, shell)"),
                 ("serial", "Attach to the serial port (Ctrl-] detaches)"),
                 ("ssh", "SSH into the guest at guest_ip"),
+                (
+                    "port-forward",
+                    "Forward 127.0.0.1:PORT here to a port of a VM (--list, --stop)",
+                ),
                 ("show", "Show one VM's record"),
                 ("poweroff", "Guest power-off via vsock agent"),
                 ("reboot", "Guest reboot via vsock agent"),

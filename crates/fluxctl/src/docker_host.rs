@@ -343,7 +343,11 @@ pub(crate) fn forward_command(
     identity: &Option<PathBuf>,
     forwards: &[String],
 ) -> Result<Command> {
-    let base = run::ssh_base(ip, user, identity);
+    forward_from(run::ssh_base(ip, user, identity), forwards)
+}
+
+/// [`forward_command`] from the `ssh … user@host` command given, whose last argument must be the destination.
+pub(crate) fn forward_from(base: Command, forwards: &[String]) -> Result<Command> {
     let program = base.get_program().to_owned();
     let mut args: Vec<std::ffi::OsString> = base.get_args().map(|a| a.to_owned()).collect();
     let dest = args.pop().context("ssh destination missing")?;
@@ -430,9 +434,11 @@ pub(crate) fn stop_recorded_ssh(pidfile: &Path, needle: &str) {
     let _ = std::fs::remove_file(pidfile);
 }
 
-fn is_our_ssh(pid: i32, needle: &str) -> bool {
+/// Whether `pid` is an `ssh` whose command line contains `needle`. Shared with `fluxctl port-forward`.
+pub(crate) fn is_our_ssh(pid: i32, needle: &str) -> bool {
     Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
+        // `-ww`: never cut the command line (procps does when COLUMNS is set).
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
         .output()
         .map(|o| {
             let c = String::from_utf8_lossy(&o.stdout);

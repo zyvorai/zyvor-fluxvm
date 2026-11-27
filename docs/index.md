@@ -125,6 +125,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Linux: run an image as FluxVM's own container or as a microVM, `--runtime auto\|container\|vm` | [docs/linux-runtime.md](linux-runtime.md) |
 | A real Docker engine on a Mac (`docker build`, Compose, bind mounts) | [docs/docker-engine.md](docker-engine.md) |
 | A minimal Docker Engine API over sandboxes (`FLUXVM_DOCKER_API`: ps, create, start, stop, logs) | [docs/DOCKER-API.md](DOCKER-API.md) |
+| Coming from Lima: the gaps, `fluxctl port-forward` and `fluxctl ssh --cwd` | [docs/lima-parity.md](lima-parity.md) |
 | A Kubernetes (k3s) cluster on a Mac | [docs/kubernetes-on-mac.md](kubernetes-on-mac.md) |
 | Kairon (Kubernetes-native VM orchestration) on the cluster FluxVM made, with checks | [docs/kairon-on-kube.md](kairon-on-kube.md) |
 | Undo a bad `kubectl apply`, bisect cluster history, reset to a clean state, chaos-test, sleep and wake a cluster | [docs/kubernetes-on-mac.md#time-travel-for-your-cluster](kubernetes-on-mac.md#time-travel-for-your-cluster) |
