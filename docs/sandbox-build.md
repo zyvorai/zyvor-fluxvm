@@ -1,6 +1,8 @@
 # `fluxctl sandbox build`
 
-Status: CLI + API scaffold landed. Full builder microVM wiring is the next commit.
+Status: **not available yet.** `crates/fluxctl/src/sandbox_build.rs` is a scaffold (flags plus a TODO) that is not compiled into
+`fluxctl`, so the command below does not exist on `main`. See [DOCKER-FREE.md](DOCKER-FREE.md#1-image-builds) for what works
+today and the workarounds.
 
 ```bash
 fluxctl sandbox build -t myapp:1.0 .
