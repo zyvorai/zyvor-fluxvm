@@ -65,6 +65,9 @@ fluxctl run --keep --name dev                # keep the VM; `fluxctl ssh dev` (a
 fluxctl run --no-warm                        # always cold-boot instead of restoring the warm snapshot
 ```
 
+For a VM that already exists, `fluxctl port-forward dev 8080:80` adds a forward and `fluxctl ssh dev --cwd` starts in the
+current folder when it is shared into the VM ([lima-parity.md](lima-parity.md)).
+
 It uses your first `~/.ssh/id_*.pub` key (or creates `~/.ssh/fluxvm_ed25519`).
 
 **Warm starts.** The first run for a given setup (image, size, ports, volumes, user, key) cold-boots a VM, waits for cloud-init to

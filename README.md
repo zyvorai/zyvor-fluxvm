@@ -267,6 +267,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Live migration contract and receivers | [docs/runtime-boundary.md](docs/runtime-boundary.md) · [docs/operations.md](docs/operations.md) |
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
 | Native macOS: the `vz` backend, sandboxes, container sandboxes, a Mac cloud | [docs/macos.md](docs/macos.md) · [docs/mac-cloud.md](docs/mac-cloud.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
+| Coming from Lima: the gaps, `fluxctl port-forward` and `fluxctl ssh --cwd` | [docs/lima-parity.md](docs/lima-parity.md) |
 | Docker and Kubernetes on a Mac: `fluxctl docker`, `fluxctl kube` | [docs/docker-engine.md](docs/docker-engine.md) · [docs/kubernetes-on-mac.md](docs/kubernetes-on-mac.md) |
 | Import a container image from OrbStack or Docker Desktop | [docs/IMPORT-IMAGES.md](docs/IMPORT-IMAGES.md) |
 | AI-agent sessions: install, quickstart, MCP | [docs/agent-platform/](docs/agent-platform/README.md) · [docs/agent-sessions.md](docs/agent-sessions.md) |

@@ -521,15 +521,26 @@ pub(crate) fn generated_identity() -> Option<PathBuf> {
 }
 
 pub(crate) fn ssh_base(ip: &str, user: &str, key: &Option<PathBuf>) -> std::process::Command {
+    ssh_base_keys(ip, user, key, false)
+}
+
+/// [`ssh_base`], which does not remember or check host keys, unless `check_host_key`: then the user's ssh settings apply.
+pub(crate) fn ssh_base_keys(
+    ip: &str,
+    user: &str,
+    key: &Option<PathBuf>,
+    check_host_key: bool,
+) -> std::process::Command {
     let mut c = std::process::Command::new("ssh");
-    c.args([
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "LogLevel=ERROR",
-    ]);
+    if !check_host_key {
+        c.args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+        ]);
+    }
+    c.args(["-o", "LogLevel=ERROR"]);
     if let Some(k) = key {
         c.arg("-i").arg(k);
     }
