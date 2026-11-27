@@ -34,6 +34,7 @@ use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+pub mod docker_adapter;
 pub mod docker_build;
 pub mod docker_context;
 pub mod docker_engine;

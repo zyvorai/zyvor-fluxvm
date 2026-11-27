@@ -589,14 +589,14 @@ pub(super) async fn volumes_create() -> DockerError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use axum::http::Request;
     use fluxvm_core::config::Config;
     use fluxvm_core::model::{BackendKind, CreateVmRequest, NetworkSpec};
     use tower::ServiceExt;
 
-    fn fixture(name: &str, status: VmStatus, oci: bool) -> VmRecord {
+    pub(crate) fn fixture(name: &str, status: VmStatus, oci: bool) -> VmRecord {
         let id = Uuid::new_v4();
         VmRecord {
             id,

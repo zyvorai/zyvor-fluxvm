@@ -58,7 +58,7 @@ struct ExecSession {
 }
 
 #[derive(Debug)]
-struct DockerError {
+pub(crate) struct DockerError {
     status: StatusCode,
     message: String,
 }
@@ -76,6 +76,10 @@ impl DockerError {
     fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, message)
     }
+    /// HTTP status and message (for adapters that re-map shim errors).
+    pub(crate) fn into_parts(self) -> (StatusCode, String) {
+        (self.status, self.message)
+    }
 }
 
 impl From<anyhow::Error> for DockerError {
@@ -90,7 +94,7 @@ impl IntoResponse for DockerError {
     }
 }
 
-type DockerResult<T> = Result<T, DockerError>;
+pub(crate) type DockerResult<T> = Result<T, DockerError>;
 
 /// Axum router for the Docker Engine API subset (no FluxVM bearer auth).
 pub fn router(manager: Arc<VmManager>) -> Router {
@@ -517,6 +521,17 @@ fn map_create_request(
     Ok(req)
 }
 
+/// Map a Docker `ContainerConfig` JSON body to a sandbox request, exactly as `POST /containers/create` here does
+/// (shared with [`crate::docker_adapter`] so both Docker surfaces agree).
+pub(crate) fn sandbox_request_from_json(
+    body: Value,
+    name: Option<String>,
+) -> DockerResult<SandboxCreateRequest> {
+    let body: ContainerCreateBody = serde_json::from_value(body)
+        .map_err(|e| DockerError::bad(format!("invalid container config: {e}")))?;
+    map_create_request(body, name)
+}
+
 async fn containers_create(
     State(st): State<DockerState>,
     Query(q): Query<CreateQuery>,
@@ -896,7 +911,7 @@ fn urlencoding_decode(s: &str) -> String {
     s.replace("%2F", "/").replace("%2f", "/")
 }
 
-async fn oci_containers(m: &VmManager) -> Vec<VmRecord> {
+pub(crate) async fn oci_containers(m: &VmManager) -> Vec<VmRecord> {
     m.list()
         .await
         .into_iter()
@@ -904,7 +919,7 @@ async fn oci_containers(m: &VmManager) -> Vec<VmRecord> {
         .collect()
 }
 
-async fn resolve_container(m: &VmManager, id_or_name: &str) -> DockerResult<VmRecord> {
+pub(crate) async fn resolve_container(m: &VmManager, id_or_name: &str) -> DockerResult<VmRecord> {
     let all = oci_containers(m).await;
     if let Ok(u) = Uuid::parse_str(id_or_name) {
         return all
@@ -936,7 +951,7 @@ async fn resolve_container(m: &VmManager, id_or_name: &str) -> DockerResult<VmRe
     }
 }
 
-fn docker_id(id: Uuid) -> String {
+pub(crate) fn docker_id(id: Uuid) -> String {
     id.as_simple().to_string()
 }
 
@@ -1047,7 +1062,7 @@ fn container_inspect(vm: &VmRecord) -> Value {
     })
 }
 
-fn docker_state(status: &VmStatus) -> (&'static str, bool) {
+pub(crate) fn docker_state(status: &VmStatus) -> (&'static str, bool) {
     match status {
         VmStatus::Running => ("running", true),
         VmStatus::Paused => ("paused", true),
@@ -1056,7 +1071,7 @@ fn docker_state(status: &VmStatus) -> (&'static str, bool) {
     }
 }
 
-fn docker_status_text(vm: &VmRecord) -> String {
+pub(crate) fn docker_status_text(vm: &VmRecord) -> String {
     match vm.status {
         VmStatus::Running => "Up".into(),
         VmStatus::Paused => "Up (paused)".into(),
@@ -1287,6 +1302,10 @@ async fn run_exec(
 
 mod build;
 mod extra;
+
+/// A container record for tests outside this module (e.g. `docker_adapter`).
+#[cfg(test)]
+pub(crate) use extra::tests::fixture as vm_fixture;
 
 #[cfg(test)]
 mod tests {
