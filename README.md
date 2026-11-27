@@ -239,6 +239,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | Positioning, overview and the exhaustive feature list | [docs/POSITIONING.md](docs/POSITIONING.md) · [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) · [FEATURES.md](FEATURES.md) |
 | REST API, auth/RBAC and the VM JSON contract | [docs/api.md](docs/api.md) |
 | Day-2 operations | [docs/operations.md](docs/operations.md) |
+| Ready-made VMs with one command: `fluxctl templates run debian` (macOS and Linux) | [docs/vm-templates.md](docs/vm-templates.md) |
 | Planning reports (host compatibility, placement, benchmark compare) | [docs/host-planning.md](docs/host-planning.md), [research](docs/RESEARCH.md) |
 | Host hardening: the AppArmor profile and what it allows | [deploy/apparmor/README.md](deploy/apparmor/README.md) |
 | Live migration contract and receivers | [docs/runtime-boundary.md](docs/runtime-boundary.md) · [docs/operations.md](docs/operations.md) |

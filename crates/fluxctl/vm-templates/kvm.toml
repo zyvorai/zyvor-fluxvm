@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
+# A VM environment: `fluxctl templates run kvm` (docs/vm-templates.md).
+# Nested virtualization: on a Mac it needs an Apple M3 or later and macOS 15 or later; on Linux the host's KVM
+# module needs `nested` turned on.
+name = "kvm"
+title = "KVM guest (nested virtualization)"
+summary = "Debian 13 with /dev/kvm and QEMU, to run virtual machines inside the VM."
+image = "debian-13"
+cpus = 4
+memory_mib = 4096
+disk_gib = 30
+nested_virtualization = true
+packages = ["qemu-utils", "git", "curl", "ca-certificates"]
+# {user} is the guest login.
+run = ["usermod -aG kvm {user}"]
+
+[[check]]
+name = "/dev/kvm is usable by your login"
+command = "test -r /dev/kvm && test -w /dev/kvm"
+
+# Added for the guest's CPU architecture.
+[arch.aarch64]
+packages = ["qemu-system-arm"]
+
+[[arch.aarch64.check]]
+name = "QEMU for arm64"
+command = "qemu-system-aarch64 --version"
+
+[arch.x86_64]
+packages = ["qemu-system-x86"]
+
+[[arch.x86_64.check]]
+name = "QEMU for x86-64"
+command = "qemu-system-x86_64 --version"

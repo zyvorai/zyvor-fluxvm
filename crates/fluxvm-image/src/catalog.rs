@@ -491,6 +491,17 @@ pub async fn resolve_with_provenance(cfg: &Config, image_ref: &Path) -> Result<R
     })
 }
 
+/// Hosts the built-in list has bootable images for: Macs, and x86-64 and ARM64 Linux.
+fn builtin_host() -> bool {
+    cfg!(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+}
+
 /// A bare built-in name (`debian-13`) that is not an existing file resolves to the downloaded, verified image;
 /// anything else is returned as `fallback`. Never marked `from_catalog`, so catalog-only policy still rejects it.
 async fn builtin_or(
@@ -500,7 +511,7 @@ async fn builtin_or(
     fallback: ResolvedImage,
 ) -> Result<ResolvedImage> {
     match crate::builtin::find(ref_str) {
-        Some(img) if cfg!(target_os = "macos") && !image_ref.exists() => Ok(ResolvedImage {
+        Some(img) if builtin_host() && !image_ref.exists() => Ok(ResolvedImage {
             path: crate::builtin::ensure(cfg, img).await?,
             ..fallback
         }),

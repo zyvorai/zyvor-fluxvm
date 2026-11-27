@@ -213,6 +213,9 @@ mod up;
 mod upgrade_cmd;
 mod usage_cmd;
 mod user_config;
+mod vm_env;
+mod vm_env_plan;
+mod vm_env_up;
 mod vm_net;
 mod vm_spec;
 mod vz_doctor;
@@ -6409,7 +6412,32 @@ async fn run(cli: Cli, output_explicit: bool) -> Result<()> {
         return completion_cmd::run(command);
     }
     if let Command::Templates { command } = &cli.command {
-        return templates_cmd::run(command);
+        let Some(job) = templates_cmd::env_job(command)? else {
+            return templates_cmd::run(command);
+        };
+        // A VM environment makes a VM: through a daemon, or the local state directory. Boxed to keep `main`'s frame small.
+        let code = match remote::endpoint(
+            cli.server.clone(),
+            cli.server_token.clone(),
+            cli.context.as_deref(),
+        )? {
+            Some(r) => {
+                let url = Some(r.base().to_owned());
+                Box::pin(vm_env_up::run_command(&r, None, url, &job)).await?
+            }
+            None => {
+                let cfg = load_cfg(&cli)?;
+                let m = manager(cfg.clone()).await?;
+                Box::pin(vm_env_up::run_command(
+                    &run::Local(&m),
+                    Some(cfg),
+                    None,
+                    &job,
+                ))
+                .await?
+            }
+        };
+        std::process::exit(code);
     }
     if let Command::Upgrade(a) = &cli.command {
         return upgrade_cmd::run(a, cli.config.as_deref()).await;
