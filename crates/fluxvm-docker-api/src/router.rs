@@ -415,11 +415,11 @@ async fn containers_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LogStream, StubAdapter};
+    use crate::{LogStream, fake::FakeAdapter};
     use axum::body::to_bytes;
     use tower::ServiceExt as _;
 
-    fn app(stub: &Arc<StubAdapter>) -> Router {
+    fn app(stub: &Arc<FakeAdapter>) -> Router {
         router(stub.clone())
     }
 
@@ -492,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_and_version_handshake_with_and_without_prefix() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         for uri in ["/_ping", "/v1.44/_ping"] {
             let (status, res) = call(app(&stub), "GET", uri, None).await;
             assert_eq!(status, StatusCode::OK);
@@ -512,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_start_list_stop_round_trip() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         let (status, res) = call(
             app(&stub),
             "POST",
@@ -573,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_limit_returns_newest_in_any_state() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         for name in ["a1", "b2", "c3"] {
             let (s, _) = call(
                 app(&stub),
@@ -615,7 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_errors_are_docker_shaped() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         let (s, res) = call(
             app(&stub),
             "POST",
@@ -675,7 +675,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_container_is_404() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         for (m, uri) in [
             ("POST", "/containers/nope/start"),
             ("POST", "/containers/nope/stop"),
@@ -690,7 +690,7 @@ mod tests {
 
     #[tokio::test]
     async fn unimplemented_endpoints_answer_501_with_a_message() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         for (m, uri) in [
             ("GET", "/info"),
             ("GET", "/v1.44/images/json"),
@@ -712,7 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn logs_are_multiplexed_and_filtered_by_stream() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         let (_, res) = call(
             app(&stub),
             "POST",
@@ -778,7 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn tty_logs_are_raw() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         let (_, res) = call(
             app(&stub),
             "POST",
@@ -800,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn logs_parameter_errors() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         call(
             app(&stub),
             "POST",
@@ -843,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_with_signal_is_501() {
-        let stub = Arc::new(StubAdapter::default());
+        let stub = Arc::new(FakeAdapter::default());
         call(
             app(&stub),
             "POST",

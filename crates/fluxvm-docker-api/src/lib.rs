@@ -6,21 +6,21 @@
 //! Maps a small, stable subset of the Docker Engine API onto the FluxVM control plane so that Docker SDKs and
 //! `DOCKER_HOST=… docker` can list, create, start, stop and read the logs of containers (one OCI sandbox microVM
 //! each). It is intentionally thin: the HTTP surface lives here ([`router`]), the FluxVM side lives behind the
-//! [`DockerAdapter`] trait, so the router is tested against [`StubAdapter`] and the daemon wires in the real
-//! control plane (`fluxvm_api::docker_adapter::FluxvmAdapter`).
+//! [`DockerAdapter`] trait, which the daemon implements over the real control plane
+//! (`fluxvm_api::docker_adapter::FluxvmAdapter`).
 //!
 //! Supported: `GET /_ping`, `GET /version`, `GET /containers/json`, `POST /containers/create`,
 //! `GET /containers/{id}/json`, `POST /containers/{id}/start`, `POST /containers/{id}/stop`,
 //! `GET /containers/{id}/logs`, each also under a `/v1.NN` prefix. Everything else answers `501` with a
 //! Docker-style `{"message": …}` body. See `docs/DOCKER-API.md`.
 
+#[cfg(test)]
+mod fake;
 mod listen;
 mod router;
-mod stub;
 
 pub use listen::{ListenAddr, serve};
 pub use router::{API_VERSION, MIN_API_VERSION, router};
-pub use stub::StubAdapter;
 
 use bytes::Bytes;
 use futures::{future::BoxFuture, stream::BoxStream};

@@ -1,7 +1,8 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
 
-//! In-memory [`DockerAdapter`] for tests and for trying a Docker client against the router without a daemon.
+//! Test-only in-memory [`DockerAdapter`]: lets the router's handler tests run without a daemon. Never shipped; the
+//! daemon uses `fluxvm_api::docker_adapter::FluxvmAdapter`, which is tested against a real `VmManager`.
 
 use crate::{
     AdapterError, AdapterResult, Container, ContainerDetails, CreateRequest, DockerAdapter,
@@ -14,14 +15,14 @@ use std::{collections::BTreeMap, sync::Mutex};
 #[derive(Default)]
 struct Inner {
     /// Oldest first.
-    containers: Vec<StubContainer>,
+    containers: Vec<FakeContainer>,
     next: u64,
     last_create: Option<(Option<String>, CreateRequest)>,
     last_stop_timeout: Option<u64>,
     last_logs: Option<LogsRequest>,
 }
 
-struct StubContainer {
+struct FakeContainer {
     id: String,
     name: String,
     image: String,
@@ -32,7 +33,7 @@ struct StubContainer {
     logs: Vec<LogChunk>,
 }
 
-impl StubContainer {
+impl FakeContainer {
     fn summary(&self) -> Container {
         Container {
             id: self.id.clone(),
@@ -52,14 +53,14 @@ impl StubContainer {
     }
 }
 
-/// Containers live in memory; `start`/`stop` flip their state and `logs` replays what [`StubAdapter::push_log`]
+/// Containers live in memory; `start`/`stop` flip their state and `logs` replays what [`FakeAdapter::push_log`]
 /// recorded. IDs, names and ID prefixes resolve like Docker (exact name first).
 #[derive(Default)]
-pub struct StubAdapter {
+pub struct FakeAdapter {
     inner: Mutex<Inner>,
 }
 
-impl StubAdapter {
+impl FakeAdapter {
     /// Append a log line to container `id` (full ID).
     pub fn push_log(&self, id: &str, stream: LogStream, data: &str) {
         let mut g = self.inner.lock().unwrap();
@@ -86,7 +87,7 @@ impl StubAdapter {
         self.inner.lock().unwrap().last_logs
     }
 
-    fn with<T>(&self, id: &str, f: impl FnOnce(&mut StubContainer) -> T) -> AdapterResult<T> {
+    fn with<T>(&self, id: &str, f: impl FnOnce(&mut FakeContainer) -> T) -> AdapterResult<T> {
         let mut g = self.inner.lock().unwrap();
         let name = id.trim_start_matches('/');
         let idx = match g
@@ -118,14 +119,14 @@ impl StubAdapter {
     }
 }
 
-impl DockerAdapter for StubAdapter {
+impl DockerAdapter for FakeAdapter {
     fn list(&self, all: bool) -> BoxFuture<'_, AdapterResult<Vec<Container>>> {
         let g = self.inner.lock().unwrap();
         let out = g
             .containers
             .iter()
             .rev()
-            .map(StubContainer::summary)
+            .map(FakeContainer::summary)
             .filter(|c| all || c.is_up())
             .collect();
         futures::future::ready(Ok(out)).boxed()
@@ -149,7 +150,7 @@ impl DockerAdapter for StubAdapter {
         let mut g = self.inner.lock().unwrap();
         g.next += 1;
         let n = g.next;
-        let name = name.unwrap_or_else(|| format!("stub_{n}"));
+        let name = name.unwrap_or_else(|| format!("fake_{n}"));
         if g.containers.iter().any(|c| c.name == name) {
             return futures::future::ready(Err(AdapterError::conflict(format!(
                 "Conflict. The container name \"/{name}\" is already in use."
@@ -158,7 +159,7 @@ impl DockerAdapter for StubAdapter {
         }
         let id = format!("{n:064x}").chars().rev().collect::<String>();
         g.last_create = Some((Some(name.clone()), req.clone()));
-        g.containers.push(StubContainer {
+        g.containers.push(FakeContainer {
             id: id.clone(),
             name,
             image: req.image,
