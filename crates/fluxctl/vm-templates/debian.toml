@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
+# A VM environment: `fluxctl templates run debian` (docs/vm-templates.md).
+# Copy it (`fluxctl templates show debian > mine.toml`), edit it, and run `fluxctl templates run ./mine.toml`.
+name = "debian"
+title = "Debian 13 development VM"
+summary = "A plain Debian 13 VM with git, curl, jq and rsync."
+image = "debian-13"
+cpus = 2
+memory_mib = 2048
+disk_gib = 20
+packages = ["git", "curl", "ca-certificates", "jq", "rsync"]
+
+# Each check runs in the guest over SSH; the environment is ready when all of them exit 0.
+[[check]]
+name = "git"
+command = "git --version"
+
+[[check]]
+name = "curl and jq"
+command = "curl --version >/dev/null && jq --version"
+
+[[check]]
+name = "passwordless sudo"
+command = "sudo -n true"

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
+# A VM environment: `fluxctl templates run ubuntu` (docs/vm-templates.md).
+name = "ubuntu"
+title = "Ubuntu 24.04 development VM"
+summary = "A plain Ubuntu 24.04 LTS VM with git, curl, jq and rsync."
+image = "ubuntu-24.04"
+cpus = 2
+memory_mib = 2048
+disk_gib = 20
+packages = ["git", "curl", "ca-certificates", "jq", "rsync"]
+
+[[check]]
+name = "git"
+command = "git --version"
+
+[[check]]
+name = "curl and jq"
+command = "curl --version >/dev/null && jq --version"
+
+[[check]]
+name = "passwordless sudo"
+command = "sudo -n true"

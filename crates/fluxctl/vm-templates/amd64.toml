@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
+# A VM environment: `fluxctl templates run amd64` (docs/vm-templates.md).
+# The guest is ARM64. Apple's Rosetta for Linux (a Virtualization.framework share) runs its x86-64 programs.
+name = "amd64"
+title = "x86-64 build box (Rosetta)"
+summary = "ARM64 Debian 13 that runs and builds x86-64 binaries through Rosetta for Linux."
+image = "debian-13"
+cpus = 4
+memory_mib = 4096
+disk_gib = 30
+rosetta = true
+packages = ["build-essential", "crossbuild-essential-amd64", "git", "curl", "ca-certificates", "file"]
+# Runs once on first boot, after the Rosetta share is mounted and registered.
+run = [
+  "dpkg --add-architecture amd64",
+  "apt-get update",
+  "DEBIAN_FRONTEND=noninteractive apt-get install -y libc6:amd64 libstdc++6:amd64",
+]
+
+[[check]]
+name = "Rosetta is registered for x86-64"
+command = "grep -q enabled /proc/sys/fs/binfmt_misc/rosetta"
+
+[[check]]
+name = "an x86-64 system binary runs"
+command = "/lib64/ld-linux-x86-64.so.2 --version"
+
+[[check]]
+name = "an x86-64 program builds and runs"
+command = "d=$(mktemp -d) && printf 'int main(void){return 0;}\\n' > $d/t.c && x86_64-linux-gnu-gcc $d/t.c -o $d/t && file $d/t | grep -q x86-64 && $d/t && rm -rf $d"

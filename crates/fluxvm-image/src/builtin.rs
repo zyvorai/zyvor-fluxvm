@@ -6,7 +6,8 @@
 //! Each image is downloaded over HTTPS, checked against the vendor's published checksum file, and cached under
 //! `state_dir/images`. Images the vendor ships as qcow2 are converted to raw once, so every VM clone is an instant
 //! APFS copy. Names resolve only when no file of that name exists, and they never count as catalog images, so
-//! `policy.require_catalog_names` still rejects them.
+//! `policy.require_catalog_names` still rejects them. A name means the image for the host's own architecture:
+//! ARM64 on Apple silicon and ARM64 Linux, x86-64 (fewer names) on x86-64 Linux.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::Config;
@@ -44,6 +45,7 @@ enum Kind {
 }
 
 /// ARM64 images, the only guests Virtualization.framework runs on Apple silicon.
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 pub const BUILTIN_IMAGES: &[BuiltinImage] = &[
     BuiltinImage {
         name: "debian-13",
@@ -116,6 +118,27 @@ pub const BUILTIN_IMAGES: &[BuiltinImage] = &[
         sums_file: "SHA256SUMS",
         sum: Sum::Sha256,
         kind: Kind::TarDiskRaw,
+    },
+];
+
+/// x86-64 images for QEMU/KVM hosts: the ones `fluxctl templates` environments use.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const BUILTIN_IMAGES: &[BuiltinImage] = &[
+    BuiltinImage {
+        name: "debian-13",
+        base_url: "https://cloud.debian.org/images/cloud/trixie/latest",
+        file: "debian-13-generic-amd64.tar.xz",
+        sums_file: "SHA512SUMS",
+        sum: Sum::Sha512,
+        kind: Kind::TarDiskRaw,
+    },
+    BuiltinImage {
+        name: "ubuntu-24.04",
+        base_url: "https://cloud-images.ubuntu.com/releases/24.04/release",
+        file: "ubuntu-24.04-server-cloudimg-amd64.img",
+        sums_file: "SHA256SUMS",
+        sum: Sum::Sha256,
+        kind: Kind::Qcow2,
     },
 ];
 
@@ -485,6 +508,12 @@ mod tests {
     fn known_names_resolve() {
         assert!(find("debian-13").is_some());
         assert!(find("ubuntu-24.04").is_some_and(|i| i.kind == Kind::Qcow2));
+        assert!(find("windows-11").is_none());
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    #[test]
+    fn the_arm64_list_has_the_other_distributions() {
         for name in [
             "ubuntu-26.04",
             "fedora-44",
@@ -495,6 +524,14 @@ mod tests {
         ] {
             assert!(find(name).is_some(), "{name}");
         }
-        assert!(find("windows-11").is_none());
+    }
+
+    #[test]
+    fn every_image_is_for_the_host_architecture() {
+        let x86 = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        for i in BUILTIN_IMAGES {
+            let intel = i.file.contains("amd64") || i.file.contains("x86_64");
+            assert_eq!(intel, x86, "{}: {}", i.name, i.file);
+        }
     }
 }

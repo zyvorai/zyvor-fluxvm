@@ -248,6 +248,39 @@ pub const CODES: &[MacCode] = &[
         signatures: &[],
     },
     MacCode {
+        code: "TEMPLATE_VM_BLOCKED",
+        status: None,
+        summary: "`fluxctl templates run` or `down` would not act on this VM environment; nothing was changed.",
+        causes: &[
+            "this host cannot run it (for example `amd64` needs Rosetta on a Mac, `kvm` needs nested virtualization)",
+            "a VM with that name exists and this template did not make it",
+            "not enough free disk or memory, or a published port is already in use",
+            "another `fluxctl templates` command is working on the same VM",
+        ],
+        fixes: &[
+            "read the [blocked] lines of the plan: `fluxctl templates run NAME --dry-run`",
+            "use another VM name: `fluxctl templates run NAME --vm OTHER`",
+        ],
+        aliases: &["template-vm-blocked"],
+        signatures: &[],
+    },
+    MacCode {
+        code: "TEMPLATE_VM_NOT_READY",
+        status: None,
+        summary: "The VM of an environment is running but a readiness check failed. It is left as it is.",
+        causes: &[
+            "first-boot setup is still installing packages, or failed (usually no internet or a slow mirror)",
+            "a check in your own template file does not pass in this image",
+        ],
+        fixes: &[
+            "run the same command again: it only waits and checks (`--timeout SECONDS` waits longer)",
+            "look in the guest: `fluxctl ssh NAME`, then `sudo tail -n 50 /var/log/cloud-init-output.log`",
+            "start over, deleting its disk: `fluxctl templates run NAME --recreate`",
+        ],
+        aliases: &["template-vm-not-ready"],
+        signatures: &[],
+    },
+    MacCode {
         code: "COMPLETION_SHELL_UNKNOWN",
         status: None,
         summary: "fluxctl could not tell which shell to install completion for.",

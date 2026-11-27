@@ -9,9 +9,15 @@
 //! then starts it: Compose files with `docker compose -f FILE up -d` (on a Mac start the engine first with `fluxctl docker up`),
 //! k3s manifests with `kubectl apply -f -` against a FluxVM k3s cluster (`--cluster NAME`, else kubectl's current context).
 //! `down NAME` stops it again (Compose keeps its volumes; pass `--volumes` to delete them).
+//!
+//! VM environments (`debian`, `build`, ...: `vm_env`) are listed and started by the same subcommands, but make a VM
+//! through the FluxVM daemon or state directory instead (`vm_env_up`, docs/vm-templates.md).
 
 use crate::cli_errors::coded;
 use crate::gateway::kube::{KubeRun, Selection, SystemKubectl};
+use crate::vm_env;
+use crate::vm_env_up::{Job, VmFlags};
+use crate::vm_net::Backend;
 use anyhow::{Context, Result, bail};
 use fluxvm_core::stack_templates::{self as st, Kind, Template};
 use serde_json::json;
@@ -27,7 +33,8 @@ pub enum TemplatesCommand {
     },
     /// The file a template runs, printed (redirect it to keep your own copy).
     Show { name: String },
-    /// Start a template with one command. Writes its file first and says where.
+    /// Start a template with one command. A Compose or k3s template writes its file first and says where; a VM environment
+    /// (debian, ubuntu, build, amd64, kvm, or your own .toml) creates, starts or just checks its VM (docs/vm-templates.md).
     Run(RunArgs),
     /// Stop what `run` started.
     Down(RunArgs),
@@ -45,7 +52,7 @@ pub struct RunArgs {
     /// k3s templates: a kubectl context instead.
     #[arg(long)]
     pub kube_context: Option<String>,
-    /// Do not ask before overwriting a file you edited.
+    /// Do not ask before overwriting a file you edited (VM environments: before deleting or rewinding a VM).
     #[arg(long, short = 'y')]
     pub yes: bool,
     /// Compose `down`: also delete the volumes (the data).
@@ -54,11 +61,14 @@ pub struct RunArgs {
     /// Machine-readable output.
     #[arg(long)]
     pub json: bool,
+    #[command(flatten)]
+    pub vm: VmFlags,
 }
 
 fn lookup(name: &str) -> Result<&'static Template> {
     st::find(name).ok_or_else(|| {
-        let names: Vec<_> = st::TEMPLATES.iter().map(|t| t.name).collect();
+        let mut names: Vec<_> = st::TEMPLATES.iter().map(|t| t.name).collect();
+        names.extend(vm_env::names());
         coded(
             format!(
                 "there is no template called {name:?}. Available: {}",
@@ -90,7 +100,7 @@ pub fn ls_text() -> String {
     s
 }
 
-fn data_dir(home: &Path) -> PathBuf {
+pub(crate) fn data_dir(home: &Path) -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -152,6 +162,44 @@ fn needs(t: &Template, why: String) -> anyhow::Error {
             "TEMPLATE_NEEDS_KUBECTL",
         ),
     }
+}
+
+/// `run` or `down` of a VM environment, which needs the VM manager or a daemon. `None` for everything else, which
+/// [`run`] handles without either.
+pub fn env_job(cmd: &TemplatesCommand) -> Result<Option<Job>> {
+    let (a, down) = match cmd {
+        TemplatesCommand::Run(a) => (a, false),
+        TemplatesCommand::Down(a) => (a, true),
+        _ => return Ok(None),
+    };
+    let stack = st::find(&a.name).is_some();
+    let Some(template) = (!stack)
+        .then(|| vm_env::load(&a.name))
+        .transpose()?
+        .flatten()
+    else {
+        if stack && a.vm != VmFlags::default() {
+            bail!(
+                "--vm, --cpus, --dry-run and the other VM environment options do not apply to {}, which is not a VM",
+                a.name
+            );
+        }
+        return Ok(None);
+    };
+    if a.dir.is_some() || a.cluster.is_some() || a.kube_context.is_some() || a.volumes {
+        bail!(
+            "--dir, --cluster, --kube-context and --volumes are for Compose and k3s templates; {} is a VM (`down --delete` removes it)",
+            a.name
+        );
+    }
+    Ok(Some(Job {
+        template,
+        reference: a.name.clone(),
+        flags: a.vm.clone(),
+        down,
+        yes: a.yes,
+        json: a.json,
+    }))
 }
 
 /// Runs the template through `runner`. Returns the commands it ran, for `--json`.
@@ -222,13 +270,19 @@ pub fn execute(
 pub fn run(cmd: &TemplatesCommand) -> Result<()> {
     match cmd {
         TemplatesCommand::Ls { json } => {
+            let (backend, arch) = (Backend::host(), std::env::consts::ARCH);
             if *json {
-                println!("{}", serde_json::to_string_pretty(&st::gallery_json())?);
+                let mut v = st::gallery_json();
+                v["environments"] = vm_env::gallery_json(backend, arch);
+                println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
-                print!("{}", ls_text());
+                print!("{}{}", ls_text(), vm_env::ls_text(backend, arch));
             }
         }
-        TemplatesCommand::Show { name } => print!("{}", lookup(name)?.body),
+        TemplatesCommand::Show { name } => match vm_env::body(name) {
+            Some(body) => print!("{body}"),
+            None => print!("{}", lookup(name)?.body),
+        },
         TemplatesCommand::Run(a) | TemplatesCommand::Down(a) => {
             let down = matches!(cmd, TemplatesCommand::Down(_));
             let home = std::env::var_os("HOME")
@@ -268,7 +322,49 @@ mod tests {
             yes: false,
             volumes: false,
             json: true,
+            vm: VmFlags::default(),
         }
+    }
+
+    #[test]
+    fn vm_environments_become_jobs_and_the_two_kinds_of_flags_do_not_mix() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = args("debian", d.path());
+        a.dir = None;
+        a.vm.dry_run = true;
+        let job = env_job(&TemplatesCommand::Run(a.clone())).unwrap().unwrap();
+        assert_eq!(job.template.name, "debian");
+        assert!(!job.down && job.flags.dry_run);
+        assert!(
+            env_job(&TemplatesCommand::Down(a.clone()))
+                .unwrap()
+                .unwrap()
+                .down
+        );
+        a.volumes = true;
+        let e = env_job(&TemplatesCommand::Down(a)).unwrap_err();
+        assert!(e.to_string().contains("down --delete"), "{e}");
+        // A stack template stays on the old path, and VM flags are refused for it instead of being ignored.
+        let mut s = args("redis", d.path());
+        assert!(
+            env_job(&TemplatesCommand::Run(s.clone()))
+                .unwrap()
+                .is_none()
+        );
+        s.vm.dry_run = true;
+        assert!(env_job(&TemplatesCommand::Run(s)).is_err());
+        assert!(
+            env_job(&TemplatesCommand::Run(args("nope", d.path())))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            env_job(&TemplatesCommand::Show {
+                name: "debian".into()
+            })
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]

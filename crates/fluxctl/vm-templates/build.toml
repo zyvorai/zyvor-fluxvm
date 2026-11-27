@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LicenseRef-Zyvor-Production-2.0
+# A VM environment: `fluxctl templates run build` (docs/vm-templates.md).
+name = "build"
+title = "Build box"
+summary = "Debian 13 with a C and C++ toolchain, CMake, Ninja, ccache and Python."
+image = "debian-13"
+cpus = 4
+memory_mib = 4096
+disk_gib = 40
+packages = [
+  "build-essential",
+  "cmake",
+  "ninja-build",
+  "pkg-config",
+  "ccache",
+  "git",
+  "curl",
+  "ca-certificates",
+  "python3",
+  "python3-venv",
+]
+
+[[check]]
+name = "C compiler builds and runs a program"
+command = "d=$(mktemp -d) && printf 'int main(void){return 0;}\\n' > $d/t.c && cc $d/t.c -o $d/t && $d/t && rm -rf $d"
+
+[[check]]
+name = "C++ compiler"
+command = "c++ --version"
+
+[[check]]
+name = "make, cmake and ninja"
+command = "make --version >/dev/null && cmake --version >/dev/null && ninja --version"
+
+[[check]]
+name = "python3 venv"
+command = "d=$(mktemp -d) && python3 -m venv $d/v && rm -rf $d"
