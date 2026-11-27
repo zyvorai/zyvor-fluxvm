@@ -25,6 +25,7 @@ How the control plane, the four backends and the image path fit together, and ho
 
 On macOS the same control plane drives a fifth backend, `vz` (`fluxvm-apple`, Apple's Virtualization.framework through the
 `fluxvm-vz-runner` helper); see [macos.md](macos.md). It has no KVM, TAP or eBPF and is not part of the Linux diagram above.
+USB device passthrough is a `vz` feature today (and a QEMU design for Linux); see [USB-PASSTHROUGH.md](USB-PASSTHROUGH.md).
 
 Image path:
 base image -> SHA256 -> native VMDK-to-raw / qemu-img fallback -> customize -> reusable template

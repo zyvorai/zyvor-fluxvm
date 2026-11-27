@@ -214,3 +214,7 @@ not journaled, delete intent omits nbd and Ceph) are listed in
   hardware run ([security-profiles.md](security-profiles.md)).
 - **LiteBox spike**: not started. There is no code or design document for it in
   the tree.
+- **USB passthrough** (host device into a guest): design in
+  [USB-PASSTHROUGH.md](USB-PASSTHROUGH.md). The macOS `vz` path already has
+  XHCI, USB disk-image hot-plug, and a written but unverified physical
+  Accessory Access path; Linux QEMU has none. Implementation is not started.
