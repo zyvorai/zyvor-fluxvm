@@ -3,9 +3,10 @@
 
 //! Docker Engine API subset on a unix socket.
 //!
-//! Maps containers to OCI sandboxes and images to the FluxVM OCI cache.
+//! Maps containers to OCI sandboxes (a microVM each, or a native Linux container) and images to the FluxVM OCI cache.
 //! Supported CLI: `docker pull|images|run|ps|rm|logs|exec|stop`.
 //! Also: `restart|kill|pause|unpause|top|stats|rename|events|network ls|volume ls`.
+//! List `filters` are honoured or refused (`filters`), never ignored.
 //! `docker build` is forwarded to the FluxVM Mac builder (`docker_build`). Not supported (a Docker-shaped error says what to do): Compose, bind mounts, user-defined networks, named volumes.
 
 use axum::{
@@ -17,13 +18,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
-use fluxvm_core::model::{VmRecord, VmStatus};
-use fluxvm_guest_protocol::{AgentResponse, ExecProcess};
+use fluxvm_core::model::{VmPatch, VmRecord, VmStatus};
+use fluxvm_guest_protocol::{AgentResponse, ExecProcess, ExecRunAs};
 use fluxvm_oci_init::{config::ExitPolicy, supervise::RestartPolicy};
 use fluxvm_scheduler::{
     SandboxCreateRequest, VmManager,
     oci_images::OciImageEntry,
-    oci_sandbox::{OCI_IMAGE_LABEL, OciSandboxSpec},
+    oci_sandbox::{OCI_IMAGE_LABEL, OciSandboxSpec, ProcessState, process_state},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,6 +47,7 @@ struct DockerState {
     manager: Arc<VmManager>,
     execs: Arc<Mutex<BTreeMap<String, ExecSession>>>,
     build: Arc<crate::docker_build::BuildEngine>,
+    containers: lifecycle::Tracker,
 }
 
 #[derive(Clone)]
@@ -55,6 +57,8 @@ struct ExecSession {
     env: Vec<String>,
     working_dir: Option<String>,
     user: Option<String>,
+    running: bool,
+    exit_code: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -110,11 +114,21 @@ pub fn router_with_build(
     manager: Arc<VmManager>,
     build: Arc<crate::docker_build::BuildEngine>,
 ) -> Router {
-    let state = DockerState {
-        manager,
-        execs: Arc::new(Mutex::new(BTreeMap::new())),
-        build,
-    };
+    routes(DockerState::new(manager, build))
+}
+
+impl DockerState {
+    fn new(manager: Arc<VmManager>, build: Arc<crate::docker_build::BuildEngine>) -> Self {
+        Self {
+            manager,
+            execs: Arc::new(Mutex::new(BTreeMap::new())),
+            build,
+            containers: lifecycle::Tracker::default(),
+        }
+    }
+}
+
+fn routes(state: DockerState) -> Router {
     let routes = Router::new()
         .route("/_ping", get(ping))
         .route("/version", get(version))
@@ -122,14 +136,20 @@ pub fn router_with_build(
         .route("/containers/json", get(containers_list))
         .route("/containers/create", post(containers_create))
         .route("/containers/{id}/json", get(containers_inspect))
-        .route("/containers/{id}/start", post(containers_start))
-        .route("/containers/{id}/stop", post(containers_stop))
-        .route("/containers/{id}/wait", post(containers_wait))
-        .route("/containers/{id}/logs", get(containers_logs))
-        .route("/containers/{id}/attach", post(containers_attach))
+        .route("/containers/{id}/start", post(lifecycle::containers_start))
+        .route("/containers/{id}/stop", post(lifecycle::containers_stop))
+        .route("/containers/{id}/wait", post(lifecycle::containers_wait))
+        .route("/containers/{id}/logs", get(lifecycle::containers_logs))
+        .route(
+            "/containers/{id}/attach",
+            post(lifecycle::containers_attach),
+        )
         .route("/containers/{id}/exec", post(containers_exec_create))
-        .route("/containers/{id}", delete(containers_delete))
-        .route("/exec/{id}/start", post(exec_start))
+        .route("/containers/{id}", delete(lifecycle::containers_delete))
+        // There is no terminal to resize; the CLI reports an error answer to the user.
+        .route("/containers/{id}/resize", post(resize))
+        .route("/exec/{id}/resize", post(resize))
+        .route("/exec/{id}/start", post(lifecycle::exec_start))
         .route("/exec/{id}/json", get(exec_inspect))
         .route("/images/json", get(images_list))
         .route("/images/create", post(images_create))
@@ -182,7 +202,9 @@ pub async fn serve_unix(
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     tracing::info!(path = %path.display(), "Docker Engine API listening");
-    axum::serve(listener, router_with_build(manager, build)).await?;
+    let state = DockerState::new(manager, build);
+    lifecycle::resume_auto_remove(state.clone()).await;
+    axum::serve(listener, routes(state)).await?;
     Ok(())
 }
 
@@ -264,6 +286,10 @@ fn docker_headers() -> HeaderMap {
     h
 }
 
+async fn resize() -> StatusCode {
+    StatusCode::OK
+}
+
 async fn ping() -> impl IntoResponse {
     let mut res = (StatusCode::OK, "OK").into_response();
     res.headers_mut().extend(docker_headers());
@@ -290,11 +316,11 @@ async fn version(State(st): State<DockerState>) -> impl IntoResponse {
 }
 
 async fn info(State(st): State<DockerState>) -> impl IntoResponse {
-    let containers = oci_containers(&st.manager).await;
+    let containers = containers_with_state(&st.manager).await;
     let images = st.manager.oci_list().unwrap_or_default().len();
     let running = containers
         .iter()
-        .filter(|v| v.status == VmStatus::Running)
+        .filter(|(_, s)| *s == ProcessState::Running)
         .count();
     let stopped = containers.len().saturating_sub(running);
     let ncpu = std::thread::available_parallelism()
@@ -348,6 +374,10 @@ struct ListQuery {
     #[serde(default)]
     all: Option<String>,
     limit: Option<i64>,
+    filters: Option<String>,
+    /// API versions before 1.24 narrowed the list with these; they are filters now.
+    before: Option<String>,
+    since: Option<String>,
 }
 
 async fn containers_list(
@@ -359,16 +389,29 @@ async fn containers_list(
         Some("true" | "1") => true,
         _ => return Err(DockerError::bad("all must be true, false, 1 or 0")),
     };
-    let mut vms = oci_containers(&st.manager).await;
+    if q.before.is_some() || q.since.is_some() {
+        return Err(DockerError::bad(
+            "the `before` and `since` parameters are not supported; use --filter before=ID or since=ID",
+        ));
+    }
+    let filter = filters::ContainerFilter::parse(&st.manager, q.filters.as_deref()).await?;
+    let mut vms = containers_with_state(&st.manager).await;
     let limit = q.limit.filter(|n| *n > 0);
-    if !all && limit.is_none() {
-        vms.retain(|vm| matches!(vm.status, VmStatus::Running | VmStatus::Paused));
+    if !all && limit.is_none() && !filter.includes_stopped() {
+        vms.retain(|(_, state)| lifecycle::is_up(*state));
     }
-    vms.sort_unstable_by_key(|vm| std::cmp::Reverse((vm.created_at, vm.id)));
-    if let Some(n) = limit {
-        vms.truncate(usize::try_from(n).unwrap_or(usize::MAX));
+    vms.sort_unstable_by_key(|(vm, _)| std::cmp::Reverse((vm.created_at, vm.id)));
+    let limit = limit.map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX));
+    let mut items = Vec::new();
+    for (vm, state) in &vms {
+        if items.len() == limit {
+            break;
+        }
+        let labels = filters::labels_of(vm).await?;
+        if filter.matches(vm, *state, &labels) {
+            items.push(container_summary(vm, *state, &labels));
+        }
     }
-    let items = vms.iter().map(container_summary).collect();
     Ok(Json(Value::Array(items)))
 }
 
@@ -385,6 +428,21 @@ where
     T: Deserialize<'de> + Default,
 {
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
+/// A query flag as Docker reads it: absent, empty, `0`, `no`, `false` and `none` are false, anything else is true.
+/// The CLI sends `1`.
+fn docker_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "no" | "false" | "none"
+        )
+    })
+}
+
+fn docker_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(docker_flag(Option::<String>::deserialize(d)?.as_deref()))
 }
 
 #[derive(Deserialize, Default)]
@@ -404,8 +462,10 @@ struct ContainerCreateBody {
     user: String,
     #[serde(rename = "Labels", deserialize_with = "null_default")]
     labels: BTreeMap<String, String>,
-    #[serde(rename = "HostConfig")]
+    #[serde(rename = "HostConfig", deserialize_with = "null_default")]
     host_config: HostConfigBody,
+    #[serde(rename = "Tty", deserialize_with = "null_default")]
+    tty: bool,
     #[serde(rename = "ExposedPorts", deserialize_with = "null_default")]
     exposed_ports: BTreeMap<String, Value>,
 }
@@ -415,15 +475,17 @@ struct ContainerCreateBody {
 struct HostConfigBody {
     #[serde(rename = "PortBindings", deserialize_with = "null_default")]
     port_bindings: BTreeMap<String, Option<Vec<PortBinding>>>,
-    #[serde(rename = "Memory")]
+    #[serde(rename = "Memory", deserialize_with = "null_default")]
     memory: i64,
-    #[serde(rename = "NanoCpus")]
+    #[serde(rename = "NanoCpus", deserialize_with = "null_default")]
     nano_cpus: i64,
-    #[serde(rename = "AutoRemove")]
+    #[serde(rename = "AutoRemove", deserialize_with = "null_default")]
     auto_remove: bool,
+    #[serde(rename = "Mounts", deserialize_with = "null_default")]
+    mounts: Vec<Value>,
     #[serde(rename = "Binds", deserialize_with = "null_default")]
     binds: Vec<String>,
-    #[serde(rename = "RestartPolicy")]
+    #[serde(rename = "RestartPolicy", deserialize_with = "null_default")]
     restart_policy: RestartPolicyBody,
 }
 
@@ -450,7 +512,7 @@ fn map_create_request(
     if body.image.trim().is_empty() {
         return Err(DockerError::bad("Image is required"));
     }
-    if !body.host_config.binds.is_empty() {
+    if !body.host_config.binds.is_empty() || !body.host_config.mounts.is_empty() {
         return Err(DockerError::bad(
             "bind mounts are not supported by the FluxVM Docker shim; use named volumes via fluxctl",
         ));
@@ -511,7 +573,8 @@ fn map_create_request(
         hosts: Vec::new(),
         policy_override: false,
     };
-    let _ = body.labels; // OCI create path sets its own labels; user labels via PATCH later
+    // The record's own labels are set by the OCI create path; `containers_create` keeps the Docker ones beside it.
+    let _ = body.labels;
     let mut req: SandboxCreateRequest = serde_json::from_value(json!({}))
         .map_err(|e| DockerError::bad(format!("internal sandbox request defaults: {e}")))?;
     req.name = name;
@@ -550,11 +613,58 @@ async fn containers_create(
             ),
         ));
     }
-    let req = map_create_request(body, q.name)?;
+    let name = q
+        .name
+        .map(|n| n.trim_start_matches('/').to_string())
+        .filter(|n| !n.is_empty());
+    if let Some(name) = &name
+        && let Some(other) = oci_containers(&st.manager)
+            .await
+            .into_iter()
+            .find(|v| &v.name == name)
+    {
+        return Err(DockerError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "Conflict. The container name \"/{name}\" is already in use by container \"{}\". You have to remove (or rename) that container to be able to reuse that name.",
+                docker_id(other.id)
+            ),
+        ));
+    }
+    let mut labels = BTreeMap::new();
+    if body.tty {
+        labels.insert(lifecycle::TTY_LABEL.to_string(), Some("true".to_string()));
+    }
+    if body.host_config.auto_remove {
+        labels.insert(
+            lifecycle::AUTO_REMOVE_LABEL.to_string(),
+            Some("true".to_string()),
+        );
+    }
+    let docker_labels = body.labels.clone();
+    let mut req = map_create_request(body, name)?;
+    if let Some(oci) = req.oci.as_mut() {
+        // A Docker container ends when its process does.
+        oci.exit_policy = ExitPolicy::Poweroff;
+    }
+    // `docker run` attaches and waits between create and start, so create must not run the process.
     let vm = st
         .manager
-        .create_sandbox(req, None, Some("docker-api"))
+        .create_sandbox_unstarted(req, None, Some("docker-api"))
         .await?;
+    let labelled = async {
+        filters::store_labels(&vm, &docker_labels).await?;
+        if !labels.is_empty() {
+            st.manager
+                .patch(vm.id, VmPatch { name: None, labels })
+                .await?;
+        }
+        anyhow::Ok(())
+    };
+    if let Err(e) = labelled.await {
+        let _ = st.manager.delete(vm.id).await;
+        return Err(e.into());
+    }
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -569,131 +679,26 @@ async fn containers_inspect(
     Path(id): Path<String>,
 ) -> DockerResult<Json<Value>> {
     let vm = resolve_container(&st.manager, &id).await?;
-    Ok(Json(container_inspect(&vm)))
-}
-
-async fn containers_start(
-    State(st): State<DockerState>,
-    Path(id): Path<String>,
-) -> DockerResult<StatusCode> {
-    let vm = resolve_container(&st.manager, &id).await?;
-    match vm.status {
-        VmStatus::Running | VmStatus::Paused => Ok(StatusCode::NO_CONTENT),
-        VmStatus::Creating => Ok(StatusCode::NO_CONTENT),
-        VmStatus::Stopped | VmStatus::Failed => {
-            st.manager.start(vm.id).await?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-    }
+    let state = process_state(&vm).await;
+    let labels = filters::labels_of(&vm).await?;
+    Ok(Json(container_inspect(&vm, state, &labels)))
 }
 
 #[derive(Deserialize)]
 struct StopQuery {
-    #[allow(dead_code)]
-    t: Option<u64>,
-}
-
-async fn containers_stop(
-    State(st): State<DockerState>,
-    Path(id): Path<String>,
-    Query(_q): Query<StopQuery>,
-) -> DockerResult<StatusCode> {
-    let vm = resolve_container(&st.manager, &id).await?;
-    if vm.status == VmStatus::Stopped {
-        return Ok(StatusCode::NOT_MODIFIED);
-    }
-    st.manager.stop(vm.id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn containers_wait(
-    State(st): State<DockerState>,
-    Path(id): Path<String>,
-) -> DockerResult<Json<Value>> {
-    let vm = resolve_container(&st.manager, &id).await?;
-    let code = wait_exit_code(&st.manager, vm.id).await?;
-    Ok(Json(json!({ "StatusCode": code, "Error": null })))
-}
-
-#[derive(Deserialize)]
-struct LogsQuery {
-    #[serde(default)]
-    stdout: bool,
-    #[serde(default)]
-    stderr: bool,
-    #[serde(default)]
-    timestamps: bool,
-    #[serde(default)]
-    follow: bool,
-    #[serde(default = "default_tail")]
-    tail: String,
-}
-
-fn default_tail() -> String {
-    "all".into()
-}
-
-async fn containers_logs(
-    State(st): State<DockerState>,
-    Path(id): Path<String>,
-    Query(q): Query<LogsQuery>,
-) -> DockerResult<Response> {
-    let _ = (q.stdout, q.stderr, q.timestamps); // console is combined
-    let vm = resolve_container(&st.manager, &id).await?;
-    let lines = parse_tail(&q.tail);
-    if q.follow {
-        return Ok(stream_console(&st.manager, vm.id, &vm.log_path, lines, true).await);
-    }
-    let logs = st.manager.sandbox_logs(vm.id, lines).await?;
-    let body = mux_stdout(logs.log.as_bytes());
-    Ok(raw_stream_response(body))
-}
-
-#[derive(Deserialize)]
-struct AttachQuery {
-    #[serde(default)]
-    stdout: bool,
-    #[serde(default)]
-    stderr: bool,
-    #[serde(default)]
-    stream: bool,
-    #[serde(default)]
-    logs: bool,
-}
-
-async fn containers_attach(
-    State(st): State<DockerState>,
-    Path(id): Path<String>,
-    Query(q): Query<AttachQuery>,
-) -> DockerResult<Response> {
-    let _ = (q.stdout, q.stderr);
-    let vm = resolve_container(&st.manager, &id).await?;
-    let follow = q.stream;
-    let include_logs = q.logs || follow;
-    if !include_logs {
-        return Ok(StatusCode::NO_CONTENT.into_response());
-    }
-    Ok(stream_console(&st.manager, vm.id, &vm.log_path, 10_000, follow).await)
+    t: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ExecCreateBody {
-    #[serde(rename = "AttachStdin")]
-    attach_stdin: bool,
-    #[serde(rename = "AttachStdout")]
-    attach_stdout: bool,
-    #[serde(rename = "AttachStderr")]
-    attach_stderr: bool,
-    #[serde(rename = "Tty")]
-    tty: bool,
-    #[serde(rename = "Cmd")]
+    #[serde(rename = "Cmd", deserialize_with = "null_default")]
     cmd: Vec<String>,
-    #[serde(rename = "Env")]
+    #[serde(rename = "Env", deserialize_with = "null_default")]
     env: Vec<String>,
-    #[serde(rename = "WorkingDir")]
+    #[serde(rename = "WorkingDir", deserialize_with = "null_default")]
     working_dir: String,
-    #[serde(rename = "User")]
+    #[serde(rename = "User", deserialize_with = "null_default")]
     user: String,
 }
 
@@ -702,16 +707,11 @@ async fn containers_exec_create(
     Path(id): Path<String>,
     Json(body): Json<ExecCreateBody>,
 ) -> DockerResult<impl IntoResponse> {
-    let _ = (
-        body.attach_stdin,
-        body.attach_stdout,
-        body.attach_stderr,
-        body.tty,
-    );
     if body.cmd.is_empty() {
         return Err(DockerError::bad("Cmd is required"));
     }
     let vm = resolve_container(&st.manager, &id).await?;
+    lifecycle::running_container(&st.manager, vm.id).await?;
     let exec_id = Uuid::new_v4().as_simple().to_string();
     st.execs.lock().unwrap().insert(
         exec_id.clone(),
@@ -729,6 +729,8 @@ async fn containers_exec_create(
             } else {
                 Some(body.user)
             },
+            running: false,
+            exit_code: None,
         },
     );
     Ok((StatusCode::CREATED, Json(json!({ "Id": exec_id }))))
@@ -737,47 +739,10 @@ async fn containers_exec_create(
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ExecStartBody {
-    #[serde(rename = "Detach")]
+    #[serde(rename = "Detach", deserialize_with = "null_default")]
     detach: bool,
-    #[serde(rename = "Tty")]
+    #[serde(rename = "Tty", deserialize_with = "null_default")]
     tty: bool,
-}
-
-async fn exec_start(
-    State(st): State<DockerState>,
-    Path(id): Path<String>,
-    Json(body): Json<ExecStartBody>,
-) -> DockerResult<Response> {
-    let session = st
-        .execs
-        .lock()
-        .unwrap()
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| DockerError::not_found(format!("No such exec instance: {id}")))?;
-    if body.detach {
-        let st2 = st.clone();
-        let session2 = session.clone();
-        tokio::spawn(async move {
-            let _ = run_exec(&st2.manager, &session2).await;
-        });
-        return Ok(StatusCode::OK.into_response());
-    }
-    let (stdout, stderr, _code) = run_exec(&st.manager, &session).await?;
-    let mut bytes = Vec::new();
-    if body.tty {
-        bytes.extend_from_slice(stdout.as_bytes());
-        bytes.extend_from_slice(stderr.as_bytes());
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/vnd.docker.raw-stream")
-            .body(Body::from(bytes))
-            .unwrap())
-    } else {
-        bytes.extend(mux_frame(1, stdout.as_bytes()));
-        bytes.extend(mux_frame(2, stderr.as_bytes()));
-        Ok(raw_stream_response(bytes))
-    }
 }
 
 async fn exec_inspect(
@@ -793,8 +758,8 @@ async fn exec_inspect(
         .ok_or_else(|| DockerError::not_found(format!("No such exec instance: {id}")))?;
     Ok(Json(json!({
         "ID": id,
-        "Running": false,
-        "ExitCode": 0,
+        "Running": session.running,
+        "ExitCode": session.exit_code.unwrap_or(0),
         "ProcessConfig": {
             "entrypoint": session.cmd.first().cloned().unwrap_or_default(),
             "arguments": session.cmd.get(1..).unwrap_or(&[]),
@@ -810,34 +775,21 @@ async fn exec_inspect(
 }
 
 #[derive(Deserialize)]
-struct DeleteQuery {
-    #[serde(default)]
-    force: bool,
-    #[serde(default)]
-    v: bool,
+struct ImageListQuery {
+    filters: Option<String>,
+    /// The reference filter of API versions before 1.41.
+    filter: Option<String>,
 }
 
-async fn containers_delete(
+async fn images_list(
     State(st): State<DockerState>,
-    Path(id): Path<String>,
-    Query(q): Query<DeleteQuery>,
-) -> DockerResult<StatusCode> {
-    let _ = q.v;
-    let vm = resolve_container(&st.manager, &id).await?;
-    if vm.status == VmStatus::Running && !q.force {
-        return Err(DockerError::new(
-            StatusCode::CONFLICT,
-            "cannot remove a running container; use force=true or stop first",
+    Query(q): Query<ImageListQuery>,
+) -> DockerResult<Json<Value>> {
+    if q.filter.is_some() {
+        return Err(DockerError::bad(
+            "the `filter` parameter is not supported; use --filter reference=NAME",
         ));
     }
-    if vm.status == VmStatus::Running {
-        let _ = st.manager.stop(vm.id).await;
-    }
-    st.manager.delete(vm.id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn images_list(State(st): State<DockerState>) -> DockerResult<Json<Value>> {
     let entries = st.manager.oci_list()?;
     let mut items: Vec<Value> = entries.iter().map(image_summary).collect();
     // Images built through this socket (macOS images in FluxVM's store), so `docker images` shows what `docker build` made.
@@ -848,7 +800,10 @@ async fn images_list(State(st): State<DockerState>) -> DockerResult<Json<Value>>
             "Labels": {"fluxvm.image": "macos"}, "Containers": -1
         }));
     }
-    Ok(Json(Value::Array(items)))
+    Ok(Json(Value::Array(filters::filter_images(
+        items,
+        q.filters.as_deref(),
+    )?)))
 }
 
 #[derive(Deserialize)]
@@ -894,16 +849,64 @@ async fn images_create(
         .unwrap())
 }
 
+#[derive(Deserialize)]
+struct ImageDeleteQuery {
+    #[serde(default, deserialize_with = "docker_bool")]
+    force: bool,
+    platforms: Option<String>,
+}
+
 async fn images_delete(
     State(st): State<DockerState>,
     Path(name): Path<String>,
+    Query(q): Query<ImageDeleteQuery>,
 ) -> DockerResult<Json<Value>> {
+    if q.platforms.is_some() {
+        return Err(DockerError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "the built-in engine cannot remove single platforms of an image; remove it without --platform",
+        ));
+    }
     let name = urlencoding_decode(&name);
+    if !q.force {
+        check_unforced_removal(&st.manager, &name).await?;
+    }
     let removed = st.manager.oci_remove(&name)?;
     Ok(Json(json!([
         { "Untagged": removed.references.first().cloned().unwrap_or_default() },
         { "Deleted": removed.manifest_digest }
     ])))
+}
+
+/// Without `-f`, refuse what Docker refuses, and what here would remove more than was named: a removal drops the whole
+/// image with every name it has.
+async fn check_unforced_removal(m: &VmManager, name: &str) -> DockerResult<()> {
+    let image = fluxvm_scheduler::oci_images::find(&m.cfg, name)?;
+    let conflict = |why: String| {
+        Err(DockerError::new(
+            StatusCode::CONFLICT,
+            format!("conflict: unable to delete {name} (must be forced) - {why}"),
+        ))
+    };
+    let by_reference = image.references.iter().any(|r| r == name);
+    let others: Vec<&str> = image
+        .references
+        .iter()
+        .map(String::as_str)
+        .filter(|r| *r != name)
+        .collect();
+    if others.len() > usize::from(!by_reference) {
+        return conflict(format!(
+            "the image also has the names {}, which would be removed with it",
+            others.join(", ")
+        ));
+    }
+    if let Some(vm) = oci_containers(m).await.into_iter().find(|v| {
+        v.labels.get(fluxvm_scheduler::oci_images::OCI_LABEL) == Some(&image.manifest_digest)
+    }) {
+        return conflict(format!("container {} is using this image", vm.name));
+    }
+    Ok(())
 }
 
 fn urlencoding_decode(s: &str) -> String {
@@ -917,6 +920,16 @@ pub(crate) async fn oci_containers(m: &VmManager) -> Vec<VmRecord> {
         .into_iter()
         .filter(|v| v.labels.contains_key(OCI_IMAGE_LABEL))
         .collect()
+}
+
+/// Every container with what its process is doing now.
+async fn containers_with_state(m: &VmManager) -> Vec<(VmRecord, ProcessState)> {
+    let mut out = Vec::new();
+    for vm in oci_containers(m).await {
+        let state = process_state(&vm).await;
+        out.push((vm, state));
+    }
+    out
 }
 
 pub(crate) async fn resolve_container(m: &VmManager, id_or_name: &str) -> DockerResult<VmRecord> {
@@ -955,13 +968,27 @@ pub(crate) fn docker_id(id: Uuid) -> String {
     id.as_simple().to_string()
 }
 
-fn container_summary(vm: &VmRecord) -> Value {
+/// Docker's word for a state, and its `Status` column.
+fn state_words(state: ProcessState) -> (&'static str, String) {
+    match state {
+        ProcessState::Created => ("created", "Created".into()),
+        ProcessState::Running => ("running", "Up".into()),
+        ProcessState::Paused => ("paused", "Up (paused)".into()),
+        ProcessState::Exited(code) => ("exited", format!("Exited ({code})")),
+    }
+}
+
+fn container_summary(
+    vm: &VmRecord,
+    process: ProcessState,
+    labels: &BTreeMap<String, String>,
+) -> Value {
     let image = vm
         .labels
         .get(OCI_IMAGE_LABEL)
         .cloned()
         .unwrap_or_else(|| "unknown".into());
-    let (state, _) = docker_state(&vm.status);
+    let (state, status) = state_words(process);
     let ports = Value::Array(vec![]);
     json!({
         "Id": docker_id(vm.id),
@@ -971,22 +998,31 @@ fn container_summary(vm: &VmRecord) -> Value {
         "Command": "",
         "Created": vm.created_at.timestamp(),
         "Ports": ports,
-        "Labels": vm.labels,
+        "Labels": labels,
         "State": state,
-        "Status": docker_status_text(vm),
+        "Status": status,
         "HostConfig": { "NetworkMode": "default" },
         "NetworkSettings": { "Networks": {} },
         "Mounts": []
     })
 }
 
-fn container_inspect(vm: &VmRecord) -> Value {
+fn container_inspect(
+    vm: &VmRecord,
+    process: ProcessState,
+    labels: &BTreeMap<String, String>,
+) -> Value {
     let image = vm
         .labels
         .get(OCI_IMAGE_LABEL)
         .cloned()
         .unwrap_or_else(|| "unknown".into());
-    let (state, running) = docker_state(&vm.status);
+    let (state, _) = state_words(process);
+    let running = lifecycle::is_up(process);
+    let exit_code = match process {
+        ProcessState::Exited(code) => code,
+        _ => 0,
+    };
     json!({
         "Id": docker_id(vm.id),
         "Created": vm.created_at.to_rfc3339(),
@@ -995,12 +1031,12 @@ fn container_inspect(vm: &VmRecord) -> Value {
         "State": {
             "Status": state,
             "Running": running,
-            "Paused": vm.status == VmStatus::Paused,
+            "Paused": process == ProcessState::Paused,
             "Restarting": false,
             "OOMKilled": false,
             "Dead": false,
-            "Pid": vm.pid.unwrap_or(0),
-            "ExitCode": 0,
+            "Pid": if running { vm.pid.unwrap_or(0) } else { 0 },
+            "ExitCode": exit_code,
             "Error": vm.error.clone().unwrap_or_default(),
             "StartedAt": vm.created_at.to_rfc3339(),
             "FinishedAt": "0001-01-01T00:00:00Z"
@@ -1022,7 +1058,7 @@ fn container_inspect(vm: &VmRecord) -> Value {
             "NetworkMode": "default",
             "PortBindings": {},
             "RestartPolicy": { "Name": "no", "MaximumRetryCount": 0 },
-            "AutoRemove": false,
+            "AutoRemove": vm.labels.contains_key(lifecycle::AUTO_REMOVE_LABEL),
             "Memory": vm.request.memory_mib.saturating_mul(1024 * 1024),
             "NanoCpus": (vm.request.vcpus as i64) * 1_000_000_000
         },
@@ -1036,7 +1072,7 @@ fn container_inspect(vm: &VmRecord) -> Value {
             "AttachStdout": true,
             "AttachStderr": true,
             "ExposedPorts": {},
-            "Tty": false,
+            "Tty": vm.labels.contains_key(lifecycle::TTY_LABEL),
             "OpenStdin": false,
             "StdinOnce": false,
             "Env": [],
@@ -1045,7 +1081,7 @@ fn container_inspect(vm: &VmRecord) -> Value {
             "Volumes": null,
             "WorkingDir": "",
             "Entrypoint": null,
-            "Labels": vm.labels,
+            "Labels": labels,
         },
         "NetworkSettings": {
             "Bridge": "",
@@ -1173,14 +1209,6 @@ fn exposed_ports_to_u16(exposed: &BTreeMap<String, Value>) -> DockerResult<Vec<u
     Ok(out)
 }
 
-fn parse_tail(tail: &str) -> usize {
-    if tail.eq_ignore_ascii_case("all") {
-        10_000
-    } else {
-        tail.parse().unwrap_or(200).clamp(1, 10_000)
-    }
-}
-
 fn mux_frame(stream_type: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + payload.len());
     out.push(stream_type);
@@ -1198,91 +1226,18 @@ fn mux_stdout(payload: &[u8]) -> Vec<u8> {
     mux_frame(1, payload)
 }
 
-fn raw_stream_response(body: Vec<u8>) -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.docker.raw-stream")
-        .body(Body::from(body))
-        .unwrap()
-}
-
-async fn stream_console(
-    m: &Arc<VmManager>,
-    id: Uuid,
-    log_path: &FsPath,
-    _tail_lines: usize,
-    follow: bool,
-) -> Response {
-    let path = log_path.to_path_buf();
-    let manager = m.clone();
-    let stream = async_stream::stream! {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let mut offset = 0u64;
-        loop {
-            if let Ok(mut f) = tokio::fs::File::open(&path).await
-                && f.seek(std::io::SeekFrom::Start(offset)).await.is_ok()
-            {
-                let mut buf = Vec::new();
-                if f.read_to_end(&mut buf).await.is_ok() && !buf.is_empty() {
-                    offset += buf.len() as u64;
-                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(mux_stdout(&buf)));
-                }
-            }
-            if let Ok(logs) = manager.sandbox_logs(id, 1).await
-                && logs.exit_code.is_some()
-            {
-                break;
-            }
-            if !follow {
-                break;
-            }
-            let vm = manager.get(id).await;
-            if let Ok(vm) = vm {
-                if matches!(vm.status, VmStatus::Stopped | VmStatus::Failed) {
-                    break;
-                }
-            } else {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.docker.raw-stream")
-        .body(Body::from_stream(stream))
-        .unwrap()
-}
-
-async fn wait_exit_code(m: &VmManager, id: Uuid) -> DockerResult<i32> {
-    for _ in 0..6000 {
-        let logs = m.sandbox_logs(id, 1).await?;
-        if let Some(code) = logs.exit_code {
-            return Ok(code);
-        }
-        let vm = m.get(id).await?;
-        if matches!(vm.status, VmStatus::Stopped | VmStatus::Failed) {
-            return Ok(if vm.status == VmStatus::Failed { 1 } else { 0 });
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Err(DockerError::new(
-        StatusCode::REQUEST_TIMEOUT,
-        "timed out waiting for container exit",
-    ))
-}
-
 async fn run_exec(
     m: &Arc<VmManager>,
     session: &ExecSession,
 ) -> DockerResult<(String, String, i32)> {
     m.ensure_running_for_request(session.container).await?;
+    let user = session.user.as_deref().map(exec_user).transpose()?;
     let process = ExecProcess {
         argv: session.cmd.clone(),
         env: session.env.clone(),
         clean_env: false,
         cwd: session.working_dir.clone(),
-        user: None,
+        user,
     };
     let resp = m
         .exec_process(session.container, process, Some(120))
@@ -1294,14 +1249,44 @@ async fn run_exec(
             stderr,
             ..
         } => Ok((stdout, stderr, exit_code)),
+        AgentResponse::Error { message } => Err(DockerError::bad(message)),
         other => Err(DockerError::bad(format!(
             "unexpected agent response: {other:?}"
         ))),
     }
 }
 
+/// `docker exec -u`: `root` or a numeric `uid[:gid]`. A name would need the image's `/etc/passwd`; running the
+/// command as another user than asked is worse than refusing.
+fn exec_user(user: &str) -> DockerResult<ExecRunAs> {
+    let (uid, gid) = match user.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (user, None),
+    };
+    let id = |s: &str| {
+        if s == "root" {
+            Some(0)
+        } else {
+            s.parse::<u32>().ok()
+        }
+    };
+    let refuse = || {
+        DockerError::bad(format!(
+            "exec -u {user:?}: the built-in engine takes root or a numeric uid[:gid]"
+        ))
+    };
+    let uid = id(uid).ok_or_else(refuse)?;
+    let gid = match gid {
+        Some(g) => id(g).ok_or_else(refuse)?,
+        None => uid,
+    };
+    Ok(ExecRunAs { uid, gid })
+}
+
 mod build;
 mod extra;
+mod filters;
+mod lifecycle;
 
 /// A container record for tests outside this module (e.g. `docker_adapter`).
 #[cfg(test)]

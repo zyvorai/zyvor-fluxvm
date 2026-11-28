@@ -264,6 +264,33 @@ impl VmManager {
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
+        self.create_sandbox_with(req, token_tenant, created_by_token, true)
+            .await
+    }
+
+    /// Create a container sandbox (`oci`) without starting it, as `docker create` does: everything is provisioned, the
+    /// record is `Stopped` and carries [`crate::oci_sandbox::CREATED_LABEL`] until [`VmManager::start_sandbox`] (or
+    /// `start`) runs it. Other sandbox kinds are refused.
+    pub async fn create_sandbox_unstarted(
+        self: &std::sync::Arc<Self>,
+        req: SandboxCreateRequest,
+        token_tenant: Option<&str>,
+        created_by_token: Option<&str>,
+    ) -> Result<VmRecord> {
+        if req.oci.is_none() || req.procbox.is_some() {
+            bail!("only a container sandbox (`oci`) can be created without starting it");
+        }
+        self.create_sandbox_with(req, token_tenant, created_by_token, false)
+            .await
+    }
+
+    async fn create_sandbox_with(
+        self: &std::sync::Arc<Self>,
+        req: SandboxCreateRequest,
+        token_tenant: Option<&str>,
+        created_by_token: Option<&str>,
+        launch: bool,
+    ) -> Result<VmRecord> {
         let gpus = usize::from(req.gpus.unwrap_or(0));
         if gpus > fluxvm_core::gpu::MAX_SANDBOX_GPUS {
             bail!(
@@ -286,7 +313,7 @@ impl VmManager {
         if let Some(decision) = self.decide_runtime(&req)? {
             if decision.runtime == fluxvm_ctr::runtime::Runtime::Container {
                 return self
-                    .create_container_sandbox(req, decision, token_tenant, created_by_token)
+                    .create_container_sandbox(req, decision, token_tenant, created_by_token, launch)
                     .await;
             }
         }
@@ -298,7 +325,7 @@ impl VmManager {
         }
         if req.oci.is_some() {
             return self
-                .create_oci_sandbox(req, token_tenant, created_by_token)
+                .create_oci_sandbox(req, token_tenant, created_by_token, launch)
                 .await;
         }
         // Decide first, so a `required` request on a host that cannot honor it

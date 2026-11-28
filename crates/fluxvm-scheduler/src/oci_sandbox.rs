@@ -498,6 +498,111 @@ pub(crate) fn build_create(
     Ok(create)
 }
 
+/// Set on a container sandbox that was created but never started (`docker create`); removed by the first start.
+pub const CREATED_LABEL: &str = "fluxvm.sandbox.created";
+
+/// How much of the console is searched for init's exit marker, which it writes last (before the kernel powers off).
+const EXIT_SEARCH_BYTES: u64 = 64 * 1024;
+
+/// What the container of a sandbox is doing, which is not the same as what its VM record says: a process exits while
+/// its VM stays up (`exit_policy: keep`), and a native container has no VM at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    /// Created and never started.
+    Created,
+    Running,
+    Paused,
+    /// The exit code; 137 when the host stopped it before it reported one.
+    Exited(i32),
+}
+
+/// The exit code reported by a host that stopped a container before it reported its own (128 + SIGKILL).
+pub const KILLED_EXIT_CODE: i32 = 137;
+
+/// Read the live state of a sandbox's process. A record that is neither kind of container follows its VM status.
+pub async fn process_state(vm: &VmRecord) -> ProcessState {
+    if vm.labels.contains_key(CREATED_LABEL) && vm.status != VmStatus::Running {
+        return ProcessState::Created;
+    }
+    if crate::container_sandbox::is_container(vm) {
+        let st = crate::container_sandbox::state_of(&vm.workspace);
+        return if st.running {
+            ProcessState::Running
+        } else {
+            ProcessState::Exited(st.exit_code.unwrap_or(KILLED_EXIT_CODE))
+        };
+    }
+    if !is_oci(vm) {
+        return match vm.status {
+            VmStatus::Creating => ProcessState::Created,
+            VmStatus::Running => ProcessState::Running,
+            VmStatus::Paused => ProcessState::Paused,
+            VmStatus::Stopped => ProcessState::Exited(0),
+            VmStatus::Failed => ProcessState::Exited(1),
+        };
+    }
+    let exit = init::exit_code_from_log(&console_end(&vm.log_path).await);
+    match vm.status {
+        VmStatus::Creating => ProcessState::Created,
+        VmStatus::Paused => ProcessState::Paused,
+        VmStatus::Running => {
+            if let Some(code) = exit {
+                return ProcessState::Exited(code);
+            }
+            match vm.pid {
+                Some(pid) if !fluxvm_core::process::process_alive(pid).await => {
+                    ProcessState::Exited(KILLED_EXIT_CODE)
+                }
+                _ => ProcessState::Running,
+            }
+        }
+        VmStatus::Stopped => ProcessState::Exited(exit.unwrap_or(KILLED_EXIT_CODE)),
+        VmStatus::Failed => ProcessState::Exited(exit.unwrap_or(1)),
+    }
+}
+
+/// The last [`EXIT_SEARCH_BYTES`] of the console (empty if there is none yet).
+async fn console_end(path: &Path) -> String {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let read = async {
+        let mut f = tokio::fs::File::open(path).await?;
+        let len = f.metadata().await?.len();
+        f.seek(std::io::SeekFrom::Start(
+            len.saturating_sub(EXIT_SEARCH_BYTES),
+        ))
+        .await?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).await?;
+        // The runner may just have rotated the log: the marker is then in the older file.
+        if len < EXIT_SEARCH_BYTES {
+            let mut older = path.as_os_str().to_owned();
+            older.push(".1");
+            if let Ok(mut head) = tokio::fs::read(older).await {
+                let keep = head.len().saturating_sub(EXIT_SEARCH_BYTES as usize);
+                head.drain(..keep);
+                head.extend_from_slice(&buf);
+                buf = head;
+            }
+        }
+        std::io::Result::Ok(buf)
+    };
+    String::from_utf8_lossy(&read.await.unwrap_or_default()).into_owned()
+}
+
+/// Remove the console and its rotated file before a new boot.
+pub(crate) async fn clear_console(path: &Path) -> Result<()> {
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    for p in [Path::new(&rotated), path] {
+        match tokio::fs::remove_file(p).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", p.display())),
+        }
+    }
+    Ok(())
+}
+
 /// `GET /v1/sandboxes/{id}/logs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxLogs {
@@ -545,6 +650,7 @@ impl VmManager {
         req: SandboxCreateRequest,
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
+        launch: bool,
     ) -> Result<VmRecord> {
         validate(&req)?;
         let oci = req.oci.clone().context("not an OCI sandbox request")?;
@@ -612,23 +718,34 @@ impl VmManager {
         self.enforce_token_quotas(created_by_token, &create).await?;
 
         let started = Instant::now();
-        let warm = self.claim_oci_warm(&create, &rootfs).await;
+        // A warm slot is already booted and would run the process at once, so it only serves a create that starts.
+        let warm = if launch {
+            self.claim_oci_warm(&create, &rootfs).await
+        } else {
+            None
+        };
         let claimed = warm.is_some();
         let record = match warm {
             Some(vm) => vm,
-            None => self.create(create).await?,
+            None => self.create_with(create, launch).await?,
         };
         let id = record.id;
         let labelled = async {
             self.label_vz_sandbox(id).await?;
-            let labels = BTreeMap::from([
+            let mut labels = BTreeMap::from([
                 (
                     oci_images::OCI_LABEL.to_owned(),
                     Some(image.manifest_digest.clone()),
                 ),
                 (OCI_IMAGE_LABEL.to_owned(), Some(image.reference.clone())),
             ]);
+            if !launch {
+                labels.insert(CREATED_LABEL.to_owned(), Some("true".to_owned()));
+            }
             self.patch(id, VmPatch { name: None, labels }).await?;
+            if !launch {
+                return Ok(());
+            }
             self.wait_oci_ready(id, READY_TIMEOUT).await
         }
         .await;
@@ -638,7 +755,7 @@ impl VmManager {
         }
         if claimed {
             crate::oci_pool::record_claim_time(started.elapsed().as_millis() as u64);
-        } else {
+        } else if launch {
             self.spawn_oci_pool_fill();
         }
         let record = self.get(id).await?;
@@ -665,6 +782,33 @@ impl VmManager {
             health: supervise::health_from_log(&log),
             log: oci_images::tail_text(&log, lines.max(1)),
         })
+    }
+
+    /// Start (or start again) a container sandbox and return once it is ready, as `docker start` does: a container
+    /// sandbox on `vz` answers on its guest agent (or has already exited), a native container has its process running.
+    /// One that is already running is left alone.
+    pub async fn start_sandbox(self: &std::sync::Arc<Self>, id: Uuid) -> Result<VmRecord> {
+        let vm = self.get(id).await?;
+        if matches!(
+            process_state(&vm).await,
+            ProcessState::Running | ProcessState::Paused
+        ) {
+            return Ok(vm);
+        }
+        // The process has exited but the record still says Running (its VM stays up, or nothing has noticed yet).
+        if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            self.kill(id)
+                .await
+                .context("cleaning up the previous run")?;
+        }
+        let started = self.start(id).await?;
+        if is_oci(&started)
+            && let Err(e) = self.wait_oci_ready(id, READY_TIMEOUT).await
+        {
+            let _ = self.kill(id).await;
+            return Err(e.context("starting the container"));
+        }
+        self.get(id).await
     }
 
     /// Ready when the agent answers a ping, or when the process has already run to completion (`exit_policy: poweroff`
@@ -770,6 +914,95 @@ mod tests {
             })))
             .is_ok(),
             "volumes are persistent shares for container sandboxes"
+        );
+    }
+
+    /// `docker create` on a Mac: the VM is provisioned but not launched. Nothing boots here.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_unlaunched_container_vm_is_stopped_with_its_disk_and_has_run_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, vec![0u8; 1 << 20]).unwrap();
+            p
+        };
+        let boot = OciBoot {
+            kernel: file("oci-kernel"),
+            initrd: file("oci-initrd"),
+            cmdline: "console=hvc0".into(),
+        };
+        let m = VmManager::new(fluxvm_core::config::Config {
+            state_dir: dir.path().join("state"),
+            run_dir: dir.path().join("run"),
+            ..Default::default()
+        })
+        .unwrap();
+        let create = build_create(
+            "held",
+            &file("rootfs.ext4"),
+            &boot,
+            test_process(),
+            &spec(serde_json::json!({"image": "alpine", "exit_policy": "poweroff"})),
+            (1, 512),
+            false,
+            &[],
+            vec![],
+            (vec![], vec![]),
+        )
+        .unwrap();
+        let vm = m.create_with(create, false).await.unwrap();
+        assert_eq!(vm.status, VmStatus::Stopped);
+        assert_eq!(vm.pid, None);
+        assert!(vm.disk.exists() && is_oci(&vm));
+        assert!(!vm.log_path.exists(), "nothing has written a console");
+        // Without the label the record reads as a stopped container; with it, as one never started.
+        assert_eq!(
+            process_state(&vm).await,
+            ProcessState::Exited(KILLED_EXIT_CODE)
+        );
+        let labels = BTreeMap::from([(CREATED_LABEL.to_owned(), Some("true".to_owned()))]);
+        let vm = m
+            .patch(vm.id, VmPatch { name: None, labels })
+            .await
+            .unwrap();
+        assert_eq!(process_state(&vm).await, ProcessState::Created);
+        m.delete(vm.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_exit_code_is_read_from_the_console_of_a_running_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let boot = test_boot();
+        let create = build_create(
+            "state",
+            Path::new("/c/rootfs.ext4"),
+            &boot,
+            test_process(),
+            &spec(serde_json::json!({"image": "alpine"})),
+            (1, 512),
+            false,
+            &[],
+            vec![],
+            (vec![], vec![]),
+        )
+        .unwrap();
+        let mut vm = crate::procbox_sandbox::make_record(Uuid::new_v4(), dir.path(), create, None);
+        vm.backend = fluxvm_core::model::BackendKind::Vz;
+        assert_eq!(process_state(&vm).await, ProcessState::Running);
+        std::fs::write(&vm.log_path, "booting\r\noutFLUXVM-EXIT 9\r\n").unwrap();
+        assert_eq!(process_state(&vm).await, ProcessState::Exited(9));
+        // The marker may be in the rotated file.
+        std::fs::rename(&vm.log_path, dir.path().join("console.log.1")).unwrap();
+        std::fs::write(&vm.log_path, "powering off\r\n").unwrap();
+        assert_eq!(process_state(&vm).await, ProcessState::Exited(9));
+        // A new boot starts from an empty console.
+        clear_console(&vm.log_path).await.unwrap();
+        assert_eq!(process_state(&vm).await, ProcessState::Running);
+        vm.status = VmStatus::Stopped;
+        assert_eq!(
+            process_state(&vm).await,
+            ProcessState::Exited(KILLED_EXIT_CODE)
         );
     }
 

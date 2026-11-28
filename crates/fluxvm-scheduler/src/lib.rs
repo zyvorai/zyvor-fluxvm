@@ -2687,7 +2687,17 @@ impl VmManager {
         Ok(())
     }
 
-    pub async fn create(self: &Arc<Self>, mut req: CreateVmRequest) -> Result<VmRecord> {
+    pub async fn create(self: &Arc<Self>, req: CreateVmRequest) -> Result<VmRecord> {
+        self.create_with(req, true).await
+    }
+
+    /// [`Self::create`], or with `launch = false` everything up to the launch: the record is left `Stopped` and
+    /// [`Self::start`] boots it for the first time (`vz` only: the caller is the container sandbox path).
+    pub(crate) async fn create_with(
+        self: &Arc<Self>,
+        mut req: CreateVmRequest,
+        launch: bool,
+    ) -> Result<VmRecord> {
         let started = std::time::Instant::now();
         // Resolve BackendKind::Auto before anything else — everything below
         // (the disk filename, the persisted record, the launch dispatch)
@@ -3256,6 +3266,15 @@ impl VmManager {
                 None => None,
             };
             record.seed_disk = seed.clone();
+            if !launch {
+                if req.backend != BackendKind::Vz {
+                    bail!("creating a VM without launching it needs the vz backend");
+                }
+                record.status = VmStatus::Stopped;
+                record.achieved_security_profile =
+                    fluxvm_core::security::achieved_security_profile(requested_profile, &caps);
+                return Ok(());
+            }
 
             // QEMU talks straight to the guest_cid over a real kernel vsock
             // device; Cloud Hypervisor/Firecracker instead proxy vsock over
@@ -4306,6 +4325,13 @@ impl VmManager {
     async fn start_impl(self: &Arc<Self>, id: Uuid, loadvm_tag: Option<&str>) -> Result<VmRecord> {
         let started = std::time::Instant::now();
         let mut vm = self.get(id).await?;
+        // A native container has no VMM to launch: its unit (or launcher) is started again.
+        if let Some(m) = container_sandbox::load(&vm)? {
+            if loadvm_tag.is_some() {
+                bail!("a native container has no snapshots to start from");
+            }
+            return self.container_start(vm, &m).await;
+        }
         if vm.status == VmStatus::Running {
             return Ok(vm);
         }
@@ -4406,6 +4432,10 @@ impl VmManager {
                 }
             }
 
+            // Init's exit marker is looked for in the console: a marker from the previous boot must not survive.
+            if oci_sandbox::is_oci(&vm) {
+                oci_sandbox::clear_console(&vm.log_path).await?;
+            }
             let ctx = LaunchContext {
                 id,
                 workspace: vm.workspace.clone(),
@@ -4455,6 +4485,7 @@ impl VmManager {
             }
             vm.status = VmStatus::Running;
             vm.error = None;
+            vm.labels.remove(oci_sandbox::CREATED_LABEL);
             live_migration::clear_hotplug_labels(&mut vm.labels);
             if resume_state.is_none() {
                 vm.labels.remove(live_migration::MACHINE_TYPE_LABEL);
@@ -4531,6 +4562,10 @@ impl VmManager {
     /// `graceful` asks the guest to shut down before the VMM is killed.
     pub(crate) async fn stop_with(&self, id: Uuid, graceful: bool) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
+        // A native container has no `pid` on its record: without this, stop only changed the status.
+        if let Some(m) = container_sandbox::load(&vm)? {
+            return self.container_stop(vm, &m, !graceful).await;
+        }
         if let Some(pid) = vm.pid {
             if process::process_alive(pid).await {
                 // Ask the VMM to shut the guest down cleanly first; only
@@ -5434,6 +5469,9 @@ impl VmManager {
     /// a clean shutdown.
     pub async fn kill(&self, id: Uuid) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
+        if let Some(m) = container_sandbox::load(&vm)? {
+            return self.container_stop(vm, &m, true).await;
+        }
         if let Some(pid) = vm.pid {
             if process::process_alive(pid).await {
                 process::terminate_pid(pid).await?;

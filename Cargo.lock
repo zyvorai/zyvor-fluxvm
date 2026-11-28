@@ -2310,6 +2310,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "rcgen",
+ "regex",
  "reqwest 0.13.5",
  "rustls",
  "rustls-pemfile",

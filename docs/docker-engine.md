@@ -28,24 +28,72 @@ Every path also works with a version prefix (`/v1.44/containers/json`; the engin
 | Endpoint | `docker` command | Notes |
 |---|---|---|
 | `GET /_ping`, `/version`, `/info` | `docker version`, `docker info` | |
-| `GET /containers/json` | `docker ps` | newest first; `-a` includes stopped containers, `--latest` and `--last N` select recent containers across all states |
-| `POST /containers/create` | `docker create`, `docker run` | no bind mounts |
+| `GET /containers/json` | `docker ps` | newest first; `-a` includes stopped containers, `--latest` and `--last N` select recent containers across all states; `--filter` as [below](#filters) |
+| `POST /containers/create` | `docker create`, `docker run` | nothing runs until start; no bind mounts (`-v`, `--mount`); a name already in use answers 409 |
 | `GET /containers/{id}/json` | `docker inspect` | |
-| `POST /containers/{id}/start`, `stop`, `wait` | `docker start`, `stop`, `wait` | |
+| `POST /containers/{id}/start`, `stop`, `wait` | `docker start`, `stop`, `wait` | `wait` takes `condition` (`not-running`, `next-exit`, `removed`). `stop -t 0` kills at once; other `-t` values are ignored (10 s grace) |
 | `POST /containers/{id}/restart` | `docker restart` | stop, then start; `t` is ignored |
 | `POST /containers/{id}/kill` | `docker kill [-s SIG]` | only `KILL`/`9` (default, at once) and `TERM`/`15` (clean guest shutdown); other signals answer 501, a name that is no signal 400; a stopped container answers 409 |
 | `POST /containers/{id}/pause`, `unpause` | `docker pause`, `unpause` | if the host's VM backend cannot pause, 501 says so |
 | `GET /containers/{id}/top` | `docker top` | runs `ps` in the guest; `ps_args` is ignored; an image without `ps` answers 501 |
 | `GET /containers/{id}/stats` | `docker stats` | `stream=false` gives one sample, otherwise one per second. CPU is the VM's lifetime average; no per-container network counters. Hosts that cannot read VM metrics answer 501 |
 | `POST /containers/{id}/rename?name=` | `docker rename` | a name already in use answers 409 |
-| `GET /containers/{id}/logs`, `POST /containers/{id}/attach` | `docker logs`, `attach` | console is one combined stream |
-| `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` | `docker exec` | no stdin |
-| `DELETE /containers/{id}` | `docker rm [-f]` | |
+| `GET /containers/{id}/logs`, `POST /containers/{id}/attach` | `docker logs [-f] [--tail]`, `docker run`, `attach` | console is one combined stream, delivered as stdout; no `--since` or timestamps; no stdin |
+| `POST /containers/{id}/exec`, `POST /exec/{id}/start`, `GET /exec/{id}/json` | `docker exec` | no stdin; output arrives when the command ends (at most 120 s); `-u` takes `root` or `uid[:gid]` (in a VM container); a native container refuses `-e`, `-w` and `-u` |
+| `DELETE /containers/{id}` | `docker rm [-f]`, `docker run --rm` | `--rm` is removed by the daemon once the process has exited; `-l` (links) is refused |
 | `GET /events` | `docker events` | container `create`, `start`, `die`, `stop`, `pause`, `unpause`, `restart`, `destroy` from the daemon's event log; `since`/`until` in Unix seconds; filter by `event`, `container` (name or ID prefix), `type` or `scope`. Repeated values within a filter are alternatives; different keys must all match |
-| `GET /images/json`, `POST /images/create`, `DELETE /images/{name}` | `docker images`, `pull`, `rmi` | |
+| `GET /images/json`, `POST /images/create`, `DELETE /images/{name}` | `docker images`, `pull`, `rmi` | `rmi` removes the whole cached image, so without `-f` an image with another name, or in use by a container, answers 409; `--platform` is refused |
 | `GET /networks`, `GET /networks/{id}` | `docker network ls`, `inspect` | one network, `fluxvm-nat` (every container is a microVM behind user-mode NAT; publish ports with `-p`). Create, connect and remove answer 501 |
 | `GET /volumes`, `GET /volumes/{name}` | `docker volume ls`, `inspect` | always empty: there are no named volumes (a container's disk lives and dies with it). Create answers 501 |
 | `POST /build` | `docker build` | macOS image builds via the Mac builder (details below); Linux Dockerfile builds require the managed engine |
+
+### Filters
+
+A filter is honoured with Docker's meaning or the request fails; it is never ignored, so
+`docker rm -f $(docker ps -aq --filter name=x)` removes only what matches. Values of one key are alternatives and different
+keys must all match (every `label` value must match). Unknown or malformed filters answer 400, Docker filters that are not
+implemented answer 501.
+
+| List | Honoured | Refused (501) |
+|---|---|---|
+| `docker ps` | `ancestor`, `before`, `exited`, `id`, `label`, `name`, `since`, `status` | `expose`, `health`, `is-task`, `isolation`, `network`, `publish`, `volume` |
+| `docker images` | `before`, `dangling`, `reference` (also `docker images NAME`), `since` | `label`, `label!`, `until` |
+| `docker network ls` | `dangling`, `driver`, `id`, `label`, `name`, `scope`, `type` | |
+| `docker volume ls` (always empty) | `dangling`, `driver`, `label`, `name` | |
+| `docker events` | `container`, `event`, `scope`, `type` | `image`, `label`, `network`, `volume` and the swarm ones |
+
+- `name` is a regular expression matched anywhere in the name, as in Docker: `name=web` also matches `web-2`; use `^web$`.
+- `status` includes stopped containers without `-a`; `exited` does not.
+- `ancestor` has no image parentage: it matches containers of that image's digest, or, for an image that is not in the
+  cache (native containers), containers created from the same reference, even if the tag has moved since.
+- Container labels are those given with `docker run --label` and FluxVM's own; labels baked into an image are not included.
+- There is no `prune` (containers, images, networks, volumes, build cache): each answers 501.
+
+### How a container behaves
+
+- `attach`, `docker run` and `docker exec` upgrade the connection to a raw stream (`101 Switching Protocols`); `wait` sends its
+  response head at once and the exit code when there is one. The CLI needs both before it starts a container.
+- A container ends when its process does: a VM container powers off, and `docker ps -a` shows `Exited (N)`. A container the
+  host stopped before it reported a code shows 137.
+- `docker start` on an exited container runs it again. A VM container starts with an empty log; a native container's log grows.
+- Standard input is never delivered (`-i` reads nothing) and `-t` gives no real terminal. `docker kill` delivers only `KILL`
+  and `TERM`, so Ctrl-C on a foreground `docker run` does not reach the process.
+- The sandbox defaults still apply and differ from Docker's: the root filesystem is read-only (`/tmp` and `/run` are
+  writable), and an image without a `USER` runs as uid 65534 (a rootless native container runs as root in its user namespace).
+
+### On Linux
+
+The socket runs each container with the [native container runtime](linux-runtime.md); the one-VM-per-container path is macOS
+only. The Docker API has no way to state how much a workload is trusted, so the operator does, in the daemon's configuration:
+
+```toml
+[sandbox.container]
+default_trust = "dev"   # the default, "untrusted", asks for a VM, which Linux cannot run an image in yet
+```
+
+Without it `docker run` is refused. A native container has no published ports (`-p`), health checks or private networks, and
+`docker pause`, `stats` and supervised features that need a guest VM answer with an error. The daemon's host must allow the
+runtime (`fluxctl sandbox runtimes`; on Ubuntu a rootless daemon needs the AppArmor profile in `deploy/apparmor`).
 
 The built-in socket does not implement `POST /images/load` (`docker load`); that call answers 501. To get an image from OrbStack or Docker Desktop into FluxVM sandboxes, push it to a registry and `fluxctl oci pull` ([IMPORT-IMAGES.md](IMPORT-IMAGES.md)). `docker load` works only against the real engine started by `fluxctl docker up`.
 

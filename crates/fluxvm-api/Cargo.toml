@@ -59,6 +59,8 @@ tower-layer = "0.3"
 # `docker_build`: unpack the tar build context the docker CLI uploads.
 tar = "0.4"
 flate2 = "1"
+# `docker_engine::filters`: Docker's name filters are regular expressions.
+regex = "1"
 
 [dev-dependencies]
 rcgen = "0.14"
